@@ -49,9 +49,21 @@ class SerialTransport(Transport):
         return await self._reader.read(size)
 
     async def readline(self) -> bytes:
+        """Read a line; also handles modem SMS prompt (> ) which has no trailing newline."""
         if not self._reader:
             raise TransportError("Transport not open")
-        return await self._reader.readline()
+        buf = bytearray()
+        while True:
+            byte = await self._reader.read(1)
+            if not byte:
+                break
+            buf += byte
+            if byte == b"\n":
+                break
+            # SMS prompt from modem: "> " with no trailing newline
+            if len(buf) >= 2 and buf[-2:] == b"> ":
+                break
+        return bytes(buf)
 
     def in_waiting(self) -> int:
         return 0  # Not directly available via asyncio streams
