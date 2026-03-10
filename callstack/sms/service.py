@@ -149,6 +149,8 @@ class SMSService:
                 logger.debug("CMTI notification: storage=%s, index=%d", storage, index)
                 sms = await self.read_message(index)
                 if sms:
+                    # Delete from SIM storage to prevent +SMS FULL
+                    await self.delete_message(index)
                     sms.status = "unread"
                     await self._store.save(sms)
                     await self._bus.emit(
