@@ -125,8 +125,10 @@ async def test_receive_cmti(sms_service, transport, bus, store):
 
     bus.subscribe(IncomingSMSEvent, track)
 
-    # When the service gets a CMTI notification, it will call AT+CMGR to fetch
+    # When the service gets a CMTI notification, it will call AT+CMGR to fetch,
+    # then AT+CMGD to delete the message from SIM storage
     transport.feed('+CMGR: "REC UNREAD","+15559876","","24/12/25,14:30:00+04"', "Hello there!", "OK")
+    transport.feed("OK")  # Response for AT+CMGD (delete after read)
 
     # Simulate URC dispatch (now uses _RawSMSNotification)
     await bus.emit(_RawSMSNotification(raw='+CMTI: "SM",3'))

@@ -6,7 +6,7 @@ from contextlib import suppress
 from typing import Awaitable, Callable, Optional
 
 from callstack.config import ModemConfig
-from callstack.errors import TransportError
+from callstack.errors import TransportError, SIMPINRequired, SIMPUKRequired, SIMUnlockError
 from callstack.events.bus import EventBus
 from callstack.events.types import (
     CallState,
@@ -16,11 +16,13 @@ from callstack.events.types import (
 )
 from callstack.network import NetworkService
 from callstack.protocol.commands import ATCommand
+from callstack.protocol.parser import ATResponseParser
 from callstack.protocol.executor import ATCommandExecutor
 from callstack.protocol.urc import URCDispatcher
 from callstack.sms.service import SMSService
 from callstack.sms.store import SMSStore
 from callstack.transport.serial import SerialTransport
+from callstack.ussd import USSDService
 from callstack.utils.logger import setup_logging
 from callstack.voice.audio import AudioPipeline
 from callstack.voice.service import CallService, CallSession
@@ -69,6 +71,7 @@ class Modem:
             SMSStore(self.config.sms_db_path) if self.config.sms_db_path else None,
         )
         self.network = NetworkService(self._executor, self.bus)
+        self.ussd = USSDService(self._executor, self.bus)
 
         # Internal state
         self._reconnect_task: Optional[asyncio.Task] = None
@@ -146,6 +149,10 @@ class Modem:
         """Send initialization AT commands."""
         # Disable echo
         await self._executor.execute(ATCommand.ECHO_OFF)
+
+        # Check and handle SIM PIN
+        await self._check_sim_pin()
+
         # Enable caller ID presentation
         await self._executor.execute(ATCommand.CLIP_ENABLE)
         # Disconnect control (ATH always works)
@@ -154,6 +161,45 @@ class Modem:
         await self._executor.execute(ATCommand.COLP_ENABLE)
 
         logger.debug("Modem initialization complete")
+
+    async def _check_sim_pin(self) -> None:
+        """Check SIM PIN status and unlock if needed."""
+        resp = await self._executor.execute(ATCommand.CPIN_QUERY, expect=["OK"], timeout=5.0)
+        if not resp.success:
+            logger.warning("Could not query SIM PIN status: %s", resp.lines)
+            return
+
+        status = None
+        for line in resp.data_lines:
+            status = ATResponseParser.parse_cpin(line)
+            if status:
+                break
+
+        if status is None:
+            logger.warning("Could not parse SIM PIN status from: %s", resp.lines)
+            return
+
+        logger.info("SIM status: %s", status)
+
+        if status == "READY":
+            return
+
+        if status == "SIM PIN":
+            if not self.config.sim_pin:
+                raise SIMPINRequired("SIM is locked — set sim_pin in ModemConfig to unlock")
+            pin_resp = await self._executor.execute(
+                ATCommand.cpin_enter(self.config.sim_pin), expect=["OK"], timeout=10.0
+            )
+            if not pin_resp.success:
+                raise SIMUnlockError(f"PIN rejected: {pin_resp.lines}")
+            logger.info("SIM unlocked with PIN")
+
+        elif status == "SIM PUK":
+            raise SIMPUKRequired(
+                "SIM is PUK-locked — use modem.unlock_puk(puk, new_pin) to recover"
+            )
+        else:
+            logger.warning("Unhandled SIM status: %s", status)
 
     def _reader_done_callback(self, task: asyncio.Task) -> None:
         """Handle executor reader task completion (usually a transport error)."""
@@ -270,6 +316,17 @@ class Modem:
                     await session.hangup()
                 except Exception as exc:
                     logger.debug("Safety hangup failed: %s", exc)
+
+    # -- SIM management --
+
+    async def unlock_puk(self, puk: str, new_pin: str) -> None:
+        """Unlock a PUK-locked SIM by providing the PUK and a new PIN."""
+        resp = await self._executor.execute(
+            ATCommand.cpin_puk(puk, new_pin), expect=["OK"], timeout=10.0
+        )
+        if not resp.success:
+            raise SIMUnlockError(f"PUK unlock failed: {resp.lines}")
+        logger.info("SIM unlocked with PUK, new PIN set")
 
     # -- Raw AT access --
 

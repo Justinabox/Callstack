@@ -8,7 +8,13 @@ from typing import Awaitable, Callable, Optional
 
 from callstack.errors import SMSSendError, SMSReadError
 from callstack.events.bus import EventBus, EventStream
-from callstack.events.types import IncomingSMSEvent, SMSSentEvent, _RawSMSNotification
+from callstack.events.types import (
+    IncomingSMSEvent,
+    SMSDeliveryReportEvent,
+    SMSSentEvent,
+    _RawDeliveryReport,
+    _RawSMSNotification,
+)
 from callstack.protocol.commands import ATCommand
 from callstack.protocol.executor import ATCommandExecutor
 from callstack.protocol.parser import ATResponseParser
@@ -70,6 +76,7 @@ class SMSService:
 
         # Wire raw SMS URC notifications from URC dispatcher
         bus.subscribe(_RawSMSNotification, self._on_incoming)
+        bus.subscribe(_RawDeliveryReport, self._on_delivery_report)
 
     async def initialize(self) -> None:
         """Configure modem for SMS operations."""
@@ -172,6 +179,49 @@ class SMSService:
                 IncomingSMSEvent(sender=sender, body=event.body)
             )
             logger.info("Incoming SMS from %s (direct)", sender)
+
+    # -- Delivery Reports --
+
+    async def _on_delivery_report(self, event: _RawDeliveryReport) -> None:
+        """Handle +CDSI delivery report notification."""
+        logger.debug("Delivery report: storage=%s, index=%d", event.storage, event.index)
+        resp = await self._at.execute(
+            ATCommand.read_sms(event.index), expect=["OK"], timeout=5.0
+        )
+        if not resp.success:
+            logger.warning("Failed to read delivery report at index %d", event.index)
+            return
+
+        # Parse the delivery status from response lines
+        # Typical format: +CMGR: "REC READ","+number","","timestamp","timestamp",status
+        recipient = ""
+        status = "delivered"
+        for line in resp.data_lines:
+            if line.startswith("+CMGR:"):
+                # Extract recipient from delivery report header
+                parts = line.split(",")
+                if len(parts) >= 2:
+                    recipient = parts[1].strip().strip('"')
+                # Check for failure indicators
+                if len(parts) >= 6:
+                    try:
+                        status_code = int(parts[-1].strip())
+                        if status_code == 0:
+                            status = "delivered"
+                        elif 1 <= status_code <= 31:
+                            status = "pending"
+                        else:
+                            status = "failed"
+                    except ValueError:
+                        pass
+
+        await self._at.execute(ATCommand.delete_sms(event.index), expect=["OK"])
+
+        await self._bus.emit(SMSDeliveryReportEvent(
+            recipient=recipient,
+            status=status,
+        ))
+        logger.info("Delivery report for %s: %s", recipient, status)
 
     # -- Subscription API --
 

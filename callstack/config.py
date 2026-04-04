@@ -12,6 +12,7 @@ class ModemConfig:
     reconnect_interval: float = 5.0
     sms_storage: str = "SM"
     sms_db_path: Optional[str] = None
+    sim_pin: Optional[str] = None
     log_level: str = "INFO"
 
     def __post_init__(self) -> None:

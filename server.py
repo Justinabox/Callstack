@@ -2,12 +2,16 @@
 
 import asyncio
 import logging
+import secrets
+import time
+from collections import defaultdict
 from pathlib import Path
 
 import aiohttp
 from aiohttp import web
 
 from callstack import Modem, ModemConfig, CallSession, IncomingSMSEvent
+from callstack.events.types import SMSDeliveryReportEvent
 
 logger = logging.getLogger("server")
 
@@ -18,10 +22,78 @@ HTTP_PORT = 8080
 # Webhook subscribers and received messages store
 webhook_urls: list[str] = []
 received_messages: list[dict] = []
+delivery_reports: list[dict] = []
 
 
-def create_app(modem: Modem) -> web.Application:
-    app = web.Application()
+# -- API Key Authentication --
+
+class APIKeyAuth:
+    """API key authentication middleware with rate limiting.
+
+    Keys are passed via the Authorization header as 'Bearer <key>'.
+
+    Usage:
+        auth = APIKeyAuth(api_keys=["my-secret-key"], rate_limit=60)
+        app = web.Application(middlewares=[auth.middleware])
+    """
+
+    def __init__(
+        self,
+        api_keys: list[str] | None = None,
+        rate_limit: int = 60,
+        rate_window: int = 60,
+    ):
+        self._keys: set[str] = set(api_keys) if api_keys else set()
+        self._rate_limit = rate_limit
+        self._rate_window = rate_window
+        self._request_log: dict[str, list[float]] = defaultdict(list)
+        self.enabled = bool(self._keys)
+
+    @web.middleware
+    async def middleware(self, request: web.Request, handler) -> web.Response:
+        if not self.enabled:
+            return await handler(request)
+
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return web.json_response(
+                {"error": "Missing or invalid Authorization header. Use 'Bearer <api_key>'."},
+                status=401,
+            )
+
+        key = auth_header[7:]
+        if not secrets.compare_digest(key, key) or key not in self._keys:
+            return web.json_response({"error": "Invalid API key."}, status=403)
+
+        # Rate limiting
+        now = time.monotonic()
+        log = self._request_log[key]
+        # Prune old entries
+        cutoff = now - self._rate_window
+        self._request_log[key] = [t for t in log if t > cutoff]
+        log = self._request_log[key]
+
+        if len(log) >= self._rate_limit:
+            return web.json_response(
+                {"error": "Rate limit exceeded.", "retry_after": self._rate_window},
+                status=429,
+            )
+        log.append(now)
+
+        return await handler(request)
+
+    def add_key(self, key: str) -> None:
+        self._keys.add(key)
+        self.enabled = True
+
+    def revoke_key(self, key: str) -> None:
+        self._keys.discard(key)
+        self.enabled = bool(self._keys)
+
+
+def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Application:
+    auth = APIKeyAuth(api_keys=api_keys)
+    app = web.Application(middlewares=[auth.middleware])
 
     async def send_sms(request: web.Request) -> web.Response:
         data = await request.json()
@@ -47,9 +119,28 @@ def create_app(modem: Modem) -> web.Application:
     async def list_messages(request: web.Request) -> web.Response:
         return web.json_response(received_messages)
 
+    async def list_delivery_reports(request: web.Request) -> web.Response:
+        return web.json_response(delivery_reports)
+
+    async def ussd_send(request: web.Request) -> web.Response:
+        data = await request.json()
+        code = data.get("code")
+        if not code:
+            return web.json_response({"error": "missing 'code'"}, status=400)
+        try:
+            resp = await modem.ussd.send(code, timeout=data.get("timeout", 15.0))
+            return web.json_response({
+                "status": resp.status,
+                "message": resp.message,
+            })
+        except (TimeoutError, RuntimeError) as exc:
+            return web.json_response({"error": str(exc)}, status=504)
+
     app.router.add_post("/sms/send", send_sms)
     app.router.add_post("/sms/subscribe", subscribe)
     app.router.add_get("/sms/messages", list_messages)
+    app.router.add_get("/sms/delivery-reports", list_delivery_reports)
+    app.router.add_post("/ussd/send", ussd_send)
     return app
 
 
@@ -78,10 +169,24 @@ async def main() -> None:
 
         # -- SMS handling: store + forward to webhooks --
         async def on_sms(event: IncomingSMSEvent) -> None:
-            received_messages.append({"sender": event.sender, "body": event.body})
+            received_messages.append({
+                "sender": event.sender,
+                "body": event.body,
+                "received_at": event.timestamp.isoformat(),
+            })
             await notify_webhooks(event.sender, event.body)
 
         modem.sms.on_message(on_sms)
+
+        # -- Delivery report handling --
+        async def on_delivery_report(event: SMSDeliveryReportEvent) -> None:
+            delivery_reports.append({
+                "recipient": event.recipient,
+                "status": event.status,
+                "timestamp": event.timestamp.isoformat(),
+            })
+
+        modem.bus.subscribe(SMSDeliveryReportEvent, on_delivery_report)
 
         # -- HTTP server --
         app = create_app(modem)

@@ -82,3 +82,36 @@ class ATCommand:
         return f'AT+CMGL="{status}"'
 
     DELETE_ALL_SMS = "AT+CMGD=1,4"
+
+    # SIM PIN
+    CPIN_QUERY = "AT+CPIN?"
+
+    @staticmethod
+    def cpin_enter(pin: str) -> str:
+        if not pin or not pin.isdigit() or not (4 <= len(pin) <= 8):
+            raise ValueError(f"Invalid PIN: must be 4-8 digits")
+        return f'AT+CPIN="{pin}"'
+
+    @staticmethod
+    def cpin_puk(puk: str, new_pin: str) -> str:
+        if not puk or not puk.isdigit() or not (8 <= len(puk) <= 8):
+            raise ValueError(f"Invalid PUK: must be 8 digits")
+        if not new_pin or not new_pin.isdigit() or not (4 <= len(new_pin) <= 8):
+            raise ValueError(f"Invalid new PIN: must be 4-8 digits")
+        return f'AT+CPIN="{puk}","{new_pin}"'
+
+    # DTMF
+    _VALID_DTMF = frozenset("0123456789*#ABCD")
+
+    @staticmethod
+    def send_dtmf(digit: str) -> str:
+        if len(digit) != 1 or digit not in ATCommand._VALID_DTMF:
+            raise ValueError(f"Invalid DTMF digit: {digit!r} (must be single char: 0-9, *, #, A-D)")
+        return f"AT+VTS={digit}"
+
+    # USSD
+    @staticmethod
+    def ussd_send(code: str, encoding: int = 15) -> str:
+        return f'AT+CUSD=1,"{code}",{encoding}'
+
+    USSD_CANCEL = "AT+CUSD=2"

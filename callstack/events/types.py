@@ -67,8 +67,31 @@ class ModemReconnectedEvent(Event):
 
 
 @dataclass(frozen=True)
+class SMSDeliveryReportEvent(Event):
+    """Delivery status report for a sent SMS."""
+    reference: int = 0
+    recipient: str = ""
+    status: str = ""  # "delivered", "failed", "pending"
+
+
+@dataclass(frozen=True)
+class USSDResponseEvent(Event):
+    """Response from a USSD command."""
+    status: int = 0  # 0=no further action, 1=further action, 2=terminated
+    message: str = ""
+    encoding: int = 15
+
+
+@dataclass(frozen=True)
 class _RawSMSNotification(Event):
     """Internal event for raw SMS URC data. Not part of the public API."""
     sender: str = ""
     body: str = ""
     raw: str = ""
+
+
+@dataclass(frozen=True)
+class _RawDeliveryReport(Event):
+    """Internal event for raw delivery report URC. Not part of the public API."""
+    storage: str = ""
+    index: int = 0

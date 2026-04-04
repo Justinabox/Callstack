@@ -306,6 +306,20 @@ class CallSession:
             await self.play(audio_path)
             return await collector.collect()
 
+    async def send_dtmf(self, digits: str, duration_ms: int = 100) -> None:
+        """Send DTMF tones during an active call.
+
+        Args:
+            digits: One or more DTMF digits (0-9, *, #, A-D).
+            duration_ms: Tone duration in milliseconds (modem default used if 0).
+        """
+        for digit in digits:
+            await self.service._at.execute(
+                ATCommand.send_dtmf(digit), expect=["OK"], timeout=5.0
+            )
+            if len(digits) > 1:
+                await asyncio.sleep(duration_ms / 1000.0)
+
     async def wait_for_end(self, timeout: float | None = None) -> bool:
         """Wait until the call ends. Returns True if ended, False on timeout."""
         try:

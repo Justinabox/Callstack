@@ -9,6 +9,10 @@ from callstack.errors import (
     ATCommandError,
     InvalidStateTransition,
     TransportError,
+    SIMError,
+    SIMPINRequired,
+    SIMPUKRequired,
+    SIMUnlockError,
     SMSError,
     SMSSendError,
     SMSReadError,
@@ -22,6 +26,8 @@ from callstack.events.types import (
     CallStateEvent,
     IncomingSMSEvent,
     SMSSentEvent,
+    SMSDeliveryReportEvent,
+    USSDResponseEvent,
     SignalQualityEvent,
     ModemDisconnectedEvent,
     ModemReconnectedEvent,
@@ -39,6 +45,7 @@ from callstack.sms.types import SMS, DeliveryReport, SMSStatus
 from callstack.sms.store import SMSStore
 from callstack.sms.service import SMSService
 from callstack.network import NetworkService, SignalInfo, RegistrationInfo
+from callstack.ussd import USSDService
 from callstack.utils.retry import retry
 
 __all__ = [
@@ -52,6 +59,10 @@ __all__ = [
     "ATCommandError",
     "InvalidStateTransition",
     "TransportError",
+    "SIMError",
+    "SIMPINRequired",
+    "SIMPUKRequired",
+    "SIMUnlockError",
     "SMSError",
     "SMSSendError",
     "SMSReadError",
@@ -64,6 +75,8 @@ __all__ = [
     "CallStateEvent",
     "IncomingSMSEvent",
     "SMSSentEvent",
+    "SMSDeliveryReportEvent",
+    "USSDResponseEvent",
     "SignalQualityEvent",
     "ModemDisconnectedEvent",
     "ModemReconnectedEvent",
@@ -93,6 +106,8 @@ __all__ = [
     "NetworkService",
     "SignalInfo",
     "RegistrationInfo",
+    # USSD
+    "USSDService",
     # Utilities
     "retry",
 ]

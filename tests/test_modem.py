@@ -41,6 +41,7 @@ class MockModem(Modem):
         from callstack.sms.service import SMSService
         from callstack.sms.store import SMSStore
         from callstack.network import NetworkService
+        from callstack.ussd import USSDService
 
         self._urc = URCDispatcher(self.bus)
         self._executor = ATCommandExecutor(self._at_transport, self._urc)
@@ -49,6 +50,7 @@ class MockModem(Modem):
         self.call = CallService(self._executor, self._audio, self.bus)
         self.sms = SMSService(self._executor, self.bus, SMSStore())
         self.network = NetworkService(self._executor, self.bus)
+        self.ussd = USSDService(self._executor, self.bus)
 
         self._reconnect_task = None
         self._reconnect_lock = asyncio.Lock()
@@ -62,6 +64,8 @@ def _feed_init_responses(transport: MockTransport):
     """Feed the standard modem initialization AT command responses."""
     # ATE0
     transport.feed("OK")
+    # AT+CPIN? -> SIM ready
+    transport.feed("+CPIN: READY", "OK")
     # AT+CLIP=1
     transport.feed("OK")
     # AT+CVHU=0

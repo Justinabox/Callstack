@@ -85,6 +85,42 @@ class ATResponseParser:
             return m.group(1)
         return None
 
+    # SIM PIN status: +CPIN: READY / +CPIN: SIM PIN / +CPIN: SIM PUK
+    _CPIN_RE = re.compile(r"^\+CPIN:\s*(.+)$")
+
+    # USSD response: +CUSD: status,"message",encoding
+    _CUSD_RE = re.compile(r'^\+CUSD:\s*(\d+)(?:,"([^"]*)"(?:,(\d+))?)?')
+
+    # Delivery report: +CDSI: "storage",index
+    _CDSI_RE = re.compile(r'^\+CDSI:\s*"([^"]*)",(\d+)')
+
+    @staticmethod
+    def parse_cpin(line: str) -> Optional[str]:
+        """Parse +CPIN response. Returns status string (e.g. 'READY', 'SIM PIN')."""
+        m = ATResponseParser._CPIN_RE.match(line)
+        if m:
+            return m.group(1).strip()
+        return None
+
+    @staticmethod
+    def parse_cusd(line: str) -> Optional[tuple[int, str, int]]:
+        """Parse +CUSD response. Returns (status, message, encoding) or None."""
+        m = ATResponseParser._CUSD_RE.match(line)
+        if m:
+            status = int(m.group(1))
+            message = m.group(2) or ""
+            encoding = int(m.group(3)) if m.group(3) else 15
+            return status, message, encoding
+        return None
+
+    @staticmethod
+    def parse_cdsi(line: str) -> Optional[tuple[str, int]]:
+        """Parse +CDSI delivery report notification. Returns (storage, index) or None."""
+        m = ATResponseParser._CDSI_RE.match(line)
+        if m:
+            return m.group(1), int(m.group(2))
+        return None
+
     @staticmethod
     def parse_prefix(line: str) -> Optional[ParsedResponse]:
         """Parse any +CMD: value line into a ParsedResponse."""

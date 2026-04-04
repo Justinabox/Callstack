@@ -56,6 +56,34 @@ class AudioFormatError(CallstackError):
     """WAV file does not match the required modem audio format."""
 
 
+class SIMError(CallstackError):
+    """Base for SIM card errors."""
+
+
+class SIMPINRequired(SIMError):
+    """SIM card requires a PIN to unlock."""
+
+    def __init__(self, detail: str = "SIM PIN required"):
+        self.detail = detail
+        super().__init__(detail)
+
+
+class SIMPUKRequired(SIMError):
+    """SIM card requires PUK to unblock."""
+
+    def __init__(self, detail: str = "SIM PUK required"):
+        self.detail = detail
+        super().__init__(detail)
+
+
+class SIMUnlockError(SIMError):
+    """Failed to unlock SIM with PIN or PUK."""
+
+    def __init__(self, detail: str = ""):
+        self.detail = detail
+        super().__init__(f"SIM unlock failed: {detail}")
+
+
 class SMSError(CallstackError):
     """Base for SMS errors."""
 

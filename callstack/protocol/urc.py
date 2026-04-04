@@ -11,6 +11,8 @@ from callstack.events.types import (
     ModemDisconnectedEvent,
     RingEvent,
     SignalQualityEvent,
+    USSDResponseEvent,
+    _RawDeliveryReport,
     _RawSMSNotification,
 )
 from callstack.protocol.parser import ATResponseParser
@@ -107,7 +109,22 @@ class URCDispatcher:
             await self._bus.emit(_RawSMSNotification(raw=line))
 
         elif line.startswith("+CDSI:"):
-            logger.info("SMS delivery report: %s", line)
+            parsed = ATResponseParser.parse_cdsi(line)
+            if parsed:
+                storage, index = parsed
+                await self._bus.emit(_RawDeliveryReport(storage=storage, index=index))
+            else:
+                logger.warning("Could not parse delivery report: %s", line)
+
+        elif line.startswith("+CUSD:"):
+            parsed = ATResponseParser.parse_cusd(line)
+            if parsed:
+                status, message, encoding = parsed
+                await self._bus.emit(USSDResponseEvent(
+                    status=status, message=message, encoding=encoding
+                ))
+            else:
+                logger.warning("Could not parse USSD response: %s", line)
 
         elif line.startswith("+CREG:") or line.startswith("+CGREG:"):
             logger.info("Network registration: %s", line)
