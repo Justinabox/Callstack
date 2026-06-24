@@ -35,6 +35,27 @@ class TestGSM7Encoding:
             assert decoded == ch, f"Failed for char {i}: {repr(ch)}"
 
 
+class TestMultipartUDH:
+    def test_parse_8bit_concatenation_header(self):
+        info = PDUDecoder.parse_concatenation_udh(bytes.fromhex("0500037A0201"))
+        assert info is not None
+        assert info.reference == 0x7A
+        assert info.total_parts == 2
+        assert info.sequence == 1
+        assert info.is_16bit is False
+
+    def test_parse_16bit_concatenation_header(self):
+        info = PDUDecoder.parse_concatenation_udh(bytes.fromhex("06080412340302"))
+        assert info is not None
+        assert info.reference == 0x1234
+        assert info.total_parts == 3
+        assert info.sequence == 2
+        assert info.is_16bit is True
+
+    def test_parse_concatenation_header_ignores_unrelated_udh(self):
+        assert PDUDecoder.parse_concatenation_udh(bytes.fromhex("03010A0B")) is None
+
+
 class TestPhoneNumber:
     def test_encode_international(self):
         encoded, toa = PDUEncoder.encode_phone_number("+1234567890")

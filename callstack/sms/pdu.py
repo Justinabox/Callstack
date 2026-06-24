@@ -4,6 +4,7 @@ Handles GSM 7-bit default alphabet encoding/decoding and PDU frame
 construction for modems operating in PDU mode (AT+CMGF=0).
 """
 
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -134,8 +135,61 @@ class PDUEncoder:
         return pdu, tpdu_len
 
 
+@dataclass(frozen=True)
+class MultipartInfo:
+    """Concatenated SMS metadata parsed from a user-data header."""
+
+    reference: int
+    total_parts: int
+    sequence: int
+    is_16bit: bool = False
+
+
 class PDUDecoder:
     """Decode SMS messages from PDU format."""
+
+    @staticmethod
+    def parse_concatenation_udh(udh: bytes) -> Optional[MultipartInfo]:
+        """Parse concatenated SMS metadata from a user-data header.
+
+        Accepts a complete UDH byte string including the leading UDHL byte.
+        Supports both 8-bit (IEI 0x00) and 16-bit (IEI 0x08) concatenation
+        reference formats from 3GPP TS 23.040. Returns None when the header
+        is malformed or does not contain concatenation metadata.
+        """
+        if not udh:
+            return None
+
+        declared_len = udh[0]
+        if len(udh) < declared_len + 1:
+            return None
+
+        end = 1 + declared_len
+        pos = 1
+        while pos + 2 <= end:
+            iei = udh[pos]
+            ie_len = udh[pos + 1]
+            pos += 2
+            ie_end = pos + ie_len
+            if ie_end > end:
+                return None
+
+            if iei == 0x00 and ie_len == 3:
+                reference = udh[pos]
+                total_parts = udh[pos + 1]
+                sequence = udh[pos + 2]
+                if total_parts and 1 <= sequence <= total_parts:
+                    return MultipartInfo(reference, total_parts, sequence)
+            elif iei == 0x08 and ie_len == 4:
+                reference = (udh[pos] << 8) | udh[pos + 1]
+                total_parts = udh[pos + 2]
+                sequence = udh[pos + 3]
+                if total_parts and 1 <= sequence <= total_parts:
+                    return MultipartInfo(reference, total_parts, sequence, is_16bit=True)
+
+            pos = ie_end
+
+        return None
 
     @staticmethod
     def decode_gsm7(data: bytes, septet_count: int) -> str:
