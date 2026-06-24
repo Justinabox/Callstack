@@ -41,7 +41,7 @@ class ATCommand:
     SMS_TEXT_MODE = "AT+CMGF=1"
     SMS_PDU_MODE = "AT+CMGF=0"
     SMS_CHARSET_GSM = 'AT+CSCS="GSM"'
-    SMS_NOTIFY = "AT+CNMI=2,2,0,1,0"
+    SMS_NOTIFY = "AT+CNMI=2,1,0,1,0"
     SMS_DELIVERY_REPORT = "AT+CSMP=49,167,0,0"
 
     # Network

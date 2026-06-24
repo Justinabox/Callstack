@@ -56,7 +56,7 @@ async def test_initialize(sms_service, transport):
     written = transport.all_written
     assert any("CMGF=1" in w for w in written)
     assert any("CSCS" in w for w in written)
-    assert any("CNMI" in w for w in written)
+    assert 'AT+CNMI=2,1,0,1,0\r\n' in written
 
 
 # -- Sending --
@@ -304,6 +304,21 @@ async def test_read_message_preserves_cmgl_shaped_body_line(sms_service, transpo
         "carrier copied diagnostic:\n"
         '+CMGL: 9,"REC READ","+155****9999","","24/12/25,15:00:00+04"'
     )
+
+
+async def test_read_message_preserves_urc_shaped_body_line(sms_service, transport):
+    """CMGR command responses keep +CMTI-shaped text as SMS body content."""
+    transport.feed(
+        '+CMGR: "REC UNREAD","+155****1234","","24/12/25,14:30:00+04"',
+        "carrier copied notification:",
+        '+CMTI: "SM",99',
+        "OK",
+    )
+
+    sms = await sms_service.read_message(7)
+
+    assert sms is not None
+    assert sms.body == "carrier copied notification:\n+CMTI: \"SM\",99"
 
 
 async def test_read_message_not_found(sms_service, transport):
