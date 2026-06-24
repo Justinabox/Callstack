@@ -344,12 +344,11 @@ class SMSService:
                 sender = m.group(3)
                 timestamp_str = m.group(5) if m.group(5) else m.group(4)
                 timestamp = _parse_timestamp(timestamp_str)
-
-                # Next line is the message body
-                body = ""
-                if i + 1 < len(lines) and lines[i + 1] != "OK":
-                    body = lines[i + 1]
-                    i += 1
+                body, next_index = _collect_message_body(
+                    lines,
+                    i + 1,
+                    stop_on_cmgl_header=True,
+                )
 
                 messages.append(SMS(
                     sender=sender,
@@ -358,6 +357,8 @@ class SMSService:
                     timestamp=timestamp,
                     storage_index=index,
                 ))
+                i = next_index
+                continue
             i += 1
         return messages
 
@@ -371,10 +372,11 @@ class SMSService:
                 sender = m.group(2)
                 timestamp_str = m.group(4) if m.group(4) else m.group(3)
                 timestamp = _parse_timestamp(timestamp_str)
-
-                body = ""
-                if i + 1 < len(lines) and lines[i + 1] != "OK":
-                    body = lines[i + 1]
+                body, _ = _collect_message_body(
+                    lines,
+                    i + 1,
+                    stop_on_cmgl_header=False,
+                )
 
                 return SMS(
                     sender=sender,
@@ -384,6 +386,29 @@ class SMSService:
                     storage_index=index,
                 )
         return None
+
+
+def _collect_message_body(
+    lines: list[str],
+    start: int,
+    *,
+    stop_on_cmgl_header: bool,
+) -> tuple[str, int]:
+    """Collect SMS body lines until a record boundary or final result code."""
+    body_lines: list[str] = []
+    i = start
+    while i < len(lines):
+        line = lines[i]
+        if _is_final_result_code(line) or (stop_on_cmgl_header and _CMGL_RE.match(line)):
+            break
+        body_lines.append(line)
+        i += 1
+    return "\n".join(body_lines), i
+
+
+def _is_final_result_code(line: str) -> bool:
+    """Return True for AT final result lines that terminate SMS reads."""
+    return line in {"OK", "ERROR"} or line.startswith(("+CME ERROR:", "+CMS ERROR:"))
 
 
 def _parse_timestamp(ts_str: str) -> Optional[datetime]:

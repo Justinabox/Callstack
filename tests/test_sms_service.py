@@ -219,19 +219,37 @@ async def test_receive_cmt(sms_service, bus, store):
 async def test_list_messages(sms_service, transport):
     """List messages from SIM."""
     transport.feed(
-        '+CMGL: 0,"REC UNREAD","+15551111","","24/12/25,10:00:00+04"',
+        '+CMGL: 0,"REC UNREAD","+155****1111","","24/12/25,10:00:00+04"',
         "Hello",
-        '+CMGL: 1,"REC READ","+15552222","","24/12/25,11:00:00+04"',
+        '+CMGL: 1,"REC READ","+155****2222","","24/12/25,11:00:00+04"',
         "World",
         "OK",
     )
     messages = await sms_service.list_messages()
     assert len(messages) == 2
-    assert messages[0].sender == "+15551111"
+    assert messages[0].sender == "+155****1111"
     assert messages[0].body == "Hello"
     assert messages[0].storage_index == 0
-    assert messages[1].sender == "+15552222"
+    assert messages[1].sender == "+155****2222"
     assert messages[1].body == "World"
+
+
+async def test_list_messages_preserves_multiline_body(sms_service, transport):
+    """CMGL parsing keeps body lines until the next message header."""
+    transport.feed(
+        '+CMGL: 0,"REC UNREAD","+155****1111","","24/12/25,10:00:00+04"',
+        "first line",
+        "second line",
+        '+CMGL: 1,"REC READ","+155****2222","","24/12/25,11:00:00+04"',
+        "world",
+        "OK",
+    )
+
+    messages = await sms_service.list_messages()
+
+    assert len(messages) == 2
+    assert messages[0].body == "first line\nsecond line"
+    assert messages[1].body == "world"
 
 
 async def test_list_messages_empty(sms_service, transport):
@@ -244,15 +262,48 @@ async def test_list_messages_empty(sms_service, transport):
 async def test_read_message(sms_service, transport):
     """Read a single message."""
     transport.feed(
-        '+CMGR: "REC UNREAD","+15551234","","24/12/25,14:30:00+04"',
+        '+CMGR: "REC UNREAD","+155****1234","","24/12/25,14:30:00+04"',
         "Test body",
         "OK",
     )
     sms = await sms_service.read_message(0)
     assert sms is not None
-    assert sms.sender == "+15551234"
+    assert sms.sender == "+155****1234"
     assert sms.body == "Test body"
     assert sms.storage_index == 0
+
+
+async def test_read_message_preserves_multiline_body(sms_service, transport):
+    """CMGR parsing keeps all body lines before the final result code."""
+    transport.feed(
+        '+CMGR: "REC UNREAD","+155****1234","","24/12/25,14:30:00+04"',
+        "first line",
+        "second line",
+        "OK",
+    )
+
+    sms = await sms_service.read_message(0)
+
+    assert sms is not None
+    assert sms.body == "first line\nsecond line"
+
+
+async def test_read_message_preserves_cmgl_shaped_body_line(sms_service, transport):
+    """CMGR parsing treats +CMGL-shaped text as body content."""
+    transport.feed(
+        '+CMGR: "REC UNREAD","+155****1234","","24/12/25,14:30:00+04"',
+        "carrier copied diagnostic:",
+        '+CMGL: 9,"REC READ","+155****9999","","24/12/25,15:00:00+04"',
+        "OK",
+    )
+
+    sms = await sms_service.read_message(0)
+
+    assert sms is not None
+    assert sms.body == (
+        "carrier copied diagnostic:\n"
+        '+CMGL: 9,"REC READ","+155****9999","","24/12/25,15:00:00+04"'
+    )
 
 
 async def test_read_message_not_found(sms_service, transport):
