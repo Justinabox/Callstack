@@ -14,7 +14,7 @@ from callstack.events.types import (
     RingEvent,
     CallerIDEvent,
 )
-from callstack.errors import TransportError
+from callstack.errors import TransportError, SIMPUKRequired
 from callstack.modem import Modem
 from callstack.transport.mock import MockTransport
 
@@ -182,6 +182,73 @@ class TestModemExecute:
 
             assert resp.success is True
             assert any("+CSQ:" in line for line in resp.lines)
+
+
+class TestModemPUKRecovery:
+    async def test_recover_puk_opens_at_transport_unblocks_sim_and_closes(self):
+        at_transport = MockTransport()
+        audio_transport = MockTransport()
+        at_transport.feed(
+            "OK",  # ATE0
+            "+CPIN: SIM PUK",
+            "OK",
+            "OK",  # AT+CPIN="puk","new_pin"
+            "+CPIN: READY",
+            "OK",
+        )
+
+        with patch("callstack.modem.SerialTransport", side_effect=[at_transport, audio_transport]):
+            await Modem.recover_puk(ModemConfig(), "12345678", "1234")
+
+        assert at_transport._open is False
+        assert any("ATE0" in written for written in at_transport.all_written)
+        assert any("AT+CPIN?" in written for written in at_transport.all_written)
+        assert any(
+            'AT+CPIN="12345678","1234"' in written
+            for written in at_transport.all_written
+        )
+        assert not any("AT+CMGF" in written for written in at_transport.all_written)
+
+    async def test_recover_puk_rejects_invalid_values_before_opening_transport(self):
+        with patch("callstack.modem.SerialTransport") as serial_transport:
+            with pytest.raises(ValueError, match="Invalid PUK"):
+                await Modem.recover_puk(ModemConfig(), "1234", "1234")
+
+        serial_transport.assert_not_called()
+
+    async def test_recover_puk_does_not_log_credentials(self, capsys):
+        at_transport = MockTransport()
+        audio_transport = MockTransport()
+        at_transport.feed(
+            "OK",
+            "+CPIN: SIM PUK",
+            "OK",
+            "OK",
+            "+CPIN: READY",
+            "OK",
+        )
+
+        with patch("callstack.modem.SerialTransport", side_effect=[at_transport, audio_transport]):
+            await Modem.recover_puk(ModemConfig(log_level="DEBUG"), "12345678", "8765")
+
+        stderr = capsys.readouterr().err
+        assert "12345678" not in stderr
+        assert "8765" not in stderr
+
+    async def test_sim_puk_required_points_to_public_recovery_api(self):
+        modem = MockModem()
+        modem._at_transport.feed(
+            "OK",  # ATE0
+            "+CPIN: SIM PUK",
+            "OK",
+        )
+
+        with pytest.raises(SIMPUKRequired) as exc_info:
+            async with modem:
+                pass
+
+        assert "Modem.recover_puk(config, puk, new_pin)" in str(exc_info.value)
+        assert "modem.unlock_puk" not in str(exc_info.value)
 
 
 class TestModemURCReader:

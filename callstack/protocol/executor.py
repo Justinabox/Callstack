@@ -179,20 +179,24 @@ class ATCommandExecutor:
         command: str,
         expect: list[str] | tuple[str, ...] = ("OK",),
         timeout: float = 5.0,
+        log_command: str | None = None,
     ) -> ATResponse:
         """Send an AT command and wait for a final result code.
 
         Returns ATResponse with success=True if one of the expected
-        result codes is found, or success=False on ERROR.
+        result codes is found, or success=False on ERROR. ``log_command`` may
+        be supplied to redact sensitive command arguments in debug logs.
         """
         async with self._lock:
             if self._reader_active:
                 self._drain_queue()
                 self._command_in_flight = True
             try:
-                logger.debug("TX: %s", command)
+                logger.debug("TX: %s", log_command or command)
                 await self._transport.write(f"{command}\r\n".encode())
-                return await self._collect_response(command, expect, timeout)
+                return await self._collect_response(
+                    command, expect, timeout, log_command or command
+                )
             finally:
                 self._command_in_flight = False
 
@@ -214,7 +218,9 @@ class ATCommandExecutor:
             try:
                 logger.debug("TX (raw): %d bytes", len(data))
                 await self._transport.write(data)
-                return await self._collect_response("<raw-data>", expect, timeout)
+                return await self._collect_response(
+                    "<raw-data>", expect, timeout, "<raw-data>"
+                )
             finally:
                 self._command_in_flight = False
 
@@ -242,6 +248,8 @@ class ATCommandExecutor:
                 raw = await asyncio.wait_for(
                     self._transport.readline(), timeout=timeout
                 )
+            except asyncio.TimeoutError:
+                raise
             except (TransportError, OSError) as exc:
                 raise TransportError(
                     f"Transport error during command: {exc}"
@@ -250,7 +258,11 @@ class ATCommandExecutor:
             return line
 
     async def _collect_response(
-        self, command: str, expect: list[str] | tuple[str, ...], timeout: float
+        self,
+        command: str,
+        expect: list[str] | tuple[str, ...],
+        timeout: float,
+        display_command: str,
     ) -> ATResponse:
         lines: list[str] = []
         loop = asyncio.get_running_loop()
@@ -260,24 +272,26 @@ class ATCommandExecutor:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise ATTimeoutError(
-                    f"Timeout after {timeout}s waiting for {expect} (command: {command})"
+                    f"Timeout after {timeout}s waiting for {expect} (command: {display_command})"
                 )
 
             try:
                 line = await self._next_line(remaining)
             except asyncio.TimeoutError:
                 raise ATTimeoutError(
-                    f"Timeout after {timeout}s waiting for {expect} (command: {command})"
+                    f"Timeout after {timeout}s waiting for {expect} (command: {display_command})"
                 )
 
             if not line:
                 continue
 
-            logger.debug("RX: %s", line)
-
-            # Echo suppression: skip if the line matches the command we sent
+            # Echo suppression: skip if the line matches the command we sent.
+            # Log only the redacted display command for sensitive commands.
             if line == command:
+                logger.debug("RX: %s", display_command)
                 continue
+
+            logger.debug("RX: %s", line)
 
             # Check if this is a URC that arrived during command execution
             if self._urc.is_urc(line):
