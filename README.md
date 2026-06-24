@@ -13,10 +13,12 @@ Callstack provides a high-level Python API for managing GSM/LTE modem connection
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| **Voice Calls** | ✅ Ready | Inbound/outbound, recording, tone playback, IVR menus |
-| **SMS** | ✅ Ready | Send/receive/subscribe, SQLite persistence, HTTP API |
+| **Voice Calls** | ✅ Ready | Inbound/outbound, recording, tone playback, IVR menus, DTMF send/collect |
+| **SMS** | ✅ Ready | Send/receive/subscribe, SQLite persistence, delivery reports, multipart UDH metadata |
+| **SIM + Network** | ✅ Ready | SIM PIN unlock, registration/signal snapshots, BER descriptions |
+| **USSD** | ✅ Ready | `AT+CUSD` balance checks/carrier menus via service + HTTP endpoint |
 | **Raw AT Commands** | ✅ Ready | Direct modem control via `Modem.execute()` |
-| **HTTP Server** | ✅ Ready | REST API for SMS send/receive with webhooks |
+| **HTTP Server** | ✅ Ready | API-key auth, rate limiting, SMS/USSD/delivery-report endpoints |
 | **Auto-reconnect** | ✅ Ready | Handles USB disconnect/reconnect gracefully |
 
 ---
@@ -75,6 +77,10 @@ Endpoints:
 - `POST /sms/send` — Send SMS (`{"to": "+123...", "body": "..."}`)
 - `POST /sms/subscribe` — Register webhook for incoming SMS
 - `GET /sms/messages` — List received messages
+- `GET /sms/delivery-reports` — List delivery status reports
+- `POST /ussd/send` — Send USSD short codes (`{"code": "*123#"}`)
+
+If `create_app(..., api_keys=[...])` is configured, HTTP requests must include `Authorization: Bearer <api_key>` and are rate-limited per key.
 
 ---
 
@@ -124,6 +130,7 @@ config = ModemConfig(
     at_port="/dev/ttyUSB2",      # AT command port
     audio_port="/dev/ttyUSB4",   # PCM audio port (voice calls)
     baudrate=115200,
+    sim_pin=None,                # Optional: unlock SIMs that boot PIN-locked
     auto_reconnect=True,
     reconnect_interval=5.0,
 )
