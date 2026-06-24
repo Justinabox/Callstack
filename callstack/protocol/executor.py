@@ -19,7 +19,8 @@ logger = logging.getLogger("callstack.executor")
 
 # Final result codes that terminate a command response
 FINAL_OK = ("OK",)
-FINAL_ERROR = ("ERROR", "+CME ERROR", "+CMS ERROR")
+FINAL_ERROR = ("ERROR",)
+FINAL_ERROR_PREFIXES = ("+CME ERROR:", "+CMS ERROR:")
 
 # Sentinel pushed into the line queue when the transport dies
 _TRANSPORT_ERROR = object()
@@ -36,7 +37,14 @@ class ATResponse:
         """Response lines excluding the final result code."""
         if not self.lines:
             return []
-        return [l for l in self.lines if l not in FINAL_OK and not any(l.startswith(e) for e in FINAL_ERROR)]
+        final_line = self.lines[-1]
+        if (
+            final_line in FINAL_OK
+            or final_line in FINAL_ERROR
+            or any(final_line.startswith(e) for e in FINAL_ERROR_PREFIXES)
+        ):
+            return self.lines[:-1]
+        return list(self.lines)
 
 
 class ATCommandExecutor:
@@ -288,11 +296,11 @@ class ATCommandExecutor:
             lines.append(line)
 
             # Check for expected success result codes
-            if any(e in line for e in expect):
+            if line in expect:
                 return ATResponse(success=True, lines=lines)
 
             # Check for error result codes
-            if any(line.startswith(e) for e in FINAL_ERROR) or line == "ERROR":
+            if line in FINAL_ERROR or any(line.startswith(e) for e in FINAL_ERROR_PREFIXES):
                 return ATResponse(success=False, lines=lines)
 
 

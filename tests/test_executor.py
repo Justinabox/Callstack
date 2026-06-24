@@ -5,7 +5,7 @@ import pytest
 from callstack.events.bus import EventBus
 from callstack.events.types import RingEvent, DTMFEvent
 from callstack.errors import ATTimeoutError
-from callstack.protocol.executor import ATCommandExecutor
+from callstack.protocol.executor import ATCommandExecutor, ATResponse
 from callstack.protocol.urc import URCDispatcher
 from callstack.transport.mock import MockTransport
 
@@ -58,11 +58,47 @@ async def test_data_lines(executor, transport):
     assert resp.data_lines == ["+CSQ: 20,0"]
 
 
+def test_data_lines_only_excludes_trailing_final_result_code():
+    """Final-code-looking payload lines before the terminator remain data."""
+    response = ATResponse(
+        success=True,
+        lines=[
+            "OK",
+            "+CME ERROR details from an SMS body",
+            "+CMS ERROR details from an SMS body",
+            "OK",
+        ],
+    )
+    assert response.data_lines == [
+        "OK",
+        "+CME ERROR details from an SMS body",
+        "+CMS ERROR details from an SMS body",
+    ]
+
+
+async def test_success_result_code_requires_exact_line(executor, transport):
+    """A data line containing OK must not terminate the response early."""
+    transport.feed("SMS body says OK to proceed", "OK")
+    resp = await executor.execute("AT+CMGR=1")
+    assert resp.success is True
+    assert resp.lines == ["SMS body says OK to proceed", "OK"]
+    assert resp.data_lines == ["SMS body says OK to proceed"]
+
+
 async def test_error_response(executor, transport):
     """AT command returning ERROR."""
     transport.feed("ERROR")
     resp = await executor.execute("AT+INVALID")
     assert resp.success is False
+
+
+async def test_plain_error_result_code_requires_exact_line(executor, transport):
+    """A data line starting with ERROR must not be treated as final ERROR."""
+    transport.feed("ERROR appears in this SMS body", "OK")
+    resp = await executor.execute("AT+CMGR=1")
+    assert resp.success is True
+    assert resp.lines == ["ERROR appears in this SMS body", "OK"]
+    assert resp.data_lines == ["ERROR appears in this SMS body"]
 
 
 async def test_cme_error(executor, transport):
@@ -71,6 +107,14 @@ async def test_cme_error(executor, transport):
     resp = await executor.execute("AT+COPS=?")
     assert resp.success is False
     assert "+CME ERROR: 10" in resp.lines
+
+
+async def test_cms_error(executor, transport):
+    """+CMS ERROR response."""
+    transport.feed("+CMS ERROR: 500")
+    resp = await executor.execute("AT+CMGS")
+    assert resp.success is False
+    assert "+CMS ERROR: 500" in resp.lines
 
 
 async def test_timeout(executor, transport):
