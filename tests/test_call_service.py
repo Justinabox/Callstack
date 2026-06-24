@@ -14,7 +14,7 @@ from callstack.events.types import (
 )
 from callstack.errors import DialError, AnswerError
 from callstack.protocol.urc import URCDispatcher
-from callstack.protocol.executor import ATCommandExecutor
+from callstack.protocol.executor import ATCommandExecutor, ATResponse
 from callstack.voice.audio import AudioPipeline
 from callstack.voice.service import CallService, CallSession
 
@@ -123,6 +123,51 @@ class TestCallService:
         assert session.number == "+5551234"
         assert session.direction == "inbound"
         assert service.state == CallState.ACTIVE
+
+    async def test_answer_treats_active_urc_during_ata_as_success(self, bus):
+        """VOICE CALL: BEGIN during ATA should not double-transition ACTIVE."""
+
+        class FakeAT:
+            def __init__(self):
+                self.calls: list[str] = []
+                self._lock = asyncio.Lock()
+
+            async def execute(self, command, **kwargs):
+                async with self._lock:
+                    self.calls.append(command)
+                    if command == "ATA":
+                        await bus.emit(CallStateEvent(state=CallState.ACTIVE))
+                        await asyncio.sleep(0.01)
+                    return ATResponse(success=True, lines=["OK"])
+
+        class FakeAudio:
+            def __init__(self):
+                self.running = False
+                self.starts = 0
+
+            async def start(self):
+                self.running = True
+                self.starts += 1
+
+            async def stop(self):
+                self.running = False
+
+        at = FakeAT()
+        audio = FakeAudio()
+        service = CallService(at, audio, bus)
+        await bus.emit(RingEvent())
+        await asyncio.sleep(0.01)
+        await bus.emit(CallerIDEvent(number="+5551234"))
+        await asyncio.sleep(0.01)
+
+        session = await service.answer()
+        await asyncio.sleep(0.01)
+
+        assert session.number == "+5551234"
+        assert session.direction == "inbound"
+        assert service.state == CallState.ACTIVE
+        assert audio.starts == 1
+        assert at.calls == ["ATA", "AT+CPCMREG=1"]
 
     async def test_answer_failure(self, service, bus, at_transport):
         await bus.emit(RingEvent())

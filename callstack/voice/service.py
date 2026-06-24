@@ -36,6 +36,7 @@ class CallService:
         self._audio = audio
         self._bus = bus
         self._fsm = CallStateMachine()
+        self._audio_enable_lock = asyncio.Lock()
         self._active_call: Optional[CallSession] = None
         self._pending_caller: Optional[str] = None
 
@@ -98,8 +99,9 @@ class CallService:
         if not resp.success:
             raise AnswerError(resp.lines)
 
-        await self._fsm.transition(CallState.ACTIVE)
-        await self._enable_audio()
+        if self._fsm.state != CallState.ACTIVE:
+            await self._fsm.transition(CallState.ACTIVE)
+        await self._ensure_audio_enabled()
 
         session = CallSession(
             number=self._pending_caller or "unknown",
@@ -130,6 +132,12 @@ class CallService:
         await self._cleanup()
 
     # -- Audio bridge --
+
+    async def _ensure_audio_enabled(self) -> None:
+        """Enable the audio bridge at most once across concurrent connect paths."""
+        async with self._audio_enable_lock:
+            if not self._audio.running:
+                await self._enable_audio()
 
     async def _enable_audio(self) -> None:
         """Register PCM audio channel after call connects."""
@@ -163,8 +171,7 @@ class CallService:
         ):
             # "VOICE CALL: BEGIN" URC — call connected
             await self._fsm.transition(CallState.ACTIVE)
-            if not self._audio.running:
-                await self._enable_audio()
+            await self._ensure_audio_enabled()
 
         elif event.state == CallState.ENDED and self._fsm.state not in (
             CallState.ENDED, CallState.IDLE
