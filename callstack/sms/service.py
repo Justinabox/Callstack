@@ -18,6 +18,7 @@ from callstack.events.types import (
 from callstack.protocol.commands import ATCommand
 from callstack.protocol.executor import ATCommandExecutor
 from callstack.protocol.parser import ATResponseParser
+from callstack.sms.pdu import GSM7_BASIC
 from callstack.sms.store import SMSStore
 from callstack.sms.types import SMS, SMSStatus
 
@@ -35,6 +36,25 @@ _CMGR_RE = re.compile(
 
 # Pattern for +CMGS send reference: +CMGS: ref
 _CMGS_REF_RE = re.compile(r"^\+CMGS:\s*(\d+)")
+
+_GSM_TEXT_RESERVED_CODES = {0x1A, 0x1B}
+_GSM_TEXT_BASIC = {
+    char: code
+    for code, char in enumerate(GSM7_BASIC)
+    if code not in _GSM_TEXT_RESERVED_CODES
+}
+_GSM_TEXT_EXTENDED = {
+    "\f": 0x0A,
+    "^": 0x14,
+    "{": 0x28,
+    "}": 0x29,
+    "\\": 0x2F,
+    "[": 0x3C,
+    "~": 0x3D,
+    "]": 0x3E,
+    "|": 0x40,
+    "€": 0x65,
+}
 
 
 class _FilteredStream:
@@ -102,6 +122,19 @@ class SMSService:
         Returns SMS with reference number on success.
         Raises SMSSendError on failure.
         """
+        payload = bytearray()
+        for char in body:
+            if char in _GSM_TEXT_EXTENDED:
+                payload.extend((0x1B, _GSM_TEXT_EXTENDED[char]))
+            elif char in _GSM_TEXT_BASIC:
+                payload.append(_GSM_TEXT_BASIC[char])
+            else:
+                raise SMSSendError(
+                    "SMS body cannot be encoded with GSM 03.38 text mode; "
+                    "UCS2/PDU sending is not implemented yet"
+                )
+        payload.append(0x1A)
+
         # Initiate SMS send - wait for ">" prompt
         resp = await self._at.execute(
             ATCommand.send_sms(to), expect=[">"], timeout=10
@@ -109,9 +142,9 @@ class SMSService:
         if not resp.success:
             raise SMSSendError(f"Failed to initiate SMS to {to}: {resp.lines}")
 
-        # Send body + Ctrl+Z (0x1A) as raw bytes (no \r\n wrapping)
+        # Send body + Ctrl+Z (0x1A) as GSM 03.38 text-mode bytes.
         resp = await self._at.send_data(
-            f"{body}\x1A".encode("ascii", errors="replace"),
+            bytes(payload),
             expect=["+CMGS:", "OK"],
             timeout=30,
         )
