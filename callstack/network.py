@@ -11,7 +11,7 @@ from callstack.events.types import SignalQualityEvent
 from callstack.protocol.commands import ATCommand
 from callstack.protocol.executor import ATCommandExecutor
 from callstack.protocol.parser import ATResponseParser
-from callstack.utils.signal_quality import rssi_to_dbm, rssi_to_description
+from callstack.utils.signal_quality import ber_to_description, rssi_to_dbm, rssi_to_description
 
 logger = logging.getLogger("callstack.network")
 
@@ -26,6 +26,7 @@ class SignalInfo:
     ber: int
     dbm: int | None
     description: str
+    ber_description: str = "unknown"
 
 
 @dataclass
@@ -76,10 +77,17 @@ class NetworkService:
                     ber=ber,
                     dbm=rssi_to_dbm(rssi),
                     description=rssi_to_description(rssi),
+                    ber_description=ber_to_description(ber),
                 )
                 await self._bus.emit(SignalQualityEvent(rssi=rssi, ber=ber))
                 return info
-        return SignalInfo(rssi=99, ber=99, dbm=None, description="unknown")
+        return SignalInfo(
+            rssi=99,
+            ber=99,
+            dbm=None,
+            description="unknown",
+            ber_description="unknown",
+        )
 
     async def registration(self) -> RegistrationInfo:
         """Query network registration status (AT+CREG?).

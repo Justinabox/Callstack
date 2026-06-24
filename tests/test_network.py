@@ -31,6 +31,7 @@ class TestSignalQuality:
         assert isinstance(info, SignalInfo)
         assert info.rssi == 18
         assert info.ber == 2
+        assert info.ber_description == "good"
         assert info.dbm == -77
         assert info.description == "good"
 
