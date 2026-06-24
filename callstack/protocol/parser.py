@@ -108,10 +108,21 @@ class ATResponseParser:
         m = ATResponseParser._CUSD_RE.match(line)
         if m:
             status = int(m.group(1))
-            message = m.group(2) or ""
+            raw_message = m.group(2) or ""
             encoding = int(m.group(3)) if m.group(3) else 15
+            message = ATResponseParser._decode_cusd_message(raw_message, encoding)
             return status, message, encoding
         return None
+
+    @staticmethod
+    def _decode_cusd_message(message: str, encoding: int) -> str:
+        """Decode known CUSD payload encodings, falling back to raw text."""
+        if encoding == 72 and message:
+            try:
+                return bytes.fromhex(message).decode("utf-16-be")
+            except (ValueError, UnicodeDecodeError):
+                return message
+        return message
 
     @staticmethod
     def parse_cdsi(line: str) -> Optional[tuple[str, int]]:
