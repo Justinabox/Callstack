@@ -212,7 +212,7 @@ class CallSession:
 
     @property
     def is_active(self) -> bool:
-        return self.service.state == CallState.ACTIVE
+        return self.service.state == CallState.ACTIVE and self.service.active_call is self
 
     async def hangup(self) -> None:
         """End this call."""
@@ -320,7 +320,11 @@ class CallSession:
             digits: One or more DTMF digits (0-9, *, #, A-D).
             duration_ms: Tone duration in milliseconds (modem default used if 0).
         """
+        if not self.is_active:
+            raise RuntimeError("Cannot send DTMF without an active call")
         for digit in digits:
+            if not self.is_active:
+                raise RuntimeError("Cannot send DTMF without an active call")
             await self.service._at.execute(
                 ATCommand.send_dtmf(digit), expect=["OK"], timeout=5.0
             )
