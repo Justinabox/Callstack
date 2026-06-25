@@ -51,7 +51,7 @@ from callstack import Modem, ModemConfig
 async def main():
     async with Modem(ModemConfig()) as modem:
         # Send an SMS
-        sms = await modem.sms.send("+1234567890", "Hello from Callstack!")
+        sms = await modem.sms.send("+15551234567", "Hello from Callstack!")
         print(f"Sent! Reference: {sms.reference}")
         
         # Subscribe to incoming messages
@@ -80,7 +80,7 @@ python server.py
 ```
 
 Endpoints:
-- `POST /sms/send` — Send SMS (`{"to": "+123...", "body": "..."}`)
+- `POST /sms/send` — Send SMS (`{"to": "+15551234567", "body": "..."}`); `to` must be an optional leading `+` followed by 3-15 digits (for example, `+15551234567` or `5551234`)
 - `POST /sms/subscribe` — Register webhook for incoming SMS
 - `GET /sms/messages` — List received messages
 - `GET /sms/delivery-reports` — List delivery status reports
