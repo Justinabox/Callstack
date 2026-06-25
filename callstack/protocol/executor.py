@@ -242,6 +242,8 @@ class ATCommandExecutor:
                 raw = await asyncio.wait_for(
                     self._transport.readline(), timeout=timeout
                 )
+            except asyncio.TimeoutError:
+                raise
             except (TransportError, OSError) as exc:
                 raise TransportError(
                     f"Transport error during command: {exc}"
