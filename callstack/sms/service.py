@@ -1,5 +1,6 @@
 """Full SMS service: send, receive, subscribe, manage."""
 
+import csv
 import logging
 import re
 from contextlib import asynccontextmanager
@@ -226,36 +227,32 @@ class SMSService:
             logger.warning("Failed to read delivery report at index %d", event.index)
             return
 
-        # Parse the delivery status from response lines
-        # Typical format: +CMGR: "REC READ","+number","","timestamp","timestamp",status
+        # Parse the delivery status from response lines.
+        # Text-mode status report format:
+        # +CMGR: "REC READ",<mr>,"<recipient>",<tora>,"<scts>","<dt>",<st>
+        reference = 0
         recipient = ""
-        status = "delivered"
+        status = ""
         for line in resp.data_lines:
             if line.startswith("+CMGR:"):
-                # Extract recipient from delivery report header
-                parts = line.split(",")
-                if len(parts) >= 2:
-                    recipient = parts[1].strip().strip('"')
-                # Check for failure indicators
-                if len(parts) >= 6:
-                    try:
-                        status_code = int(parts[-1].strip())
-                        if status_code == 0:
-                            status = "delivered"
-                        elif 1 <= status_code <= 31:
-                            status = "pending"
-                        else:
-                            status = "failed"
-                    except ValueError:
-                        pass
+                report = _parse_cmgr_status_report(line)
+                if report is not None:
+                    reference, recipient, status = report
 
         await self._at.execute(ATCommand.delete_sms(event.index), expect=["OK"])
 
+        if not status:
+            logger.warning(
+                "Could not parse delivery report at index %d", event.index
+            )
+            return
+
         await self._bus.emit(SMSDeliveryReportEvent(
+            reference=reference,
             recipient=recipient,
             status=status,
         ))
-        logger.info("Delivery report for %s: %s", recipient, status)
+        logger.info("Delivery report reference %d: %s", reference, status)
 
     # -- Subscription API --
 
@@ -387,6 +384,39 @@ class SMSService:
                     storage_index=index,
                 )
         return None
+
+
+def _parse_cmgr_status_report(line: str) -> Optional[tuple[int, str, str]]:
+    """Parse a text-mode +CMGR status-report header.
+
+    Uses CSV parsing so quoted timestamps containing commas remain a single field.
+    """
+    if not line.startswith("+CMGR:"):
+        return None
+
+    payload = line.split(":", 1)[1].strip()
+    try:
+        fields = next(csv.reader([payload], skipinitialspace=True))
+    except csv.Error:
+        return None
+
+    if len(fields) < 7:
+        return None
+
+    try:
+        reference = int(fields[1].strip())
+        status_code = int(fields[-1].strip())
+    except ValueError:
+        return None
+
+    if status_code == 0:
+        status = "delivered"
+    elif 1 <= status_code <= 31:
+        status = "pending"
+    else:
+        status = "failed"
+
+    return reference, fields[2].strip(), status
 
 
 def _collect_message_body(
