@@ -97,6 +97,26 @@ class TestRegistration:
         assert info.registered is True
         assert info.roaming is True
 
+    async def test_packet_registration_roaming(self):
+        svc, transport, _ = _make_service()
+        await transport.open()
+
+        transport.feed("+CGREG: 0,5", "OK")
+        info = await svc.registration()
+
+        assert info.registered is True
+        assert info.roaming is True
+
+    async def test_lte_registration_home(self):
+        svc, transport, _ = _make_service()
+        await transport.open()
+
+        transport.feed("+CEREG: 0,1", "OK")
+        info = await svc.registration()
+
+        assert info.registered is True
+        assert info.roaming is False
+
     async def test_not_registered(self):
         svc, transport, _ = _make_service()
         await transport.open()

@@ -96,7 +96,7 @@ class NetworkService:
         as a URC rather than including it in resp.lines. We capture it via
         the executor's capture_urcs context manager.
         """
-        with self._at.capture_urcs("+CREG:", "+CGREG:") as cap:
+        with self._at.capture_urcs("+CREG:", "+CGREG:", "+CEREG:") as cap:
             await self._at.execute(ATCommand.REGISTRATION, timeout=5.0)
 
         for line in cap.lines:

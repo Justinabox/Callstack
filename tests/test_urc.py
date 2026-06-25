@@ -51,6 +51,9 @@ class TestIsURC:
     def test_cmti(self, urc):
         assert urc.is_urc('+CMTI: "SM",3') is True
 
+    def test_cereg_registration(self, urc):
+        assert urc.is_urc("+CEREG: 0,1") is True
+
     def test_ok_not_urc(self, urc):
         assert urc.is_urc("OK") is False
 
@@ -144,3 +147,20 @@ class TestDispatch:
             await urc.dispatch('+CMTI: "SM",3')
             event = await stream.next(timeout=1.0)
             assert isinstance(event, _RawSMSNotification)
+
+    async def test_cereg_registration_is_handled_intentionally(self, urc, caplog):
+        caplog.set_level(logging.WARNING, logger="callstack.urc")
+
+        await urc.dispatch("+CEREG: 0,1")
+
+        assert "Unhandled URC" not in caplog.text
+
+    async def test_verbose_cereg_registration_logs_without_cell_identifiers(self, urc, caplog):
+        caplog.set_level(logging.INFO, logger="callstack.urc")
+
+        await urc.dispatch('+CEREG: 2,1,"ABCD","12345678",7')
+
+        assert "+CEREG" in caplog.text
+        assert "status=1" in caplog.text
+        assert "ABCD" not in caplog.text
+        assert "12345678" not in caplog.text
