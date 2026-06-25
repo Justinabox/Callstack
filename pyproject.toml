@@ -18,9 +18,13 @@ callstack = "callstack.cli:main"
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
+    "pytest-aiohttp>=1.0",
 ]
 sqlite = [
     "aiosqlite",
+]
+server = [
+    "aiohttp>=3.9",
 ]
 
 [tool.pytest.ini_options]
