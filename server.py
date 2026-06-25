@@ -68,7 +68,7 @@ class APIKeyAuth:
             )
 
         key = auth_header[7:]
-        if not secrets.compare_digest(key, key) or key not in self._keys:
+        if not self._is_valid_key(key):
             return web.json_response({"error": "Invalid API key."}, status=403)
 
         # Rate limiting
@@ -87,6 +87,12 @@ class APIKeyAuth:
         log.append(now)
 
         return await handler(request)
+
+    def _is_valid_key(self, candidate_key: str) -> bool:
+        valid = False
+        for stored_key in self._keys:
+            valid |= secrets.compare_digest(candidate_key, stored_key)
+        return valid
 
     def add_key(self, key: str) -> None:
         self._keys.add(key)
