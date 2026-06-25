@@ -12,6 +12,9 @@
 - ✅ Packaging discovery scoped to `callstack*` so the flat-layout `audio/` directory does not break builds.
 - ✅ Signal-quality polish: BER values now have human-readable descriptions.
 - ✅ Multipart SMS groundwork: concatenated-message UDH metadata parser for 8-bit and 16-bit references.
+- ✅ HTTP observability: `/healthz` and PII-safe Prometheus `/metrics` expose aggregate readiness and runtime counters.
+- ✅ CLI groundwork: `callstack status`, `callstack send`, and safe `callstack doctor` support local Pi operations and hardware bring-up.
+- ✅ Conservative modem profile helpers classify known modem identities without mutating hardware state.
 
 ---
 
@@ -23,12 +26,15 @@
 
 ### WebSocket Real-Time Feed
 - `/ws` endpoint for live event streaming: SMS, delivery reports, call state, signal quality, and USSD responses.
+- Keep API-key authentication, bounded labels/payloads, and no raw SMS bodies, phone numbers, USSD text, SIM identifiers, or modem serials in broadcast metadata unless an explicit authenticated consumer requests them.
 
-### Prometheus/Metrics Endpoint
-- `/metrics` with messages sent/received/failed, delivery-report counts, active calls, signal quality, and uptime.
+### Observability Follow-Ups
+- `/healthz` and `/metrics` are shipped; next observability work should focus on auth defaults, deployment config, and documenting production-safe scrape patterns.
+- Add PII-safe local event tailing through `callstack monitor`.
 
 ### Modem Auto-Detection
-- Scan `/dev/ttyUSB*`, probe with `ATI`, and auto-detect model plus AT/audio port assignment.
+- Safe explicit-port `callstack doctor` probing is shipped.
+- Next step: active auto-detection that can scan candidate `/dev/ttyUSB*` ports, choose AT/audio assignments conservatively, and keep all probes non-mutating.
 
 ---
 
@@ -53,7 +59,20 @@
 ## Phase 4 — Developer Experience (v0.5)
 
 ### CLI Tool
-- `callstack send`, `callstack status`, `callstack monitor`.
+- Shipped: `callstack send`, `callstack status`, and safe `callstack doctor`.
+- Planned: PII-safe `callstack monitor`, richer config/env loading, and deployment-friendly examples.
+
+---
+
+## Next hardening order
+
+Prefer these small, reviewable slices before broad realtime/dashboard expansion:
+
+1. Auth and secret hygiene: constant-time API-key regression coverage (#67), redacted environment config (#58), and privacy-safe default logging (#61).
+2. SMS correctness: PDU recipient validation (#66), text-mode inbound body fidelity (#72), multipart reassembly/finality (#10), and delivery-report edge cases.
+3. Webhook safety: URL admission and dispatch hardening (#47), signed delivery with retry/backoff (#21), and bounded error logs.
+4. Operator DX: reconcile the shipped safe doctor command with its tracking issue (#57), then add PII-safe `callstack monitor` (#50), production-safe health/metrics deployment notes, and explicit modem discovery/autoconnect follow-ups (#11).
+5. Realtime and PBX: WebSocket event streaming (#31), scheduled SMS (#49), pre-answer routing (#40), voicemail helpers (#41), and IVR/DTMF hardening once SMS/security foundations stay green.
 
 ### Plugin/Middleware System
 - Hook into event pipeline: auto-reply, spam filtering, message transforms.
@@ -89,12 +108,13 @@
 | Priority | Feature | Effort | Impact | Status |
 |----------|---------|--------|--------|--------|
 | P0 | Multi-Part SMS Reassembly | Medium | High | UDH parser done; service integration next |
-| P1 | WebSocket Feed | Medium | High | Planned |
-| P1 | Metrics Endpoint | Low | Medium | Planned |
-| P1 | Modem Auto-Detection | Medium | High | Planned |
+| P0 | SMS/security hardening | Small-Medium | High | Continue recipient validation, text-mode fidelity, auth, redaction, and webhook safety |
+| P1 | WebSocket Feed | Medium | High | Planned after SMS/security foundations |
+| P1 | PII-safe CLI monitor | Low-Medium | Medium | Planned; status/send/doctor are shipped |
+| P1 | Modem Auto-Detection | Medium | High | Safe explicit-port doctor shipped; active scanning/assignment planned |
 | P2 | Voicemail System | Medium | High | Planned |
 | P2 | GPS/GNSS | Medium | High | Planned |
 | P2 | Scheduled SMS | Low | Medium | Planned |
-| P3 | Web Dashboard | High | Medium | Planned |
+| P3 | Web Dashboard | High | Medium | Planned after realtime/security foundations |
 | P3 | Multi-Modem | High | High | Planned |
 | P3 | Plugin System | Medium | Medium | Planned |
