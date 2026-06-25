@@ -1,6 +1,8 @@
 """Tests for the SMS service."""
 
 import asyncio
+from datetime import timedelta
+
 import pytest
 from callstack.events.bus import EventBus
 from callstack.events.types import IncomingSMSEvent, SMSSentEvent, _RawSMSNotification
@@ -230,8 +232,27 @@ async def test_list_messages(sms_service, transport):
     assert messages[0].sender == "+155****1111"
     assert messages[0].body == "Hello"
     assert messages[0].storage_index == 0
+    assert messages[0].timestamp.utcoffset() == timedelta(hours=1)
     assert messages[1].sender == "+155****2222"
     assert messages[1].body == "World"
+    assert messages[1].timestamp.utcoffset() == timedelta(hours=1)
+
+
+async def test_list_messages_preserves_signed_timezone_offsets(sms_service, transport):
+    """CMGL text-mode timestamps preserve signed GSM quarter-hour offsets."""
+    transport.feed(
+        '+CMGL: 0,"REC UNREAD","+155****1111","","24/12/25,10:00:00+04"',
+        "East",
+        '+CMGL: 1,"REC READ","+155****2222","","24/12/25,11:00:00-04"',
+        "West",
+        "OK",
+    )
+
+    messages = await sms_service.list_messages()
+
+    assert len(messages) == 2
+    assert messages[0].timestamp.utcoffset() == timedelta(hours=1)
+    assert messages[1].timestamp.utcoffset() == -timedelta(hours=1)
 
 
 async def test_list_messages_preserves_multiline_body(sms_service, transport):
@@ -271,6 +292,21 @@ async def test_read_message(sms_service, transport):
     assert sms.sender == "+155****1234"
     assert sms.body == "Test body"
     assert sms.storage_index == 0
+    assert sms.timestamp.utcoffset() == timedelta(hours=1)
+
+
+async def test_read_message_preserves_signed_timezone_offset(sms_service, transport):
+    """CMGR text-mode timestamps preserve negative GSM quarter-hour offsets."""
+    transport.feed(
+        '+CMGR: "REC UNREAD","+155****1234","","24/12/25,14:30:00-04"',
+        "Test body",
+        "OK",
+    )
+
+    sms = await sms_service.read_message(0)
+
+    assert sms is not None
+    assert sms.timestamp.utcoffset() == -timedelta(hours=1)
 
 
 async def test_read_message_preserves_multiline_body(sms_service, transport):
@@ -433,6 +469,16 @@ async def test_parse_timestamp():
     assert ts.day == 25
     assert ts.hour == 14
     assert ts.minute == 30
+    assert ts.utcoffset() == timedelta(hours=1)
+
+    negative = _parse_timestamp("24/12/25,14:30:00-04")
+    assert negative is not None
+    assert negative.utcoffset() == -timedelta(hours=1)
+
+    no_offset = _parse_timestamp("24/12/25,14:30:00")
+    assert no_offset is not None
+    assert no_offset.tzinfo is None
 
     assert _parse_timestamp("") is None
     assert _parse_timestamp("invalid") is None
+    assert _parse_timestamp("24/12/25,14:30:00+99") is None
