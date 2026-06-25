@@ -133,6 +133,8 @@ def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Applicati
                 "status": resp.status,
                 "message": resp.message,
             })
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
         except (TimeoutError, RuntimeError) as exc:
             return web.json_response({"error": str(exc)}, status=504)
 

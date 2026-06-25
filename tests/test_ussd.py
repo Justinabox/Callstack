@@ -1,12 +1,16 @@
 """Tests for USSD service."""
 
 import asyncio
+from typing import cast
+
 import pytest
 from callstack.events.bus import EventBus
 from callstack.events.types import USSDResponseEvent
 from callstack.protocol.commands import ATCommand
+from callstack.protocol.executor import ATCommandExecutor
 from callstack.protocol.parser import ATResponseParser
 from callstack.protocol.urc import URCDispatcher
+from callstack.ussd import USSDService
 
 
 @pytest.fixture
@@ -26,8 +30,44 @@ class TestUSSDCommand:
     def test_ussd_send_custom_encoding(self):
         assert ATCommand.ussd_send("*100#", encoding=0) == 'AT+CUSD=1,"*100#",0'
 
+    @pytest.mark.parametrize("code", ['*100#"', "*100#\rAT+CMGD=1,4", "*100#\nAT+CMGD=1,4"])
+    def test_ussd_send_rejects_command_breakout_characters(self, code):
+        with pytest.raises(ValueError, match="Invalid USSD code"):
+            ATCommand.ussd_send(code)
+
+    @pytest.mark.parametrize("encoding", [-1, 256, "15", True])
+    def test_ussd_send_rejects_unsupported_encoding_values(self, encoding):
+        with pytest.raises(ValueError, match="Invalid USSD encoding"):
+            ATCommand.ussd_send("*100#", encoding=encoding)
+
     def test_ussd_cancel(self):
         assert ATCommand.USSD_CANCEL == "AT+CUSD=2"
+
+
+class TestUSSDServiceValidation:
+    async def test_invalid_ussd_code_fails_before_modem_write(self, bus):
+        class FailingExecutor:
+            async def execute(self, *_args, **_kwargs):
+                raise AssertionError("USSD validation should run before modem writes")
+
+        service = USSDService(cast(ATCommandExecutor, FailingExecutor()), bus)
+
+        with pytest.raises(ValueError, match="Invalid USSD code"):
+            await service.send("*100#\rAT+CMGD=1,4", timeout=0.01)
+
+    async def test_ussd_timeout_error_does_not_echo_code(self, bus):
+        class SuccessfulExecutor:
+            async def execute(self, *_args, **_kwargs):
+                return type("Response", (), {"success": True})()
+
+        service = USSDService(cast(ATCommandExecutor, SuccessfulExecutor()), bus)
+
+        private_code = "*123*9999#"
+        with pytest.raises(TimeoutError) as excinfo:
+            await service.send(private_code, timeout=0.001)
+
+        assert private_code not in str(excinfo.value)
+        assert "USSD response" in str(excinfo.value)
 
 
 class TestCUSDParser:

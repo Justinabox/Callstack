@@ -3,6 +3,7 @@
 import re
 
 _PHONE_RE = re.compile(r'^[0-9+*#]+$')
+_USSD_BREAKOUT_CHARS = frozenset({'"', "\r", "\n"})
 
 
 def _validate_phone(number: str) -> str:
@@ -10,6 +11,22 @@ def _validate_phone(number: str) -> str:
     if not number or not _PHONE_RE.match(number):
         raise ValueError(f"Invalid phone number: {number!r} (only digits, +, *, # allowed)")
     return number
+
+
+def _validate_ussd_code(code: str) -> str:
+    """Validate USSD/menu input before embedding it in a quoted AT command."""
+    if not isinstance(code, str) or not code:
+        raise ValueError("Invalid USSD code")
+    if any(char in code for char in _USSD_BREAKOUT_CHARS):
+        raise ValueError("Invalid USSD code")
+    return code
+
+
+def _validate_ussd_encoding(encoding: int) -> int:
+    """Validate USSD data coding scheme values used by AT+CUSD."""
+    if type(encoding) is not int or not (0 <= encoding <= 255):
+        raise ValueError("Invalid USSD encoding")
+    return encoding
 
 
 class ATCommand:
@@ -112,6 +129,6 @@ class ATCommand:
     # USSD
     @staticmethod
     def ussd_send(code: str, encoding: int = 15) -> str:
-        return f'AT+CUSD=1,"{code}",{encoding}'
+        return f'AT+CUSD=1,"{_validate_ussd_code(code)}",{_validate_ussd_encoding(encoding)}'
 
     USSD_CANCEL = "AT+CUSD=2"
