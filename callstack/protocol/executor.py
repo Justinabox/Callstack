@@ -26,6 +26,16 @@ FINAL_ERROR_PREFIXES = ("+CME ERROR:", "+CMS ERROR:")
 _TRANSPORT_ERROR = object()
 
 
+def _decode_transport_line(raw: bytes) -> str:
+    """Decode one transport-framed line without stripping message content."""
+    return raw.decode("ascii", errors="replace").rstrip("\r\n")
+
+
+def _normalize_control_line(line: str) -> str:
+    """Normalize AT control/header lines while keeping payload handling separate."""
+    return line.strip()
+
+
 @dataclass
 class ATResponse:
     """Structured AT command response."""
@@ -130,27 +140,31 @@ class ATCommandExecutor:
                     continue
 
                 consecutive_errors = 0
-                line = raw.decode("ascii", errors="replace").strip()
-                if not line:
-                    continue
+                raw_line = _decode_transport_line(raw)
 
                 if self._command_in_flight:
-                    await self._line_queue.put(line)
+                    await self._line_queue.put(raw_line)
+                    continue
+
+                control_line = _normalize_control_line(raw_line)
+                if not control_line:
+                    continue
+
+                # Idle — dispatch URCs using normalized control headers while
+                # preserving any follow-up payload body as framed.
+                if self._urc.is_urc(control_line):
+                    followup = ""
+                    if self._urc.needs_followup(control_line):
+                        try:
+                            raw_f = await asyncio.wait_for(
+                                self._transport.readline(), timeout=2.0
+                            )
+                            followup = _decode_transport_line(raw_f)
+                        except asyncio.TimeoutError:
+                            pass
+                    await self._urc.dispatch(control_line, followup)
                 else:
-                    # Idle — dispatch URCs
-                    if self._urc.is_urc(line):
-                        followup = ""
-                        if self._urc.needs_followup(line):
-                            try:
-                                raw_f = await asyncio.wait_for(
-                                    self._transport.readline(), timeout=2.0
-                                )
-                                followup = raw_f.decode("ascii", errors="replace").strip()
-                            except asyncio.TimeoutError:
-                                pass
-                        await self._urc.dispatch(line, followup)
-                    else:
-                        logger.debug("Ignoring non-URC idle line: %s", line)
+                    logger.debug("Ignoring non-URC idle line: %s", control_line)
         finally:
             self._command_in_flight = False
 
@@ -248,12 +262,52 @@ class ATCommandExecutor:
                 raise TransportError(
                     f"Transport error during command: {exc}"
                 ) from exc
-            line = raw.decode("ascii", errors="replace").strip()
+            line = _decode_transport_line(raw)
             return line
 
     def _command_preserves_urc_like_payload(self, command: str) -> bool:
         """Return true for commands whose data payload may look like URCs."""
         return command.startswith(("AT+CMGR", "AT+CMGL"))
+
+    def _response_line_for_command(
+        self, command: str, raw_line: str, control_line: str
+    ) -> str:
+        """Choose the response line representation exposed to callers.
+
+        General AT control/header lines keep the historical stripped behavior.
+        SMS read/list payload lines keep leading/trailing body whitespace.
+        """
+        if command.startswith("AT+CMGR"):
+            if control_line.startswith("+CMGR:"):
+                return control_line
+            return raw_line
+        if command.startswith("AT+CMGL"):
+            if control_line.startswith("+CMGL:"):
+                return control_line
+            return raw_line
+        return control_line
+
+    def _line_matches_success(
+        self,
+        command: str,
+        raw_line: str,
+        control_line: str,
+        expect: list[str] | tuple[str, ...],
+    ) -> bool:
+        """Return true when a line is an expected command terminator."""
+        if self._command_preserves_urc_like_payload(command):
+            return raw_line in expect
+        return control_line in expect
+
+    def _line_matches_error(
+        self, command: str, raw_line: str, control_line: str
+    ) -> bool:
+        """Return true when a line is a final error result."""
+        if self._command_preserves_urc_like_payload(command):
+            line = raw_line
+        else:
+            line = control_line
+        return line in FINAL_ERROR or any(line.startswith(e) for e in FINAL_ERROR_PREFIXES)
 
     async def _collect_response(
         self, command: str, expect: list[str] | tuple[str, ...], timeout: float
@@ -270,19 +324,20 @@ class ATCommandExecutor:
                 )
 
             try:
-                line = await self._next_line(remaining)
+                raw_line = await self._next_line(remaining)
             except asyncio.TimeoutError:
                 raise ATTimeoutError(
                     f"Timeout after {timeout}s waiting for {expect} (command: {command})"
                 )
 
-            if not line:
+            control_line = _normalize_control_line(raw_line)
+            if not control_line and not self._command_preserves_urc_like_payload(command):
                 continue
 
-            logger.debug("RX: %s", line)
+            logger.debug("RX: %s", raw_line)
 
-            # Echo suppression: skip if the line matches the command we sent
-            if line == command:
+            # Echo suppression: skip if the line matches the command we sent.
+            if control_line == command:
                 continue
 
             # Check if this is a URC that arrived during command execution.
@@ -290,11 +345,11 @@ class ATCommandExecutor:
             # starts with URC prefixes, so keep those lines framed by the
             # command response's final result code instead of dispatching them.
             if (
-                self._urc.is_urc(line)
+                self._urc.is_urc(control_line)
                 and not self._command_preserves_urc_like_payload(command)
             ):
                 followup = ""
-                if self._urc.needs_followup(line):
+                if self._urc.needs_followup(control_line):
                     try:
                         followup_remaining = deadline - loop.time()
                         followup = await self._next_line(
@@ -302,17 +357,22 @@ class ATCommandExecutor:
                         )
                     except asyncio.TimeoutError:
                         pass
-                await self._urc.dispatch(line, followup)
+                await self._urc.dispatch(control_line, followup)
                 continue
 
-            lines.append(line)
+            lines.append(
+                self._response_line_for_command(command, raw_line, control_line)
+            )
 
-            # Check for expected success result codes
-            if line in expect:
+            # Check for expected success result codes. For SMS read/list commands,
+            # do not trim body lines such as "OK "; they are payload until an
+            # exact final result code frames the response. SMS send prompts still
+            # match via normalized control lines because they are not CMGR/CMGL.
+            if self._line_matches_success(command, raw_line, control_line, expect):
                 return ATResponse(success=True, lines=lines)
 
-            # Check for error result codes
-            if line in FINAL_ERROR or any(line.startswith(e) for e in FINAL_ERROR_PREFIXES):
+            # Check for error result codes.
+            if self._line_matches_error(command, raw_line, control_line):
                 return ATResponse(success=False, lines=lines)
 
 

@@ -273,6 +273,20 @@ async def test_list_messages_preserves_multiline_body(sms_service, transport):
     assert messages[1].body == "world"
 
 
+async def test_list_messages_preserves_body_line_edge_spaces(sms_service, transport):
+    """CMGL text-mode bodies keep leading and trailing body spaces."""
+    transport.feed(
+        '+CMGL: 0,"REC UNREAD","+155****1111","","24/12/25,10:00:00+04"',
+        "  padded code 123  ",
+        "OK",
+    )
+
+    messages = await sms_service.list_messages()
+
+    assert len(messages) == 1
+    assert messages[0].body == "  padded code 123  "
+
+
 async def test_list_messages_empty(sms_service, transport):
     """List messages when SIM is empty."""
     transport.feed("OK")
@@ -322,6 +336,74 @@ async def test_read_message_preserves_multiline_body(sms_service, transport):
 
     assert sms is not None
     assert sms.body == "first line\nsecond line"
+
+
+async def test_read_message_preserves_body_line_edge_spaces(sms_service, transport):
+    """CMGR text-mode bodies keep leading and trailing body spaces."""
+    transport.feed(
+        '+CMGR: "REC UNREAD","+155****1234","","24/12/25,14:30:00+04"',
+        "  padded code 123  ",
+        "OK",
+    )
+
+    sms = await sms_service.read_message(0)
+
+    assert sms is not None
+    assert sms.body == "  padded code 123  "
+
+
+async def test_read_message_preserves_ok_with_trailing_space_body_line(sms_service, transport):
+    """CMGR body lines that look like padded OK are not final results."""
+    transport.feed(
+        '+CMGR: "REC UNREAD","+155****1234","","24/12/25,14:30:00+04"',
+        "OK ",
+        "second line",
+        "OK",
+    )
+
+    sms = await sms_service.read_message(0)
+
+    assert sms is not None
+    assert sms.body == "OK \nsecond line"
+
+
+async def test_read_message_preserves_blank_and_space_only_body_lines_with_reader(
+    sms_service, executor, transport
+):
+    """Reader-loop CMGR collection keeps blank and all-space body lines."""
+    await executor.start_reader()
+    try:
+        task = asyncio.create_task(sms_service.read_message(0))
+        await asyncio.sleep(0)
+        transport.feed(
+            '+CMGR: "REC UNREAD","+155****1234","","24/12/25,14:30:00+04"',
+            "first",
+            "",
+            "   ",
+            "second",
+            "OK",
+        )
+
+        sms = await task
+    finally:
+        await executor.stop_reader()
+
+    assert sms is not None
+    assert sms.body == "first\n\n   \nsecond"
+
+
+async def test_read_message_normalizes_leading_padded_header(sms_service, transport):
+    """CMGR headers remain control lines even with leading modem whitespace."""
+    transport.feed(
+        '  +CMGR: "REC UNREAD","+155****1234","","24/12/25,14:30:00+04"',
+        "body",
+        "OK",
+    )
+
+    sms = await sms_service.read_message(0)
+
+    assert sms is not None
+    assert sms.body == "body"
 
 
 async def test_read_message_preserves_cmgl_shaped_body_line(sms_service, transport):
