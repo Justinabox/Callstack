@@ -84,6 +84,11 @@ class Modem:
         # Wire incoming call routing (subscribe once, not per-connection)
         self.bus.subscribe(RingEvent, self._on_ring)
 
+    @property
+    def connected(self) -> bool:
+        """Whether the modem has completed startup and is currently connected."""
+        return self._connected
+
     # -- Context manager --
 
     async def __aenter__(self) -> "Modem":
