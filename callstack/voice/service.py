@@ -289,26 +289,62 @@ class CallSession:
         )
 
         if interrupt:
-            # Use a single stream context to avoid losing events between
-            # collect_one and collect calls
+            # Use a single stream context to avoid losing events between the
+            # first keypress race and any remaining digit collection. The
+            # no-input timeout starts after prompt playback unless a digit
+            # arrives early and interrupts the prompt.
             async with self.service._bus.stream(DTMFEvent) as events:
                 play_task = asyncio.create_task(self.play(audio_path))
-                first = await collector.collect_one_from_stream(events, timeout=timeout)
-                if first:
-                    play_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await play_task
+                first_event_task = asyncio.create_task(events.next())
+
+                def event_digit(event: object) -> str | None:
+                    if isinstance(event, DTMFEvent) and event.digit != terminator:
+                        return event.digit
+                    return None
+
+                async def finish_collection(first: str | None) -> str:
+                    if not first:
+                        return ""
                     if max_digits > 1:
                         remaining = await collector.collect_from_stream(
                             events, max_digits=max_digits - 1, timeout=timeout
                         )
                         return first + remaining
                     return first
-                # No digit received during playback — wait for remaining timeout
-                play_task.cancel()
-                with suppress(asyncio.CancelledError):
+
+                try:
+                    done, _ = await asyncio.wait(
+                        {play_task, first_event_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+
+                    if first_event_task in done:
+                        event = first_event_task.result()
+                        first = event_digit(event)
+                        play_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await play_task
+                        return await finish_collection(first)
+
                     await play_task
-                return ""
+                    try:
+                        event = await asyncio.wait_for(first_event_task, timeout=timeout)
+                    except asyncio.TimeoutError:
+                        first_event_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await first_event_task
+                        return ""
+                    first = event_digit(event)
+                    return await finish_collection(first)
+                finally:
+                    if not first_event_task.done():
+                        first_event_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await first_event_task
+                    if not play_task.done():
+                        play_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await play_task
         else:
             await self.play(audio_path)
             return await collector.collect()
