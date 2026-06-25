@@ -28,6 +28,16 @@ def test_parse_registration_roaming():
     assert result == (0, 5)
 
 
+def test_parse_packet_registration_roaming():
+    result = ATResponseParser.parse_registration("+CGREG: 0,5")
+    assert result == (0, 5)
+
+
+def test_parse_lte_registration_home():
+    result = ATResponseParser.parse_registration("+CEREG: 0,1")
+    assert result == (0, 1)
+
+
 def test_parse_clip():
     result = ATResponseParser.parse_clip('+CLIP: "+15551234567",145,,,,0')
     assert result == "+15551234567"
