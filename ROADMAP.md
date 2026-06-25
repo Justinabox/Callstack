@@ -68,8 +68,8 @@
 
 Prefer these small, reviewable slices before broad realtime/dashboard expansion:
 
-1. Auth and secret hygiene: constant-time API-key regression coverage (#67), redacted environment config (#58), and privacy-safe default logging (#61).
-2. SMS correctness: PDU recipient validation (#66), text-mode inbound body fidelity (#72), multipart reassembly/finality (#10), and delivery-report edge cases.
+1. Auth and secret hygiene: redacted environment config (#58), privacy-safe default logging (#61), and deployment-safe auth defaults.
+2. SMS correctness: text-mode inbound body fidelity (#72), multipart reassembly/finality (#10), delivery-report edge cases, and continued recipient-validation regression coverage.
 3. Webhook safety: URL admission and dispatch hardening (#47), signed delivery with retry/backoff (#21), and bounded error logs.
 4. Operator DX: reconcile the shipped safe doctor command with its tracking issue (#57), then add PII-safe `callstack monitor` (#50), production-safe health/metrics deployment notes, and explicit modem discovery/autoconnect follow-ups (#11).
 5. Realtime and PBX: WebSocket event streaming (#31), scheduled SMS (#49), pre-answer routing (#40), voicemail helpers (#41), and IVR/DTMF hardening once SMS/security foundations stay green.

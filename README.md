@@ -89,7 +89,7 @@ Endpoints:
 - `GET /healthz` — Return a public-safe readiness payload with modem connectivity, uptime, and SMS-store readiness
 - `GET /metrics` — Return Prometheus text metrics with aggregate counters/gauges only; labels and values intentionally avoid phone numbers, SMS bodies, USSD payloads, SIM identifiers, API keys, and raw modem identifiers
 
-If `create_app(..., api_keys=[...])` is configured, HTTP requests must include a redacted `Authorization: Bearer <redacted>` header and are rate-limited per key.
+If `create_app(..., api_keys=[...])` is configured, HTTP requests must include an `Authorization` bearer-token header (for example, `Authorization: Bearer ***`) and are rate-limited per key.
 
 ### CLI
 
