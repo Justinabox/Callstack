@@ -4,6 +4,7 @@ Handles GSM 7-bit default alphabet encoding/decoding and PDU frame
 construction for modems operating in PDU mode (AT+CMGF=0).
 """
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -37,6 +38,17 @@ GSM7_EXTENSION = {
 # Reverse lookup for encoding/decoding
 _GSM7_ENCODE = {c: i for i, c in enumerate(GSM7_BASIC)}
 _GSM7_EXTENSION_DECODE = {code: char for char, code in GSM7_EXTENSION.items()}
+_SMS_RECIPIENT_RE = re.compile(r"\+?[0-9]{3,15}\Z")
+
+
+def _validate_sms_recipient(recipient: str) -> str:
+    """Validate a PDU-mode SMS destination address before semi-octet encoding."""
+    if not isinstance(recipient, str) or not _SMS_RECIPIENT_RE.fullmatch(recipient):
+        raise ValueError(
+            f"Invalid SMS recipient: {recipient!r} "
+            "(use optional leading + followed by 3-15 digits)"
+        )
+    return recipient
 
 
 class PDUEncoder:
@@ -129,6 +141,7 @@ class PDUEncoder:
         mr = "00"
 
         # Destination address
+        recipient = _validate_sms_recipient(recipient)
         clean = recipient.lstrip("+")
         da_len = f"{len(clean):02X}"
         da_encoded, da_toa = PDUEncoder.encode_phone_number(recipient)
