@@ -47,6 +47,16 @@ class TestCUSDParser:
         result = ATResponseParser.parse_cusd('+CUSD: 0,"Balance: $10"')
         assert result == (0, "Balance: $10", 15)
 
+    def test_parse_cusd_decodes_ucs2_message(self):
+        result = ATResponseParser.parse_cusd(
+            '+CUSD: 0,"0059006F00750072002000620061006C0061006E00630065002000690073002000240035002E00300030",72'
+        )
+        assert result == (0, "Your balance is $5.00", 72)
+
+    def test_parse_cusd_malformed_ucs2_falls_back_to_raw_message(self):
+        result = ATResponseParser.parse_cusd('+CUSD: 0,"0059006",72')
+        assert result == (0, "0059006", 72)
+
     def test_parse_cusd_invalid(self):
         result = ATResponseParser.parse_cusd("OK")
         assert result is None
@@ -68,6 +78,16 @@ class TestCUSDDispatch:
             event = await stream.next(timeout=1.0)
             assert event.status == 2
             assert event.message == ""
+
+    async def test_cusd_emits_decoded_ucs2_event(self, bus, urc):
+        async with bus.stream(USSDResponseEvent) as stream:
+            await urc.dispatch(
+                '+CUSD: 0,"0059006F00750072002000620061006C0061006E00630065002000690073002000240035002E00300030",72'
+            )
+            event = await stream.next(timeout=1.0)
+            assert event.status == 0
+            assert event.message == "Your balance is $5.00"
+            assert event.encoding == 72
 
 
 class TestUSSDResponseEvent:
