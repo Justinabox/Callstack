@@ -58,6 +58,27 @@ async def test_data_lines(executor, transport):
     assert resp.data_lines == ["+CSQ: 20,0"]
 
 
+async def test_padded_ok_final_result_is_normalized_for_control_responses(executor, transport):
+    """Trailing modem whitespace on control final codes is not response data."""
+    transport.feed("+CSQ: 20,0 ", "OK  ")
+
+    resp = await executor.execute("AT+CSQ")
+
+    assert resp.success is True
+    assert resp.lines == ["+CSQ: 20,0", "OK"]
+    assert resp.data_lines == ["+CSQ: 20,0"]
+
+
+async def test_padded_error_final_result_is_normalized_for_control_responses(executor, transport):
+    """Trailing modem whitespace on ERROR still completes as a failure."""
+    transport.feed("ERROR  ")
+
+    resp = await executor.execute("AT+INVALID")
+
+    assert resp.success is False
+    assert resp.lines == ["ERROR"]
+
+
 def test_data_lines_only_excludes_trailing_final_result_code():
     """Final-code-looking payload lines before the terminator remain data."""
     response = ATResponse(
