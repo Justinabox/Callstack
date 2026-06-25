@@ -58,7 +58,7 @@ class USSDService:
 
             return await asyncio.wait_for(response_future, timeout=timeout)
         except asyncio.TimeoutError:
-            raise TimeoutError(f"No USSD response within {timeout}s for {code}")
+            raise TimeoutError(f"No USSD response within {timeout}s")
         finally:
             self._bus.unsubscribe(USSDResponseEvent, capture)
 

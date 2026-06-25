@@ -1,8 +1,10 @@
 """Tests for API key authentication middleware."""
 
 import time
+from types import SimpleNamespace
+from typing import cast
+
 import pytest
-from unittest.mock import AsyncMock
 from aiohttp import web
 from aiohttp.test_utils import AioHTTPTestCase, TestClient, TestServer
 
@@ -11,7 +13,10 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from server import APIKeyAuth
+from callstack.events.bus import EventBus
+from callstack.protocol.executor import ATCommandExecutor
+from callstack.ussd import USSDService
+from server import APIKeyAuth, create_app
 
 
 @pytest.fixture
@@ -107,3 +112,25 @@ class TestRateLimiting:
         assert resp.status == 429
         data = await resp.json()
         assert "Rate limit" in data["error"]
+
+
+class TestUSSDEndpointValidation:
+    async def test_ussd_validation_error_returns_400_json_without_modem_write(self, aiohttp_client):
+        class RecordingExecutor:
+            def __init__(self):
+                self.commands = []
+
+            async def execute(self, command, **_kwargs):
+                self.commands.append(command)
+                raise AssertionError("USSD validation should run before modem writes")
+
+        executor = RecordingExecutor()
+        modem = SimpleNamespace(ussd=USSDService(cast(ATCommandExecutor, executor), EventBus()))
+        client = await aiohttp_client(create_app(modem))
+
+        resp = await client.post("/ussd/send", json={"code": "*100#\rAT+CMGD=1,4"})
+
+        assert resp.status == 400
+        data = await resp.json()
+        assert data == {"error": "Invalid USSD code"}
+        assert executor.commands == []

@@ -191,8 +191,11 @@ def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Applicati
                 "status": resp.status,
                 "message": resp.message,
             })
-        except ValueError:
-            return web.json_response({"error": "invalid USSD request"}, status=400)
+        except ValueError as exc:
+            error_message = str(exc)
+            if error_message not in {"Invalid USSD code", "Invalid USSD encoding"}:
+                error_message = "invalid USSD request"
+            return web.json_response({"error": error_message}, status=400)
         except (TimeoutError, RuntimeError) as exc:
             return web.json_response({"error": str(exc)}, status=504)
 
