@@ -15,6 +15,7 @@ from aiohttp import web
 
 from callstack import Modem, ModemConfig, CallSession, IncomingSMSEvent
 from callstack.events.types import SMSDeliveryReportEvent
+from callstack.metrics import CallstackMetrics
 from callstack.protocol.commands import ATCommand
 
 logger = logging.getLogger("server")
@@ -126,6 +127,14 @@ def _optional_positive_timeout(
 def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Application:
     auth = APIKeyAuth(api_keys=api_keys)
     app = web.Application(middlewares=[auth.middleware])
+    metrics = CallstackMetrics(modem)
+    app["callstack_metrics"] = metrics
+
+    async def healthz(request: web.Request) -> web.Response:
+        return web.json_response(metrics.health_payload(), status=metrics.health_status())
+
+    async def render_metrics(request: web.Request) -> web.Response:
+        return web.Response(text=metrics.render_prometheus(), content_type="text/plain")
 
     async def send_sms(request: web.Request) -> web.Response:
         data, error = await _json_body(request)
@@ -199,6 +208,8 @@ def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Applicati
         except (TimeoutError, RuntimeError) as exc:
             return web.json_response({"error": str(exc)}, status=504)
 
+    app.router.add_get("/healthz", healthz)
+    app.router.add_get("/metrics", render_metrics)
     app.router.add_post("/sms/send", send_sms)
     app.router.add_post("/sms/subscribe", subscribe)
     app.router.add_get("/sms/messages", list_messages)

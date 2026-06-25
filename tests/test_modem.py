@@ -90,6 +90,15 @@ class TestModemInit:
 
         assert modem._connected is False
 
+    async def test_connected_property_tracks_modem_readiness(self):
+        modem = MockModem()
+        _feed_init_responses(modem._at_transport)
+
+        assert modem.connected is False
+        async with modem:
+            assert modem.connected is True
+        assert modem.connected is False
+
     async def test_initialization_sends_at_commands(self):
         modem = MockModem()
         _feed_init_responses(modem._at_transport)
