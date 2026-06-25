@@ -1,17 +1,21 @@
 """Auto-answer calls + SMS HTTP server using Callstack."""
 
 import asyncio
+import json
 import logging
+import math
 import secrets
 import time
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 import aiohttp
 from aiohttp import web
 
 from callstack import Modem, ModemConfig, CallSession, IncomingSMSEvent
 from callstack.events.types import SMSDeliveryReportEvent
+from callstack.protocol.commands import ATCommand
 
 logger = logging.getLogger("server")
 
@@ -91,17 +95,59 @@ class APIKeyAuth:
         self.enabled = bool(self._keys)
 
 
+async def _json_body(request: web.Request) -> tuple[dict[str, Any] | None, web.Response | None]:
+    try:
+        data = await request.json()
+    except (aiohttp.ContentTypeError, json.JSONDecodeError, UnicodeDecodeError):
+        return None, web.json_response({"error": "invalid JSON body"}, status=400)
+    if not isinstance(data, dict):
+        return None, web.json_response({"error": "JSON body must be an object"}, status=400)
+    return data, None
+
+
+def _required_string(data: dict[str, Any], field: str) -> tuple[str | None, web.Response | None]:
+    value = data.get(field)
+    if not isinstance(value, str) or not value:
+        return None, web.json_response({"error": f"missing '{field}'"}, status=400)
+    return value, None
+
+
+def _optional_positive_timeout(
+    data: dict[str, Any],
+    field: str = "timeout",
+    default: float = 15.0,
+) -> tuple[float | None, web.Response | None]:
+    value = data.get(field, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        return None, web.json_response({"error": f"invalid '{field}'"}, status=400)
+    return float(value), None
+
+
 def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Application:
     auth = APIKeyAuth(api_keys=api_keys)
     app = web.Application(middlewares=[auth.middleware])
 
     async def send_sms(request: web.Request) -> web.Response:
-        data = await request.json()
-        to = data.get("to")
-        body = data.get("body")
-        if not to or not body:
-            return web.json_response({"error": "missing 'to' or 'body'"}, status=400)
-        sms = await modem.sms.send(to, body)
+        data, error = await _json_body(request)
+        if error is not None:
+            return error
+        assert data is not None
+        to, error = _required_string(data, "to")
+        if error is not None:
+            return error
+        body, error = _required_string(data, "body")
+        if error is not None:
+            return error
+        assert to is not None
+        assert body is not None
+        try:
+            ATCommand.send_sms(to)
+        except ValueError:
+            return web.json_response({"error": "invalid 'to' phone number"}, status=400)
+        try:
+            sms = await modem.sms.send(to, body)
+        except ValueError:
+            return web.json_response({"error": "invalid SMS request"}, status=400)
         return web.json_response({
             "status": "sent",
             "to": sms.recipient,
@@ -109,10 +155,14 @@ def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Applicati
         })
 
     async def subscribe(request: web.Request) -> web.Response:
-        data = await request.json()
-        url = data.get("url")
-        if not url:
-            return web.json_response({"error": "missing 'url'"}, status=400)
+        data, error = await _json_body(request)
+        if error is not None:
+            return error
+        assert data is not None
+        url, error = _required_string(data, "url")
+        if error is not None:
+            return error
+        assert url is not None
         webhook_urls.append(url)
         return web.json_response({"status": "subscribed", "url": url})
 
@@ -123,16 +173,26 @@ def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Applicati
         return web.json_response(delivery_reports)
 
     async def ussd_send(request: web.Request) -> web.Response:
-        data = await request.json()
-        code = data.get("code")
-        if not code:
-            return web.json_response({"error": "missing 'code'"}, status=400)
+        data, error = await _json_body(request)
+        if error is not None:
+            return error
+        assert data is not None
+        code, error = _required_string(data, "code")
+        if error is not None:
+            return error
+        assert code is not None
+        timeout, error = _optional_positive_timeout(data)
+        if error is not None:
+            return error
+        assert timeout is not None
         try:
-            resp = await modem.ussd.send(code, timeout=data.get("timeout", 15.0))
+            resp = await modem.ussd.send(code, timeout=timeout)
             return web.json_response({
                 "status": resp.status,
                 "message": resp.message,
             })
+        except ValueError:
+            return web.json_response({"error": "invalid USSD request"}, status=400)
         except (TimeoutError, RuntimeError) as exc:
             return web.json_response({"error": str(exc)}, status=504)
 
