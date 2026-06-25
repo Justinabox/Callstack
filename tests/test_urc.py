@@ -1,6 +1,7 @@
 """Tests for the URC dispatcher."""
 
 import asyncio
+import logging
 import pytest
 from callstack.events.bus import EventBus
 from callstack.events.types import (
@@ -79,11 +80,32 @@ class TestDispatch:
             event = await stream.next(timeout=1.0)
             assert event.digit == "5"
 
+    async def test_quoted_dtmf_is_normalized(self, bus, urc):
+        async with bus.stream(DTMFEvent) as stream:
+            await urc.dispatch('+DTMF: "5"')
+            event = await stream.next(timeout=1.0)
+            assert event.digit == "5"
+
     async def test_rxdtmf(self, bus, urc):
         async with bus.stream(DTMFEvent) as stream:
             await urc.dispatch("RXDTMF: 3")
             event = await stream.next(timeout=1.0)
             assert event.digit == "3"
+
+    async def test_quoted_rxdtmf_is_normalized(self, bus, urc):
+        async with bus.stream(DTMFEvent) as stream:
+            await urc.dispatch('RXDTMF: "#"')
+            event = await stream.next(timeout=1.0)
+            assert event.digit == "#"
+
+    async def test_invalid_dtmf_payload_is_not_emitted_or_logged_raw(self, bus, urc, caplog):
+        caplog.set_level(logging.WARNING, logger="callstack.urc")
+        async with bus.stream(DTMFEvent) as stream:
+            await urc.dispatch('+DTMF: "12"')
+            event = await stream.next(timeout=0.05)
+            assert event is None
+        assert '"12"' not in caplog.text
+        assert "+DTMF" not in caplog.text
 
     async def test_voice_call_begin(self, bus, urc):
         async with bus.stream(CallStateEvent) as stream:
