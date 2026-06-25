@@ -67,6 +67,12 @@ asyncio.run(main())
 
 ### HTTP Server Mode
 
+Install the HTTP server runtime dependencies with the server extra:
+
+```bash
+pip install -e ".[server,sqlite]"
+```
+
 Run the built-in HTTP server for external integrations:
 
 ```bash
