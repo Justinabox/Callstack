@@ -4,7 +4,7 @@ import asyncio
 import pytest
 from callstack.events.bus import EventBus
 from callstack.events.types import RingEvent, DTMFEvent
-from callstack.errors import ATTimeoutError
+from callstack.errors import ATTimeoutError, TransportError
 from callstack.protocol.executor import ATCommandExecutor, ATResponse
 from callstack.protocol.urc import URCDispatcher
 from callstack.transport.mock import MockTransport
@@ -119,8 +119,42 @@ async def test_cms_error(executor, transport):
 
 async def test_timeout(executor, transport):
     """No response within timeout raises ATTimeoutError."""
-    with pytest.raises(ATTimeoutError):
+    with pytest.raises(ATTimeoutError) as exc_info:
         await executor.execute("AT", timeout=0.1)
+
+    message = str(exc_info.value)
+    assert "AT" in message
+    assert "OK" in message
+
+
+async def test_direct_read_timeout_raises_at_timeout_with_command_and_expect(transport, urc):
+    """A direct transport read timeout is an AT timeout, not a transport failure."""
+    executor = ATCommandExecutor(transport, urc)
+
+    with pytest.raises(ATTimeoutError) as exc_info:
+        await executor.execute("AT+CSQ", expect=("READY",), timeout=0.01)
+
+    message = str(exc_info.value)
+    assert "AT+CSQ" in message
+    assert "READY" in message
+    assert transport.last_written == "AT+CSQ\r\n"
+
+
+async def test_direct_read_transport_oserror_raises_transport_error(transport, urc):
+    """Real transport read failures still surface as TransportError."""
+    executor = ATCommandExecutor(transport, urc)
+
+    async def raise_oserror():
+        raise OSError("serial disconnected")
+
+    transport.readline = raise_oserror
+
+    with pytest.raises(TransportError) as exc_info:
+        await executor.execute("AT", timeout=0.1)
+
+    message = str(exc_info.value)
+    assert "Transport error during command" in message
+    assert "serial disconnected" in message
 
 
 async def test_echo_suppression(executor, transport):
