@@ -27,6 +27,22 @@ class TestGSM7Encoding:
         decoded = PDUDecoder.decode_gsm7(packed, count)
         assert decoded == text
 
+    def test_roundtrip_extension_table_characters(self):
+        text = "Braces {}[] cost €5 ~^|\\"
+        packed, count = PDUEncoder.encode_gsm7(text)
+
+        decoded = PDUDecoder.decode_gsm7(packed, count)
+
+        assert decoded == text
+        assert count == len(text) + sum(1 for ch in text if ch in "{}[]€~^|\\")
+
+    def test_nbsp_falls_back_without_becoming_extension_escape(self):
+        packed, count = PDUEncoder.encode_gsm7("\xa0(")
+
+        decoded = PDUDecoder.decode_gsm7(packed, count)
+
+        assert decoded == "?("
+
     def test_full_alphabet_coverage(self):
         # Ensure every GSM7 char survives roundtrip
         for i, ch in enumerate(GSM7_BASIC):
