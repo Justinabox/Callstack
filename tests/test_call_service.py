@@ -299,6 +299,105 @@ class TestCallSession:
         result = await session.record(output, max_duration=0.1)
         assert result == output
 
+    async def test_send_dtmf_rejects_inactive_session_before_modem_write(self):
+        class FakeAT:
+            def __init__(self):
+                self.commands = []
+
+            async def execute(self, command, **kwargs):
+                self.commands.append((command, kwargs))
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeService:
+            state = CallState.IDLE
+            active_call = None
+
+            def __init__(self):
+                self._at = FakeAT()
+
+        service = FakeService()
+        session = CallSession(number="+1234", direction="outbound", service=service)
+
+        with pytest.raises(RuntimeError, match="active call"):
+            await session.send_dtmf("5")
+
+        assert service._at.commands == []
+
+    async def test_send_dtmf_rejects_inactive_empty_digits_before_modem_write(self):
+        class FakeAT:
+            def __init__(self):
+                self.commands = []
+
+            async def execute(self, command, **kwargs):
+                self.commands.append((command, kwargs))
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeService:
+            state = CallState.IDLE
+            active_call = None
+
+            def __init__(self):
+                self._at = FakeAT()
+
+        service = FakeService()
+        session = CallSession(number="+1234", direction="outbound", service=service)
+
+        with pytest.raises(RuntimeError, match="active call"):
+            await session.send_dtmf("")
+
+        assert service._at.commands == []
+
+    async def test_send_dtmf_rejects_stale_session_when_another_call_is_active(self):
+        class FakeAT:
+            def __init__(self):
+                self.commands = []
+
+            async def execute(self, command, **kwargs):
+                self.commands.append((command, kwargs))
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeService:
+            def __init__(self):
+                self.state = CallState.ACTIVE
+                self.active_call = None
+                self._at = FakeAT()
+
+        service = FakeService()
+        stale_session = CallSession(number="+1234", direction="outbound", service=service)
+        current_session = CallSession(number="+5678", direction="outbound", service=service)
+        service.active_call = current_session
+
+        with pytest.raises(RuntimeError, match="active call"):
+            await stale_session.send_dtmf("5")
+
+        assert service._at.commands == []
+
+    async def test_send_dtmf_stops_if_call_becomes_inactive_between_digits(self):
+        class FakeService:
+            def __init__(self):
+                self.state = CallState.ACTIVE
+                self.active_call = None
+                self._at = FakeAT(self)
+
+        class FakeAT:
+            def __init__(self, service):
+                self.service = service
+                self.commands = []
+
+            async def execute(self, command, **kwargs):
+                self.commands.append((command, kwargs))
+                self.service.state = CallState.IDLE
+                return ATResponse(success=True, lines=["OK"])
+
+        service = FakeService()
+        session = CallSession(number="+1234", direction="outbound", service=service)
+        service.active_call = session
+
+        with pytest.raises(RuntimeError, match="active call"):
+            await session.send_dtmf("56", duration_ms=0)
+
+        assert [command for command, _kwargs in service._at.commands] == ["AT+VTS=5"]
+
     async def test_wait_for_end(self, service):
         session = CallSession(number="+1234", direction="outbound", service=service)
         # Should timeout since nobody sets _ended
