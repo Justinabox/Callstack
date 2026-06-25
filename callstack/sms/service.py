@@ -4,7 +4,7 @@ import csv
 import logging
 import re
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Optional
 
 from callstack.errors import SMSSendError, SMSReadError
@@ -446,11 +446,27 @@ def _parse_timestamp(ts_str: str) -> Optional[datetime]:
     """Parse modem timestamp string (e.g. '24/12/25,14:30:00+04')."""
     if not ts_str:
         return None
-    # Strip timezone offset for parsing
-    ts_clean = re.sub(r'[+-]\d{1,2}$', '', ts_str)
+
+    tzinfo = None
+    ts_clean = ts_str
+    tz_match = re.search(r"([+-])(\d{1,2})$", ts_str)
+    if tz_match:
+        sign, quarters = tz_match.groups()
+        offset_minutes = int(quarters) * 15
+        if sign == "-":
+            offset_minutes *= -1
+        try:
+            tzinfo = timezone(timedelta(minutes=offset_minutes))
+        except ValueError:
+            return None
+        ts_clean = ts_str[: tz_match.start()]
+
     for fmt in ("%y/%m/%d,%H:%M:%S", "%Y/%m/%d,%H:%M:%S"):
         try:
-            return datetime.strptime(ts_clean, fmt)
+            parsed = datetime.strptime(ts_clean, fmt)
+            if tzinfo is not None:
+                return parsed.replace(tzinfo=tzinfo)
+            return parsed
         except ValueError:
             continue
     return None
