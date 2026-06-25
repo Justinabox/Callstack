@@ -2,7 +2,9 @@
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 from callstack.sms.types import SMS
 
@@ -38,7 +40,7 @@ class SMSStore:
         self._db = None
         self._lock = asyncio.Lock()
 
-    async def initialize(self) -> None:
+    async def initialize(self, *, readonly: bool = False) -> None:
         """Open SQLite connection if db_path was provided, and load existing messages."""
         if self._db_path is None:
             return
@@ -49,14 +51,26 @@ class SMSStore:
             try:
                 import aiosqlite
             except ImportError:
+                if readonly:
+                    raise RuntimeError("aiosqlite is required to read SMS persistence")
                 logger.warning("aiosqlite not installed; SMS persistence disabled")
                 self._db = None
                 return
 
-            self._db = await aiosqlite.connect(self._db_path)
+            connect_target = self._db_path
+            connect_kwargs = {}
+            if readonly:
+                db_path = Path(self._db_path)
+                if not db_path.exists():
+                    raise FileNotFoundError("SMS database does not exist")
+                connect_target = f"file:{quote(db_path.resolve().as_posix(), safe='/')}?mode=ro"
+                connect_kwargs["uri"] = True
+
+            self._db = await aiosqlite.connect(connect_target, **connect_kwargs)
             try:
-                await self._db.execute(_CREATE_TABLE)
-                await self._db.commit()
+                if not readonly:
+                    await self._db.execute(_CREATE_TABLE)
+                    await self._db.commit()
 
                 # Load existing messages from SQLite
                 from datetime import datetime

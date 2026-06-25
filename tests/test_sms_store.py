@@ -133,3 +133,53 @@ async def test_sqlite_initialize_serializes_concurrent_calls(tmp_path, monkeypat
         assert store._db is not None
     finally:
         await store.close()
+
+
+async def test_sqlite_readonly_initialize_does_not_create_missing_database(tmp_path):
+    pytest.importorskip("aiosqlite")
+    db_path = tmp_path / "missing.db"
+    store = SMSStore(db_path=str(db_path))
+
+    with pytest.raises(FileNotFoundError):
+        await store.initialize(readonly=True)
+
+    assert not db_path.exists()
+
+
+async def test_sqlite_readonly_initialize_does_not_create_messages_table_in_unrelated_database(tmp_path):
+    aiosqlite = pytest.importorskip("aiosqlite")
+    db_path = tmp_path / "unrelated.db"
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("CREATE TABLE unrelated (id INTEGER PRIMARY KEY)")
+        await db.commit()
+
+    store = SMSStore(db_path=str(db_path))
+    with pytest.raises(Exception, match="messages"):
+        await store.initialize(readonly=True)
+
+    async with aiosqlite.connect(db_path) as db:
+        async with db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='messages'"
+        ) as cursor:
+            assert await cursor.fetchone() is None
+
+
+async def test_sqlite_readonly_initialize_escapes_uri_reserved_path_characters(tmp_path):
+    pytest.importorskip("aiosqlite")
+    db_path = tmp_path / "has?question.db"
+    store = SMSStore(db_path=str(db_path))
+    try:
+        await store.initialize()
+        await store.save(SMS(body="kept"))
+    finally:
+        await store.close()
+
+    readonly_store = SMSStore(db_path=str(db_path))
+    try:
+        await readonly_store.initialize(readonly=True)
+        messages = await readonly_store.list()
+    finally:
+        await readonly_store.close()
+
+    assert [message.body for message in messages] == ["kept"]
+    assert not (tmp_path / "has").exists()
