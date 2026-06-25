@@ -106,7 +106,8 @@ class SMSService:
         await self._at.execute(ATCommand.SMS_TEXT_MODE)
         # GSM charset
         await self._at.execute(ATCommand.SMS_CHARSET_GSM)
-        # Route new SMS directly to TE (+CMT URCs)
+        # Route new SMS to SIM storage (+CMTI URCs), then fetch via +CMGR so
+        # modem final result codes frame complete multiline message bodies.
         await self._at.execute(ATCommand.SMS_NOTIFY)
         # Enable delivery status reports
         await self._at.execute(ATCommand.SMS_DELIVERY_REPORT)

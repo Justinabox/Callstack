@@ -249,6 +249,10 @@ class ATCommandExecutor:
             line = raw.decode("ascii", errors="replace").strip()
             return line
 
+    def _command_preserves_urc_like_payload(self, command: str) -> bool:
+        """Return true for commands whose data payload may look like URCs."""
+        return command.startswith(("AT+CMGR", "AT+CMGL"))
+
     async def _collect_response(
         self, command: str, expect: list[str] | tuple[str, ...], timeout: float
     ) -> ATResponse:
@@ -279,8 +283,14 @@ class ATCommandExecutor:
             if line == command:
                 continue
 
-            # Check if this is a URC that arrived during command execution
-            if self._urc.is_urc(line):
+            # Check if this is a URC that arrived during command execution.
+            # SMS read/list responses can legitimately contain user text that
+            # starts with URC prefixes, so keep those lines framed by the
+            # command response's final result code instead of dispatching them.
+            if (
+                self._urc.is_urc(line)
+                and not self._command_preserves_urc_like_payload(command)
+            ):
                 followup = ""
                 if self._urc.needs_followup(line):
                     try:
