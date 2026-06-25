@@ -96,6 +96,13 @@ class TestSubmitPDU:
         # Default SCA length = 00
         assert pdu.startswith("00")
 
+    def test_submit_pdu_length_counts_full_tpdu_after_sca(self):
+        for body in ("Hi", "Hello World"):
+            pdu, length = PDUEncoder.build_submit_pdu("+120****0123", body)
+            sca_octets = int(pdu[:2], 16)
+            expected_tpdu_octets = (len(pdu) // 2) - (1 + sca_octets)
+            assert length == expected_tpdu_octets
+
 
 class TestDeliverPDU:
     def test_decode_timestamp(self):
