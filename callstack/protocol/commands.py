@@ -3,6 +3,7 @@
 import re
 
 _PHONE_RE = re.compile(r'^[0-9+*#]+$')
+_SMS_RECIPIENT_RE = re.compile(r'^\+?[0-9]{3,15}$')
 _USSD_BREAKOUT_CHARS = frozenset({'"', "\r", "\n"})
 
 
@@ -10,6 +11,16 @@ def _validate_phone(number: str) -> str:
     """Validate and sanitize a phone number for AT commands."""
     if not number or not _PHONE_RE.match(number):
         raise ValueError(f"Invalid phone number: {number!r} (only digits, +, *, # allowed)")
+    return number
+
+
+def _validate_sms_recipient(number: str) -> str:
+    """Validate and sanitize an SMS recipient for AT+CMGS."""
+    if not isinstance(number, str) or not _SMS_RECIPIENT_RE.fullmatch(number):
+        raise ValueError(
+            f"Invalid SMS recipient: {number!r} "
+            "(use optional leading + followed by 3-15 digits)"
+        )
     return number
 
 
@@ -72,7 +83,7 @@ class ATCommand:
 
     @staticmethod
     def send_sms(number: str) -> str:
-        return f'AT+CMGS="{_validate_phone(number)}"'
+        return f'AT+CMGS="{_validate_sms_recipient(number)}"'
 
     _VALID_SMS_STATUSES = frozenset({
         "ALL", "REC UNREAD", "REC READ", "STO UNSENT", "STO SENT",

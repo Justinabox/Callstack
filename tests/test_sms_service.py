@@ -91,7 +91,7 @@ async def test_send_gsm_charset_non_ascii_without_replacement(sms_service, trans
     transport.feed("> ")
     transport.feed("+CMGS: 43", "OK")
 
-    sms = await sms_service.send("+155****1234", "Café")
+    sms = await sms_service.send("+15551234567", "Café")
 
     assert sms.body == "Café"
     assert transport._written[-1] == b"Caf\x05\x1A"
@@ -103,7 +103,7 @@ async def test_send_gsm_charset_extension_table_without_literal_ascii(sms_servic
     transport.feed("> ")
     transport.feed("+CMGS: 44", "OK")
 
-    await sms_service.send("+155****1234", "{^}")
+    await sms_service.send("+15551234567", "{^}")
 
     assert transport._written[-1] == b"\x1B\x28\x1B\x14\x1B\x29\x1A"
 
@@ -111,7 +111,7 @@ async def test_send_gsm_charset_extension_table_without_literal_ascii(sms_servic
 async def test_send_ucs2_required_text_fails_before_contacting_modem(sms_service, transport):
     """Unsupported text must not be lossy-replaced or sent to the modem."""
     with pytest.raises(SMSSendError, match="cannot be encoded"):
-        await sms_service.send("+155****1234", "Code 中")
+        await sms_service.send("+15551234567", "Code 中")
 
     assert transport._written == []
 
@@ -122,7 +122,7 @@ async def test_send_reserved_gsm_escape_slot_fails_before_contacting_modem(sms_s
     transport.feed("+CMGS: 45", "OK")
 
     with pytest.raises(SMSSendError, match="cannot be encoded"):
-        await sms_service.send("+155****1234", "\u00a0")
+        await sms_service.send("+15551234567", "\u00a0")
 
     assert transport._written == []
 
@@ -133,7 +133,7 @@ async def test_send_gsm_terminator_character_fails_before_contacting_modem(sms_s
     transport.feed("+CMGS: 46", "OK")
 
     with pytest.raises(SMSSendError, match="cannot be encoded"):
-        await sms_service.send("+155****1234", "Ξ")
+        await sms_service.send("+15551234567", "Ξ")
 
     assert transport._written == []
 

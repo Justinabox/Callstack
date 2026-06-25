@@ -30,17 +30,32 @@ async def test_write_routes_return_json_400_for_malformed_json(aiohttp_client):
     modem.ussd.send.assert_not_awaited()
 
 
-async def test_sms_send_rejects_invalid_phone_number_before_service_call(aiohttp_client):
+@pytest.mark.parametrize("recipient", ["bad\"number", "++123", "12+34", "*123#", "+123\n", "+123\r"])
+async def test_sms_send_rejects_invalid_phone_number_before_service_call(aiohttp_client, recipient):
     modem = _FakeModem()
     client = await aiohttp_client(create_app(modem))
 
-    response = await client.post("/sms/send", json={"to": "bad\"number", "body": "hello"})
+    response = await client.post("/sms/send", json={"to": recipient, "body": "hello"})
 
     assert response.status == 400
     assert response.content_type == "application/json"
     payload = await response.json()
     assert payload == {"error": "invalid 'to' phone number"}
     modem.sms.send.assert_not_awaited()
+
+
+@pytest.mark.parametrize("recipient", ["+15551234567", "5551234"])
+async def test_sms_send_accepts_documented_phone_number_formats(aiohttp_client, recipient):
+    modem = _FakeModem()
+    modem.sms.send.return_value = SimpleNamespace(recipient=recipient, reference=42)
+    client = await aiohttp_client(create_app(modem))
+
+    response = await client.post("/sms/send", json={"to": recipient, "body": "hello"})
+
+    assert response.status == 200
+    payload = await response.json()
+    assert payload == {"status": "sent", "to": recipient, "reference": 42}
+    modem.sms.send.assert_awaited_once_with(recipient, "hello")
 
 
 async def test_ussd_send_rejects_invalid_timeout_before_service_call(aiohttp_client):
