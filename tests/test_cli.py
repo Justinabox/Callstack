@@ -114,6 +114,120 @@ def test_status_json_outputs_network_snapshot_and_maps_config_flags(monkeypatch,
     assert config.log_level == "DEBUG"
 
 
+def test_status_uses_environment_defaults_before_opening_modem(monkeypatch, capsys):
+    monkeypatch.setenv("CALLSTACK_AT_PORT", "/dev/envAT")
+    monkeypatch.setenv("CALLSTACK_AUDIO_PORT", "/dev/envAudio")
+    monkeypatch.setenv("CALLSTACK_BAUDRATE", "9600")
+    monkeypatch.setenv("CALLSTACK_SMS_DB_PATH", "/tmp/env.sqlite")
+    monkeypatch.setenv("CALLSTACK_SIM_PIN_ENV", "CALLSTACK_TEST_SIM_PIN")
+    monkeypatch.setenv("CALLSTACK_TEST_SIM_PIN", "1234")
+    monkeypatch.setenv("CALLSTACK_LOG_LEVEL", "ERROR")
+    cli = _install_fake_modem(monkeypatch)
+
+    code = cli.main(["status", "--json"])
+
+    assert code == 0
+    json.loads(capsys.readouterr().out)
+    config = FakeModem.instances[0].config
+    assert config.at_port == "/dev/envAT"
+    assert config.audio_port == "/dev/envAudio"
+    assert config.baudrate == 9600
+    assert config.sms_db_path == "/tmp/env.sqlite"
+    assert config.sim_pin == "1234"
+    assert config.log_level == "ERROR"
+
+
+def test_explicit_cli_flags_override_environment_defaults(monkeypatch, capsys):
+    monkeypatch.setenv("CALLSTACK_AT_PORT", "/dev/envAT")
+    monkeypatch.setenv("CALLSTACK_AUDIO_PORT", "/dev/envAudio")
+    monkeypatch.setenv("CALLSTACK_BAUDRATE", "9600")
+    monkeypatch.setenv("CALLSTACK_SMS_DB_PATH", "/tmp/env.sqlite")
+    cli = _install_fake_modem(monkeypatch)
+
+    code = cli.main([
+        "status",
+        "--at-port",
+        "/dev/flagAT",
+        "--audio-port",
+        "/dev/flagAudio",
+        "--baudrate",
+        "115200",
+        "--sms-db-path",
+        "/tmp/flag.sqlite",
+        "--json",
+    ])
+
+    assert code == 0
+    json.loads(capsys.readouterr().out)
+    config = FakeModem.instances[0].config
+    assert config.at_port == "/dev/flagAT"
+    assert config.audio_port == "/dev/flagAudio"
+    assert config.baudrate == 115200
+    assert config.sms_db_path == "/tmp/flag.sqlite"
+
+
+def test_invalid_environment_config_fails_before_modem_open_without_secret(monkeypatch, capsys):
+    monkeypatch.setenv("CALLSTACK_BAUDRATE", "not-a-number")
+    monkeypatch.setenv("CALLSTACK_SIM_PIN_ENV", "CALLSTACK_TEST_SIM_PIN")
+    monkeypatch.setenv("CALLSTACK_TEST_SIM_PIN", "1234")
+    cli = _install_fake_modem(monkeypatch)
+
+    code = cli.main(["status"])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert FakeModem.instances == []
+    assert "CALLSTACK_BAUDRATE" in captured.err
+    assert "1234" not in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_invalid_environment_does_not_break_help(monkeypatch, capsys):
+    monkeypatch.setenv("CALLSTACK_BAUDRATE", "not-a-number")
+
+    import callstack.cli as cli
+
+    code = cli.main(["--help"])
+
+    assert code == 0
+    assert "status" in capsys.readouterr().out
+
+
+def test_explicit_cli_baudrate_overrides_invalid_environment_default(monkeypatch, capsys):
+    monkeypatch.setenv("CALLSTACK_BAUDRATE", "not-a-number")
+    cli = _install_fake_modem(monkeypatch)
+
+    code = cli.main(["status", "--baudrate", "9600", "--json"])
+
+    assert code == 0
+    json.loads(capsys.readouterr().out)
+    assert FakeModem.instances[0].config.baudrate == 9600
+
+
+def test_runtime_value_error_does_not_echo_private_sms_fields(monkeypatch, capsys):
+    import callstack.cli as cli
+
+    class FailingSMS:
+        async def send(self, to, body):
+            raise ValueError(f"bad destination {to}: {body}")
+
+    class FailingModem(FakeModem):
+        def __init__(self, config):
+            super().__init__(config)
+            self.sms = FailingSMS()
+
+    monkeypatch.setattr(cli, "Modem", FailingModem)
+
+    code = cli.main(["send", "--to", "+155****4567", "--body", "secret passcode"])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "ValueError" in captured.err
+    assert "+155****4567" not in captured.err
+    assert "secret passcode" not in captured.err
+    assert "Traceback" not in captured.err
+
+
 def test_status_human_output_handles_unknown_values(monkeypatch, capsys):
     import callstack.cli as cli
 

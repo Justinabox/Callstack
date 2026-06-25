@@ -10,7 +10,7 @@ import sys
 from dataclasses import asdict, fields
 from typing import Any
 
-from callstack.config import ModemConfig
+from callstack.config import ConfigError, ModemConfig, load_modem_config_from_env
 from callstack.hardware.discovery import ModemDiscoveryReport
 from callstack.hardware.probe import probe_modem_ports
 from callstack.modem import Modem
@@ -21,6 +21,7 @@ def _add_config_args(
     defaults: ModemConfig,
     *,
     default: object = None,
+    sim_pin_env_default: object = None,
 ) -> None:
     parser.add_argument(
         "--at-port",
@@ -45,12 +46,12 @@ def _add_config_args(
     )
     parser.add_argument(
         "--sim-pin-env",
-        default=None if default is None else default,
+        default=sim_pin_env_default if default is None else default,
         help="Environment variable containing the SIM PIN",
     )
     parser.add_argument(
         "--log-level",
-        default="WARNING" if default is None else default,
+        default=defaults.log_level if default is None else default,
         help="Logging level (default: WARNING to avoid leaking private modem/SMS details)",
     )
 
@@ -58,7 +59,7 @@ def _add_config_args(
 def _build_parser() -> argparse.ArgumentParser:
     defaults = ModemConfig()
     parser = argparse.ArgumentParser(prog="callstack")
-    _add_config_args(parser, defaults)
+    _add_config_args(parser, defaults, default=argparse.SUPPRESS)
 
     subcommand_config = argparse.ArgumentParser(add_help=False)
     _add_config_args(subcommand_config, defaults, default=argparse.SUPPRESS)
@@ -99,15 +100,23 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _config_from_args(args: argparse.Namespace) -> ModemConfig:
-    sim_pin = os.environ.get(args.sim_pin_env) if args.sim_pin_env else None
-    return ModemConfig(
-        at_port=args.at_port,
-        audio_port=args.audio_port,
-        baudrate=args.baudrate,
-        sms_db_path=args.sms_db_path,
-        sim_pin=sim_pin,
-        log_level=args.log_level,
-    )
+    env = dict(os.environ)
+    if hasattr(args, "at_port"):
+        env["CALLSTACK_AT_PORT"] = args.at_port
+    if hasattr(args, "audio_port"):
+        env["CALLSTACK_AUDIO_PORT"] = args.audio_port
+    if hasattr(args, "baudrate"):
+        env["CALLSTACK_BAUDRATE"] = str(args.baudrate)
+    if hasattr(args, "sms_db_path"):
+        env["CALLSTACK_SMS_DB_PATH"] = args.sms_db_path
+    if hasattr(args, "sim_pin_env"):
+        env["CALLSTACK_SIM_PIN_ENV"] = args.sim_pin_env
+    if hasattr(args, "log_level"):
+        env["CALLSTACK_LOG_LEVEL"] = args.log_level
+    elif "CALLSTACK_LOG_LEVEL" not in env:
+        env["CALLSTACK_LOG_LEVEL"] = "WARNING"
+
+    return load_modem_config_from_env(env)
 
 
 def _status_payload(registration: Any, signal: Any, operator: str | None) -> dict[str, Any]:
@@ -216,8 +225,9 @@ async def _send(args: argparse.Namespace) -> int:
 
 
 async def _doctor(args: argparse.Namespace) -> int:
-    ports = _parse_ports(args.ports) if args.ports else [args.at_port]
-    report = await probe_modem_ports(ports, baudrate=args.baudrate)
+    config = _config_from_args(args)
+    ports = _parse_ports(args.ports) if args.ports else [config.at_port]
+    report = await probe_modem_ports(ports, baudrate=config.baudrate)
     if args.as_json:
         print(json.dumps(_doctor_payload(report)))
     else:
@@ -237,14 +247,19 @@ async def _run(args: argparse.Namespace) -> int:
 
 def _print_error(exc: BaseException) -> None:
     exc_name = type(exc).__name__
+    detail = f": {exc}" if isinstance(exc, ConfigError) and str(exc) else ""
     print(
-        f"Error: {exc_name}: command failed. Check modem connection, SIM state, and arguments, then retry.",
+        f"Error: {exc_name}{detail}. Check modem connection, SIM state, and arguments, then retry.",
         file=sys.stderr,
     )
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = _build_parser()
+    try:
+        parser = _build_parser()
+    except ConfigError as exc:
+        _print_error(exc)
+        return 1
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
