@@ -37,6 +37,7 @@ class CallService:
         self._bus = bus
         self._fsm = CallStateMachine()
         self._audio_enable_lock = asyncio.Lock()
+        self._audio_bridge_registered = False
         self._active_call: Optional[CallSession] = None
         self._pending_caller: Optional[str] = None
 
@@ -93,10 +94,15 @@ class CallService:
         """Answer an incoming call. Returns a CallSession handle."""
         logger.info("Answering call from %s", self._pending_caller or "unknown")
 
-        resp = await self._at.execute(
-            ATCommand.ANSWER, expect=["OK", "VOICE CALL: BEGIN"], timeout=10.0
-        )
+        try:
+            resp = await self._at.execute(
+                ATCommand.ANSWER, expect=["OK", "VOICE CALL: BEGIN"], timeout=10.0
+            )
+        except Exception:
+            await self._cleanup_failed_answer()
+            raise
         if not resp.success:
+            await self._cleanup_failed_answer()
             raise AnswerError(resp.lines)
 
         if self._fsm.state != CallState.ACTIVE:
@@ -136,23 +142,38 @@ class CallService:
     async def _ensure_audio_enabled(self) -> None:
         """Enable the audio bridge at most once across concurrent connect paths."""
         async with self._audio_enable_lock:
-            if not self._audio.running:
+            if self._fsm.state != CallState.ACTIVE:
+                return
+            if not self._audio.running and not self._audio_bridge_registered:
                 await self._enable_audio()
 
     async def _enable_audio(self) -> None:
         """Register PCM audio channel after call connects."""
         logger.debug("Enabling audio bridge")
-        resp = await self._at.execute(ATCommand.CPCMREG_ON, expect=["OK"], timeout=5.0)
+        try:
+            resp = await self._at.execute(ATCommand.CPCMREG_ON, expect=["OK"], timeout=5.0)
+        except Exception as exc:
+            logger.warning("Audio bridge registration failed: %s — call may have no audio", exc)
+            return
         if resp.success:
-            await self._audio.start()
+            self._audio_bridge_registered = True
+            try:
+                await self._audio.start()
+            except Exception as exc:
+                logger.warning("Audio pipeline start failed: %s — call may have no audio", exc)
         else:
             logger.warning("Audio bridge registration failed: %s — call may have no audio", resp.lines)
 
     async def _disable_audio(self) -> None:
         """Tear down audio bridge."""
         logger.debug("Disabling audio bridge")
-        await self._audio.stop()
-        await self._at.execute(ATCommand.CPCMREG_OFF, expect=["OK", "ERROR"], timeout=5.0)
+        if self._audio.running:
+            await self._audio.stop()
+        if self._audio_bridge_registered:
+            try:
+                await self._at.execute(ATCommand.CPCMREG_OFF, expect=["OK", "ERROR"], timeout=5.0)
+            finally:
+                self._audio_bridge_registered = False
 
     # -- Internal event handlers --
 
@@ -178,7 +199,8 @@ class CallService:
         ):
             # "VOICE CALL: END" or "NO CARRIER" URC — remote hangup
             await self._fsm.transition(CallState.ENDED)
-            await self._disable_audio()
+            async with self._audio_enable_lock:
+                await self._disable_audio()
             if self._active_call:
                 self._active_call._ended.set()
             self._active_call = None
@@ -189,8 +211,23 @@ class CallService:
 
     async def _cleanup(self) -> None:
         """Clean up after a call ends."""
-        if self._audio.running:
-            await self._disable_audio()
+        async with self._audio_enable_lock:
+            if self._audio.running or self._audio_bridge_registered:
+                await self._disable_audio()
+        self._active_call = None
+        self._pending_caller = None
+        await self._reset_to_idle()
+
+    async def _cleanup_failed_answer(self) -> None:
+        """Clean up an inbound call attempt that failed before a session existed."""
+        if self._fsm.state not in (CallState.ENDED, CallState.IDLE):
+            await self._fsm.transition(CallState.ENDED)
+        async with self._audio_enable_lock:
+            if self._audio.running or self._audio_bridge_registered:
+                try:
+                    await self._disable_audio()
+                except Exception as exc:
+                    logger.debug("Audio cleanup after failed answer failed: %s", exc)
         self._active_call = None
         self._pending_caller = None
         await self._reset_to_idle()
