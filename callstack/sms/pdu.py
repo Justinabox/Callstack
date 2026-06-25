@@ -130,7 +130,7 @@ class PDUEncoder:
         pdu = sca + tpdu
 
         # TPDU length is byte count of everything after SCA
-        tpdu_len = len(tpdu[2:]) // 2
+        tpdu_len = len(tpdu) // 2
 
         return pdu, tpdu_len
 
