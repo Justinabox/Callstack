@@ -1,6 +1,9 @@
 """Tests for SMS store."""
 
+import asyncio
+
 import pytest
+
 from callstack.sms.store import SMSStore
 from callstack.sms.types import SMS
 
@@ -87,3 +90,46 @@ async def test_clear(store):
     await store.save(SMS(body="two"))
     await store.clear()
     assert await store.count() == 0
+
+
+async def test_sqlite_initialize_is_idempotent(tmp_path):
+    pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await store.initialize()
+        db = store._db
+        assert db is not None
+        saved = await store.save(SMS(body="hello"))
+
+        await store.initialize()
+
+        assert store._db is db
+        assert await store.count() == 1
+        messages = await store.list()
+        assert len(messages) == 1
+        assert messages[0].id == saved.id
+        assert messages[0].body == "hello"
+    finally:
+        await store.close()
+
+
+async def test_sqlite_initialize_serializes_concurrent_calls(tmp_path, monkeypatch):
+    aiosqlite = pytest.importorskip("aiosqlite")
+    original_connect = aiosqlite.connect
+    connect_count = 0
+
+    async def slow_connect(*args, **kwargs):
+        nonlocal connect_count
+        connect_count += 1
+        await asyncio.sleep(0)
+        return await original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(aiosqlite, "connect", slow_connect)
+
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await asyncio.gather(store.initialize(), store.initialize())
+        assert connect_count == 1
+        assert store._db is not None
+    finally:
+        await store.close()

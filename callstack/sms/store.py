@@ -42,48 +42,52 @@ class SMSStore:
         """Open SQLite connection if db_path was provided, and load existing messages."""
         if self._db_path is None:
             return
-        try:
-            import aiosqlite
-        except ImportError:
-            logger.warning("aiosqlite not installed; SMS persistence disabled")
-            self._db = None
-            return
 
-        self._db = await aiosqlite.connect(self._db_path)
-        try:
-            await self._db.execute(_CREATE_TABLE)
-            await self._db.commit()
+        async with self._lock:
+            if self._db is not None:
+                return
+            try:
+                import aiosqlite
+            except ImportError:
+                logger.warning("aiosqlite not installed; SMS persistence disabled")
+                self._db = None
+                return
 
-            # Load existing messages from SQLite
-            from datetime import datetime
-            async with self._db.execute(
-                "SELECT id, sender, recipient, body, timestamp, status, reference, storage_index "
-                "FROM messages ORDER BY id"
-            ) as cursor:
-                async for row in cursor:
-                    ts = datetime.fromisoformat(row[4]) if row[4] else None
-                    sms = SMS(
-                        id=row[0],
-                        sender=row[1],
-                        recipient=row[2],
-                        body=row[3],
-                        timestamp=ts,
-                        status=row[5],
-                        reference=row[6],
-                        storage_index=row[7],
-                    )
-                    self._messages.append(sms)
-                    if row[0] is not None and row[0] >= self._next_id:
-                        self._next_id = row[0] + 1
+            self._db = await aiosqlite.connect(self._db_path)
+            try:
+                await self._db.execute(_CREATE_TABLE)
+                await self._db.commit()
 
-            logger.info(
-                "SMS store initialized with SQLite: %s (%d messages loaded)",
-                self._db_path, len(self._messages),
-            )
-        except Exception:
-            await self._db.close()
-            self._db = None
-            raise
+                # Load existing messages from SQLite
+                from datetime import datetime
+                async with self._db.execute(
+                    "SELECT id, sender, recipient, body, timestamp, status, reference, storage_index "
+                    "FROM messages ORDER BY id"
+                ) as cursor:
+                    async for row in cursor:
+                        ts = datetime.fromisoformat(row[4]) if row[4] else None
+                        sms = SMS(
+                            id=row[0],
+                            sender=row[1],
+                            recipient=row[2],
+                            body=row[3],
+                            timestamp=ts,
+                            status=row[5],
+                            reference=row[6],
+                            storage_index=row[7],
+                        )
+                        self._messages.append(sms)
+                        if row[0] is not None and row[0] >= self._next_id:
+                            self._next_id = row[0] + 1
+
+                logger.info(
+                    "SMS store initialized with SQLite: %s (%d messages loaded)",
+                    self._db_path, len(self._messages),
+                )
+            except Exception:
+                await self._db.close()
+                self._db = None
+                raise
 
     async def close(self) -> None:
         """Close the SQLite connection if open."""
