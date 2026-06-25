@@ -192,6 +192,20 @@ See `modules/auth/_sms_otp.py` in CourseXScrapper for production implementation.
 
 ## 🔧 Troubleshooting
 
+Start with the safe doctor probe before checking live status. It only sends
+non-mutating identity/attention commands (`AT`, `ATI`, `AT+GMI`, `AT+GMM`,
+`AT+GMR`) to explicit ports you provide, and does not send SMS, USSD, call, SIM
+unlock, storage, IMEI, IMSI, ICCID, or SIM-number commands.
+
+```bash
+callstack doctor
+callstack doctor --ports /dev/ttyUSB2,/dev/ttyUSB3
+callstack doctor --ports /dev/ttyUSB2 --json
+```
+
+Review the reported AT port, confidence, manufacturer/model, capabilities, and
+notes before running `callstack status`.
+
 ### Modem not responding
 - Check USB ports: `ls /dev/ttyUSB*`
 - Verify dialout group: `groups $USER`
