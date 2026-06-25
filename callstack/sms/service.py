@@ -56,6 +56,9 @@ _GSM_TEXT_EXTENDED = {
     "|": 0x40,
     "€": 0x65,
 }
+_GSM_TEXT_EXTENDED_DECODE = {
+    code: char for char, code in _GSM_TEXT_EXTENDED.items()
+}
 
 
 class _FilteredStream:
@@ -203,15 +206,16 @@ class SMSService:
         elif raw.startswith("+CMT:"):
             # Direct delivery mode: sender is in the header, body follows
             sender = event.sender or ATResponseParser.parse_cmt(raw) or "unknown"
+            body = _decode_gsm_text_mode_body(event.body)
             sms = SMS(
                 sender=sender,
-                body=event.body,
+                body=body,
                 status="unread",
                 timestamp=datetime.now(),
             )
             await self._store.save(sms)
             await self._bus.emit(
-                IncomingSMSEvent(sender=sender, body=event.body)
+                IncomingSMSEvent(sender=sender, body=body)
             )
             logger.info("Incoming SMS from %s (direct)", sender)
 
@@ -432,9 +436,47 @@ def _collect_message_body(
         line = lines[i]
         if _is_final_result_code(line) or (stop_on_cmgl_header and _CMGL_RE.match(line)):
             break
-        body_lines.append(line)
+        body_lines.append(_decode_gsm_text_mode_body(line))
         i += 1
     return "\n".join(body_lines), i
+
+
+def _decode_gsm_text_mode_body(body: str) -> str:
+    """Decode GSM 03.38 text-mode bytes while preserving normal ASCII text.
+
+    The executor decodes modem bytes to a 1-byte-per-character string before
+    SMS parsing.  Printable ASCII is left untouched because many tests and
+    modems already surface ASCII-compatible text that way; GSM C0 control
+    codes and ESC extension sequences are decoded to their Unicode SMS
+    characters while already-decoded ASCII whitespace stays intact.
+    """
+    decoded: list[str] = []
+    i = 0
+    while i < len(body):
+        char = body[i]
+        code = ord(char)
+
+        if code == 0x1B:
+            if i + 1 < len(body):
+                extension_char = _GSM_TEXT_EXTENDED_DECODE.get(ord(body[i + 1]))
+                if extension_char is not None:
+                    decoded.append(extension_char)
+                    i += 2
+                    continue
+            decoded.append(char)
+            i += 1
+            continue
+
+        if 0 <= code < 0x20:
+            if char.isspace():
+                decoded.append(char)
+            else:
+                decoded.append(GSM7_BASIC[code] if code < len(GSM7_BASIC) else char)
+        else:
+            decoded.append(char)
+        i += 1
+
+    return "".join(decoded)
 
 
 def _is_final_result_code(line: str) -> bool:
