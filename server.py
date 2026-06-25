@@ -1,14 +1,18 @@
 """Auto-answer calls + SMS HTTP server using Callstack."""
 
 import asyncio
+import ipaddress
 import json
 import logging
 import math
 import secrets
+import socket
 import time
+import unicodedata
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiohttp
 from aiohttp import web
@@ -123,6 +127,45 @@ def _optional_positive_timeout(
     return float(value), None
 
 
+def _valid_webhook_url(url: str) -> bool:
+    if url != url.strip() or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in url):
+        return False
+
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        return False
+    if port is not None and port <= 0:
+        return False
+
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if not parsed.hostname:
+        return False
+    if parsed.username is not None or parsed.password is not None:
+        return False
+    if parsed.query or parsed.fragment:
+        return False
+
+    try:
+        host = unicodedata.normalize("NFKC", parsed.hostname)
+        host = host.encode("idna").decode("ascii").rstrip(".").lower()
+    except UnicodeError:
+        return False
+    if host == "localhost" or host.endswith(".localhost") or host.endswith(".local"):
+        return False
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            ip = ipaddress.ip_address(socket.inet_ntoa(socket.inet_aton(host)))
+        except OSError:
+            return True
+    return ip.is_global and not ip.is_multicast
+
+
 def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Application:
     auth = APIKeyAuth(api_keys=api_keys)
     app = web.Application(middlewares=[auth.middleware])
@@ -163,6 +206,8 @@ def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Applicati
         if error is not None:
             return error
         assert url is not None
+        if not _valid_webhook_url(url):
+            return web.json_response({"error": "invalid webhook URL"}, status=400)
         webhook_urls.append(url)
         return web.json_response({"status": "subscribed", "url": url})
 
