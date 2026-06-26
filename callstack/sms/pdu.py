@@ -39,6 +39,7 @@ GSM7_EXTENSION = {
 _GSM7_ENCODE = {c: i for i, c in enumerate(GSM7_BASIC)}
 _GSM7_EXTENSION_DECODE = {code: char for char, code in GSM7_EXTENSION.items()}
 _SMS_RECIPIENT_RE = re.compile(r"\+?[0-9]{3,15}\Z")
+_ALPHANUMERIC_ORIGINATOR_CHARS = frozenset(chr(code) for code in range(0x20, 0x7F))
 
 
 def _validate_sms_recipient(recipient: str) -> str:
@@ -318,11 +319,27 @@ class PDUDecoder:
             oa_toa = int(pdu_hex[pos:pos + 2], 16)
             pos += 2
 
-            # Address bytes = ceil(digits / 2) * 2
-            oa_hex_len = oa_len + (oa_len % 2)
-            oa_hex = pdu_hex[pos:pos + oa_hex_len]
-            pos += oa_hex_len
-            sender = PDUEncoder.decode_phone_number(oa_hex, oa_toa)
+            is_alphanumeric_sender = (oa_toa & 0x70) == 0x50
+            if is_alphanumeric_sender:
+                # For alphanumeric originators, oa_len is a GSM 7-bit septet
+                # count and the address bytes are packed septets.
+                oa_octets = (oa_len * 7 + 7) // 8
+                oa_hex_len = oa_octets * 2
+                if pos + oa_hex_len > len(pdu_hex):
+                    return None
+                oa_hex = pdu_hex[pos:pos + oa_hex_len]
+                pos += oa_hex_len
+                sender = PDUDecoder.decode_gsm7(bytes.fromhex(oa_hex), oa_len)
+                if not sender or any(ch not in _ALPHANUMERIC_ORIGINATOR_CHARS for ch in sender):
+                    return None
+            else:
+                # Numeric originators are semi-octet encoded decimal digits.
+                oa_hex_len = oa_len + (oa_len % 2)
+                if pos + oa_hex_len > len(pdu_hex):
+                    return None
+                oa_hex = pdu_hex[pos:pos + oa_hex_len]
+                pos += oa_hex_len
+                sender = PDUEncoder.decode_phone_number(oa_hex, oa_toa)
 
             # PID
             pos += 2
@@ -334,6 +351,8 @@ class PDUDecoder:
             ts_hex = pdu_hex[pos:pos + 14]
             pos += 14
             timestamp = PDUDecoder.decode_timestamp(ts_hex)
+            if is_alphanumeric_sender and timestamp is None:
+                return None
 
             # User data length
             udl = int(pdu_hex[pos:pos + 2], 16)
@@ -342,14 +361,24 @@ class PDUDecoder:
 
             # Decode based on DCS
             if (dcs & 0x0C) == 0x08:
-                # UCS2
-                body = bytes.fromhex(ud_hex[:udl * 2]).decode("utf-16-be", errors="replace")
+                # UCS2: UDL is an octet count.
+                ud_hex_len = udl * 2
+                if len(ud_hex) != ud_hex_len:
+                    return None
+                body = bytes.fromhex(ud_hex[:ud_hex_len]).decode("utf-16-be", errors="replace")
             elif (dcs & 0x0C) == 0x04:
-                # 8-bit
-                body = bytes.fromhex(ud_hex[:udl * 2]).decode("latin-1", errors="replace")
+                # 8-bit: UDL is an octet count.
+                ud_hex_len = udl * 2
+                if len(ud_hex) != ud_hex_len:
+                    return None
+                body = bytes.fromhex(ud_hex[:ud_hex_len]).decode("latin-1", errors="replace")
             else:
-                # GSM 7-bit
-                body = PDUDecoder.decode_gsm7(bytes.fromhex(ud_hex), udl)
+                # GSM 7-bit: UDL is a septet count.
+                ud_octets = (udl * 7 + 7) // 8
+                ud_hex_len = ud_octets * 2
+                if len(ud_hex) != ud_hex_len:
+                    return None
+                body = PDUDecoder.decode_gsm7(bytes.fromhex(ud_hex[:ud_hex_len]), udl)
 
             return {
                 "sender": sender,

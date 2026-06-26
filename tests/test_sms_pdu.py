@@ -140,6 +140,23 @@ class TestSubmitPDU:
 
 
 class TestDeliverPDU:
+    @staticmethod
+    def _deliver_pdu(sender: str = "DUO", body: str = "Hi", toa: int = 0xD0) -> str:
+        sender_packed, sender_len = PDUEncoder.encode_gsm7(sender)
+        body_packed, body_len = PDUEncoder.encode_gsm7(body)
+        return (
+            "00"  # SCA: use default SMSC
+            "04"  # SMS-DELIVER
+            f"{sender_len:02X}"
+            f"{toa:02X}"
+            f"{sender_packed.hex().upper()}"
+            "00"  # PID
+            "00"  # DCS: GSM 7-bit default alphabet
+            "42215241030040"  # SCTS
+            f"{body_len:02X}"
+            f"{body_packed.hex().upper()}"
+        )
+
     def test_decode_timestamp(self):
         # 24/12/25 14:30:00 +04 (quarter hours)
         # Swapped BCD: 42 21 52 41 03 00 40
@@ -151,3 +168,94 @@ class TestDeliverPDU:
     def test_decode_timestamp_invalid(self):
         assert PDUDecoder.decode_timestamp("") is None
         assert PDUDecoder.decode_timestamp("short") is None
+
+    def test_decode_deliver_pdu_preserves_alphanumeric_sender_and_body(self):
+        decoded = PDUDecoder.decode_deliver_pdu(self._deliver_pdu())
+
+        assert decoded is not None
+        assert decoded["sender"] == "DUO"
+        assert decoded["body"] == "Hi"
+        assert decoded["timestamp"] is not None
+
+    @pytest.mark.parametrize("sender", ["ACME/OTP", "BANK#1", "O'HARE", "A+B"])
+    def test_decode_deliver_pdu_preserves_valid_gsm7_alphanumeric_sender_punctuation(self, sender):
+        decoded = PDUDecoder.decode_deliver_pdu(self._deliver_pdu(sender=sender))
+
+        assert decoded is not None
+        assert decoded["sender"] == sender
+        assert decoded["body"] == "Hi"
+        assert decoded["timestamp"] is not None
+
+    def test_decode_deliver_pdu_preserves_numeric_sender(self):
+        sender = "+15551230000"
+        sender_encoded, _toa = PDUEncoder.encode_phone_number(sender)
+        body_packed, body_len = PDUEncoder.encode_gsm7("Hi")
+        pdu = (
+            "00"
+            "04"
+            f"{len(sender.lstrip('+')):02X}"
+            "91"
+            f"{sender_encoded}"
+            "00"
+            "00"
+            "42215241030040"
+            f"{body_len:02X}"
+            f"{body_packed.hex().upper()}"
+        )
+
+        decoded = PDUDecoder.decode_deliver_pdu(pdu)
+
+        assert decoded is not None
+        assert decoded["sender"] == sender
+        assert decoded["body"] == "Hi"
+        assert decoded["timestamp"] is not None
+
+    def test_decode_deliver_pdu_rejects_truncated_alphanumeric_sender(self):
+        sender_packed, sender_len = PDUEncoder.encode_gsm7("DUO")
+        body_packed, body_len = PDUEncoder.encode_gsm7("Hi")
+        pdu = (
+            "00"
+            "04"
+            f"{sender_len:02X}"
+            "D0"
+            f"{sender_packed[:-1].hex().upper()}"  # Missing final sender octet.
+            "00"
+            "00"
+            "42215241030040"
+            f"{body_len:02X}"
+            f"{body_packed.hex().upper()}"
+        )
+
+        assert PDUDecoder.decode_deliver_pdu(pdu) is None
+
+    def test_decode_deliver_pdu_rejects_truncated_alphanumeric_sender_with_shifted_valid_timestamp(self):
+        pdu = (
+            "00"
+            "04"
+            "03"
+            "D0"
+            "C4EA"  # Missing final sender octet; following PID byte can be stolen.
+            "00"
+            "00"
+            "42105021010200"  # If shifted, this can still parse as a timestamp.
+            "02"
+            "C834"
+        )
+
+        assert PDUDecoder.decode_deliver_pdu(pdu) is None
+
+    def test_decode_deliver_pdu_rejects_truncated_alphanumeric_sender_with_shifted_empty_body(self):
+        pdu = (
+            "00"
+            "04"
+            "03"
+            "D0"
+            "C4EA"  # Missing final sender octet; following PID byte can be stolen.
+            "00"
+            "00"
+            "00105021010200"  # If shifted, this can still parse as a timestamp.
+            "01"
+            "00"
+        )
+
+        assert PDUDecoder.decode_deliver_pdu(pdu) is None
