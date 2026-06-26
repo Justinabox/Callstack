@@ -105,6 +105,8 @@ callstack doctor --ports /dev/ttyUSB2,/dev/ttyUSB3 --json
 - `callstack send` sends one SMS through the configured modem and prints only the modem reference.
 - `callstack doctor` is the safest first hardware bring-up command. It probes only explicit candidate ports with non-mutating identity/attention commands and avoids SMS, USSD, call, SIM unlock, storage, IMEI, IMSI, ICCID, or SIM-number commands.
 
+Voice-call DTMF sends use `AT+VTS`; `CallSession.send_dtmf(..., duration_ms=...)` encodes non-zero tone durations in 100 ms increments (for example, `300` ms becomes an `AT+VTS` duration of `3`). Use `inter_digit_delay_ms` separately when a modem or remote IVR needs spacing between tones.
+
 Planned CLI follow-ups include a PII-safe `callstack monitor` live event tail and environment/config loading helpers for server and CLI deployments.
 
 ---
