@@ -177,6 +177,15 @@ class TestDeliverPDU:
         assert decoded["body"] == "Hi"
         assert decoded["timestamp"] is not None
 
+    @pytest.mark.parametrize("sender", ["ACME/OTP", "BANK#1", "O'HARE", "A+B"])
+    def test_decode_deliver_pdu_preserves_valid_gsm7_alphanumeric_sender_punctuation(self, sender):
+        decoded = PDUDecoder.decode_deliver_pdu(self._deliver_pdu(sender=sender))
+
+        assert decoded is not None
+        assert decoded["sender"] == sender
+        assert decoded["body"] == "Hi"
+        assert decoded["timestamp"] is not None
+
     def test_decode_deliver_pdu_preserves_numeric_sender(self):
         sender = "+15551230000"
         sender_encoded, _toa = PDUEncoder.encode_phone_number(sender)
