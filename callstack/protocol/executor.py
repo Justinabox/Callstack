@@ -21,7 +21,13 @@ logger = logging.getLogger("callstack.executor")
 FINAL_OK = ("OK",)
 FINAL_ERROR = ("ERROR",)
 FINAL_ERROR_PREFIXES = ("+CME ERROR:", "+CMS ERROR:")
-FINAL_DIAL_FAILURE = ("BUSY", "NO CARRIER", "NO ANSWER")
+FINAL_DIAL_FAILURE = (
+    "BUSY",
+    "NO CARRIER",
+    "NO ANSWER",
+    "NO DIALTONE",
+    "NO DIAL TONE",
+)
 
 # Sentinel pushed into the line queue when the transport dies
 _TRANSPORT_ERROR = object()

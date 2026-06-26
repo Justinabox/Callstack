@@ -93,7 +93,10 @@ class TestCallService:
 
         assert service.state == CallState.IDLE
 
-    @pytest.mark.parametrize("terminal_result", ["BUSY", "NO CARRIER", "NO ANSWER"])
+    @pytest.mark.parametrize(
+        "terminal_result",
+        ["BUSY", "NO CARRIER", "NO ANSWER", "NO DIALTONE", "NO DIAL TONE"],
+    )
     async def test_dial_terminal_result_fails_promptly_with_dial_error(
         self, service, at_transport, terminal_result
     ):

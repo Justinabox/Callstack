@@ -215,7 +215,10 @@ async def test_urc_during_command(executor, transport, bus):
     assert len(received_urcs) == 1
 
 
-@pytest.mark.parametrize("terminal_result", ["BUSY", "NO CARRIER", "NO ANSWER"])
+@pytest.mark.parametrize(
+    "terminal_result",
+    ["BUSY", "NO CARRIER", "NO ANSWER", "NO DIALTONE", "NO DIAL TONE"],
+)
 async def test_dial_terminal_result_is_failed_response_not_urc(
     executor, transport, bus, terminal_result
 ):
