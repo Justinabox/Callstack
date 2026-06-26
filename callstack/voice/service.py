@@ -75,13 +75,11 @@ class CallService:
                 ATCommand.dial(number), expect=["OK"], timeout=timeout
             )
         except Exception:
-            await self._fsm.transition(CallState.ENDED)
-            await self._reset_to_idle()
+            await self._cleanup_failed_dial()
             raise
 
         if not resp.success:
-            await self._fsm.transition(CallState.ENDED)
-            await self._reset_to_idle()
+            await self._cleanup_failed_dial()
             raise DialError(resp.lines)
 
         session = CallSession(number=number, direction="outbound", service=self)
@@ -216,6 +214,19 @@ class CallService:
                 await self._disable_audio()
         self._active_call = None
         self._pending_caller = None
+        await self._reset_to_idle()
+
+    async def _cleanup_failed_dial(self) -> None:
+        """Clean up an outbound dial attempt that failed before a session existed."""
+        if self._fsm.state not in (CallState.ENDED, CallState.IDLE):
+            await self._fsm.transition(CallState.ENDED)
+        async with self._audio_enable_lock:
+            if self._audio.running or self._audio_bridge_registered:
+                try:
+                    await self._disable_audio()
+                except Exception as exc:
+                    logger.debug("Audio cleanup after failed dial failed: %s", exc)
+        self._active_call = None
         await self._reset_to_idle()
 
     async def _cleanup_failed_answer(self) -> None:

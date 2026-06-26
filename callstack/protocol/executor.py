@@ -21,6 +21,13 @@ logger = logging.getLogger("callstack.executor")
 FINAL_OK = ("OK",)
 FINAL_ERROR = ("ERROR",)
 FINAL_ERROR_PREFIXES = ("+CME ERROR:", "+CMS ERROR:")
+FINAL_DIAL_FAILURE = (
+    "BUSY",
+    "NO CARRIER",
+    "NO ANSWER",
+    "NO DIALTONE",
+    "NO DIAL TONE",
+)
 
 # Sentinel pushed into the line queue when the transport dies
 _TRANSPORT_ERROR = object()
@@ -51,6 +58,7 @@ class ATResponse:
         if (
             final_line in FINAL_OK
             or final_line in FINAL_ERROR
+            or final_line in FINAL_DIAL_FAILURE
             or any(final_line.startswith(e) for e in FINAL_ERROR_PREFIXES)
         ):
             return self.lines[:-1]
@@ -309,6 +317,10 @@ class ATCommandExecutor:
             line = control_line
         return line in FINAL_ERROR or any(line.startswith(e) for e in FINAL_ERROR_PREFIXES)
 
+    def _line_matches_dial_failure(self, command: str, control_line: str) -> bool:
+        """Return true for terminal voice-call results that fail ATD promptly."""
+        return command.startswith("ATD") and control_line in FINAL_DIAL_FAILURE
+
     async def _collect_response(
         self, command: str, expect: list[str] | tuple[str, ...], timeout: float
     ) -> ATResponse:
@@ -339,6 +351,16 @@ class ATCommandExecutor:
             # Echo suppression: skip if the line matches the command we sent.
             if control_line == command:
                 continue
+
+            # During outbound dial, these modem call-progress results are the
+            # terminal command result, not unsolicited remote-hangup URCs.  When
+            # they arrive while idle they are still handled by the reader loop as
+            # URCs outside command execution.
+            if self._line_matches_dial_failure(command, control_line):
+                lines.append(
+                    self._response_line_for_command(command, raw_line, control_line)
+                )
+                return ATResponse(success=False, lines=lines)
 
             # Check if this is a URC that arrived during command execution.
             # SMS read/list responses can legitimately contain user text that
