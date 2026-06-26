@@ -15,6 +15,7 @@ from callstack.events.types import (
     RingEvent,
 )
 from callstack.errors import DialError, AnswerError
+from callstack.privacy import redact_phone_number
 from callstack.protocol.executor import ATCommandExecutor
 from callstack.protocol.commands import ATCommand
 from callstack.voice.state import CallStateMachine
@@ -75,7 +76,7 @@ class CallService:
     async def dial(self, number: str, timeout: float = 30.0) -> "CallSession":
         """Initiate an outbound call. Returns a CallSession handle."""
         await self._fsm.transition(CallState.DIALING)
-        logger.info("Dialing %s", number)
+        logger.info("Dialing %s", redact_phone_number(number))
 
         try:
             resp = await self._at.execute(
@@ -97,7 +98,7 @@ class CallService:
 
     async def answer(self) -> "CallSession":
         """Answer an incoming call. Returns a CallSession handle."""
-        logger.info("Answering call from %s", self._pending_caller or "unknown")
+        logger.info("Answering call from %s", redact_phone_number(self._pending_caller))
 
         try:
             resp = await self._at.execute(
@@ -199,7 +200,7 @@ class CallService:
 
     async def _on_caller_id(self, event: CallerIDEvent) -> None:
         self._pending_caller = event.number
-        logger.info("Caller ID: %s", event.number)
+        logger.info("Caller ID: %s", redact_phone_number(event.number))
 
     async def _on_call_state(self, event: CallStateEvent) -> None:
         if event.state == CallState.ACTIVE and self._fsm.state in (

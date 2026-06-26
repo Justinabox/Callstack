@@ -1,6 +1,7 @@
 """Tests for CallService and CallSession."""
 
 import asyncio
+import logging
 import wave
 import pytest
 
@@ -116,11 +117,48 @@ class TestCallService:
             at_transport.feed("OK")
         asyncio.create_task(respond())
 
-        session = await service.dial("+1234567890")
-        assert session.number == "+1234567890"
+        session = await service.dial("+123****7890")
+        assert session.number == "+123****7890"
         assert session.direction == "outbound"
         assert service.state == CallState.DIALING
-        assert "ATD+1234567890;" in at_transport.last_written
+        assert "ATD+123****7890;" in at_transport.last_written
+
+    async def test_dial_info_log_redacts_outbound_number(self, service, at_transport, caplog):
+        """Outbound dial logs must not expose the raw destination number."""
+        number = "+15551230000"
+
+        async def respond():
+            await asyncio.sleep(0.01)
+            at_transport.feed("OK")
+        asyncio.create_task(respond())
+
+        with caplog.at_level(logging.INFO, logger="callstack.voice.service"):
+            await service.dial(number)
+
+        assert number not in caplog.text
+        assert "Dialing" in caplog.text
+
+    async def test_inbound_call_info_logs_redact_caller_number(self, service, bus, at_transport, caplog):
+        """Inbound caller logs must not expose the raw caller number."""
+        number = "+15551230001"
+
+        async def respond():
+            await asyncio.sleep(0.01)
+            at_transport.feed("OK")
+            await asyncio.sleep(0.01)
+            at_transport.feed("OK")
+        asyncio.create_task(respond())
+
+        with caplog.at_level(logging.INFO, logger="callstack.voice.service"):
+            await bus.emit(RingEvent())
+            await asyncio.sleep(0.01)
+            await bus.emit(CallerIDEvent(number=number))
+            await asyncio.sleep(0.01)
+            await service.answer()
+
+        assert number not in caplog.text
+        assert "Caller ID:" in caplog.text
+        assert "Answering call from" in caplog.text
 
     async def test_dial_failure(self, service, at_transport):
         async def respond():
