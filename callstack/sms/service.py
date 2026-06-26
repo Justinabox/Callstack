@@ -88,10 +88,12 @@ class SMSService:
         executor: ATCommandExecutor,
         bus: EventBus,
         store: Optional[SMSStore] = None,
+        command_timeout: float = 5.0,
     ):
         self._at = executor
         self._bus = bus
         self._store = store or SMSStore()
+        self._command_timeout = command_timeout
         self._initialized = False
         self._pending_cmt_header: Optional[str] = None
 
@@ -104,14 +106,14 @@ class SMSService:
         await self._store.initialize()
 
         # Text mode
-        await self._at.execute(ATCommand.SMS_TEXT_MODE)
+        await self._at.execute(ATCommand.SMS_TEXT_MODE, timeout=self._command_timeout)
         # GSM charset
-        await self._at.execute(ATCommand.SMS_CHARSET_GSM)
+        await self._at.execute(ATCommand.SMS_CHARSET_GSM, timeout=self._command_timeout)
         # Route new SMS to SIM storage (+CMTI URCs), then fetch via +CMGR so
         # modem final result codes frame complete multiline message bodies.
-        await self._at.execute(ATCommand.SMS_NOTIFY)
+        await self._at.execute(ATCommand.SMS_NOTIFY, timeout=self._command_timeout)
         # Enable delivery status reports
-        await self._at.execute(ATCommand.SMS_DELIVERY_REPORT)
+        await self._at.execute(ATCommand.SMS_DELIVERY_REPORT, timeout=self._command_timeout)
 
         self._initialized = True
         logger.info("SMS service initialized")
@@ -221,7 +223,7 @@ class SMSService:
         """Handle +CDSI delivery report notification."""
         logger.debug("Delivery report: storage=%s, index=%d", event.storage, event.index)
         resp = await self._at.execute(
-            ATCommand.read_sms(event.index), expect=["OK"], timeout=5.0
+            ATCommand.read_sms(event.index), expect=["OK"], timeout=self._command_timeout
         )
         if not resp.success:
             logger.warning("Failed to read delivery report at index %d", event.index)
@@ -239,7 +241,11 @@ class SMSService:
                 if report is not None:
                     reference, recipient, status = report
 
-        await self._at.execute(ATCommand.delete_sms(event.index), expect=["OK"])
+        await self._at.execute(
+            ATCommand.delete_sms(event.index),
+            expect=["OK"],
+            timeout=self._command_timeout,
+        )
 
         if not status:
             logger.warning(
@@ -300,28 +306,36 @@ class SMSService:
 
         Status values: "ALL", "REC UNREAD", "REC READ", "STO UNSENT", "STO SENT"
         """
-        resp = await self._at.execute(ATCommand.list_sms(status), expect=["OK"], timeout=10)
+        resp = await self._at.execute(
+            ATCommand.list_sms(status), expect=["OK"], timeout=self._command_timeout
+        )
         if not resp.success:
             return []
         return self._parse_message_list(resp.lines)
 
     async def read_message(self, index: int) -> Optional[SMS]:
         """Read a single message from SIM storage by index."""
-        resp = await self._at.execute(ATCommand.read_sms(index), expect=["OK"], timeout=5)
+        resp = await self._at.execute(
+            ATCommand.read_sms(index), expect=["OK"], timeout=self._command_timeout
+        )
         if not resp.success:
             return None
         return self._parse_single_message(resp.lines, index)
 
     async def delete_message(self, index: int) -> bool:
         """Delete a message from SIM storage by index."""
-        resp = await self._at.execute(ATCommand.delete_sms(index), expect=["OK"])
+        resp = await self._at.execute(
+            ATCommand.delete_sms(index), expect=["OK"], timeout=self._command_timeout
+        )
         if resp.success:
             logger.debug("Deleted SIM message at index %d", index)
         return resp.success
 
     async def delete_all(self) -> bool:
         """Delete all messages from SIM storage."""
-        resp = await self._at.execute(ATCommand.DELETE_ALL_SMS, expect=["OK"])
+        resp = await self._at.execute(
+            ATCommand.DELETE_ALL_SMS, expect=["OK"], timeout=self._command_timeout
+        )
         if resp.success:
             logger.info("Deleted all SIM messages")
         return resp.success

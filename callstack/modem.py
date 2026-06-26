@@ -64,14 +64,24 @@ class Modem:
 
         # Services
         self._audio = AudioPipeline(self._audio_transport, self.bus)
-        self.call = CallService(self._executor, self._audio, self.bus)
+        self.call = CallService(
+            self._executor,
+            self._audio,
+            self.bus,
+            command_timeout=self.config.command_timeout,
+        )
         self.sms = SMSService(
             self._executor,
             self.bus,
             SMSStore(self.config.sms_db_path) if self.config.sms_db_path else None,
+            command_timeout=self.config.command_timeout,
         )
-        self.network = NetworkService(self._executor, self.bus)
-        self.ussd = USSDService(self._executor, self.bus)
+        self.network = NetworkService(
+            self._executor, self.bus, command_timeout=self.config.command_timeout
+        )
+        self.ussd = USSDService(
+            self._executor, self.bus, command_timeout=self.config.command_timeout
+        )
 
         # Internal state
         self._reconnect_task: Optional[asyncio.Task] = None
@@ -184,23 +194,25 @@ class Modem:
     async def _initialize_modem(self) -> None:
         """Send initialization AT commands."""
         # Disable echo
-        await self._executor.execute(ATCommand.ECHO_OFF)
+        await self._executor.execute(ATCommand.ECHO_OFF, timeout=self.config.command_timeout)
 
         # Check and handle SIM PIN
         await self._check_sim_pin()
 
         # Enable caller ID presentation
-        await self._executor.execute(ATCommand.CLIP_ENABLE)
+        await self._executor.execute(ATCommand.CLIP_ENABLE, timeout=self.config.command_timeout)
         # Disconnect control (ATH always works)
-        await self._executor.execute(ATCommand.CVHU)
+        await self._executor.execute(ATCommand.CVHU, timeout=self.config.command_timeout)
         # Connected line ID
-        await self._executor.execute(ATCommand.COLP_ENABLE)
+        await self._executor.execute(ATCommand.COLP_ENABLE, timeout=self.config.command_timeout)
 
         logger.debug("Modem initialization complete")
 
     async def _check_sim_pin(self) -> None:
         """Check SIM PIN status and unlock if needed."""
-        resp = await self._executor.execute(ATCommand.CPIN_QUERY, expect=["OK"], timeout=5.0)
+        resp = await self._executor.execute(
+            ATCommand.CPIN_QUERY, expect=["OK"], timeout=self.config.command_timeout
+        )
         if not resp.success:
             logger.warning("Could not query SIM PIN status: %s", resp.lines)
             return
@@ -368,6 +380,7 @@ class Modem:
 
     async def execute(self, command: str, **kwargs):
         """Send a raw AT command. Thin wrapper around the executor."""
+        kwargs.setdefault("timeout", self.config.command_timeout)
         return await self._executor.execute(command, **kwargs)
 
     # -- Run --

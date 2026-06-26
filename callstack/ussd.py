@@ -28,9 +28,15 @@ class USSDService:
         modem.ussd.on_response(my_handler)
     """
 
-    def __init__(self, executor: ATCommandExecutor, bus: EventBus):
+    def __init__(
+        self,
+        executor: ATCommandExecutor,
+        bus: EventBus,
+        command_timeout: float = 5.0,
+    ):
         self._at = executor
         self._bus = bus
+        self._command_timeout = command_timeout
 
     async def send(self, code: str, timeout: float = 15.0) -> USSDResponseEvent:
         """Send a USSD command and wait for the response.
@@ -51,7 +57,7 @@ class USSDService:
         self._bus.subscribe(USSDResponseEvent, capture)
         try:
             resp = await self._at.execute(
-                ATCommand.ussd_send(code), expect=["OK"], timeout=10.0
+                ATCommand.ussd_send(code), expect=["OK"], timeout=self._command_timeout
             )
             if not resp.success:
                 raise RuntimeError(f"USSD command failed: {resp.lines}")
@@ -64,7 +70,9 @@ class USSDService:
 
     async def cancel(self) -> None:
         """Cancel an ongoing USSD session."""
-        await self._at.execute(ATCommand.USSD_CANCEL, expect=["OK"], timeout=5.0)
+        await self._at.execute(
+            ATCommand.USSD_CANCEL, expect=["OK"], timeout=self._command_timeout
+        )
 
     def on_response(
         self, handler: Callable[[USSDResponseEvent], Awaitable[None]]

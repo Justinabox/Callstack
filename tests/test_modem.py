@@ -16,6 +16,7 @@ from callstack.events.types import (
 )
 from callstack.errors import SIMPINRequired, TransportError
 from callstack.modem import Modem
+from callstack.protocol.executor import ATResponse
 from callstack.transport.mock import MockTransport
 
 
@@ -47,10 +48,24 @@ class MockModem(Modem):
         self._executor = ATCommandExecutor(self._at_transport, self._urc)
 
         self._audio = AudioPipeline(self._audio_transport, self.bus)
-        self.call = CallService(self._executor, self._audio, self.bus)
-        self.sms = SMSService(self._executor, self.bus, SMSStore())
-        self.network = NetworkService(self._executor, self.bus)
-        self.ussd = USSDService(self._executor, self.bus)
+        self.call = CallService(
+            self._executor,
+            self._audio,
+            self.bus,
+            command_timeout=self.config.command_timeout,
+        )
+        self.sms = SMSService(
+            self._executor,
+            self.bus,
+            SMSStore(),
+            command_timeout=self.config.command_timeout,
+        )
+        self.network = NetworkService(
+            self._executor, self.bus, command_timeout=self.config.command_timeout
+        )
+        self.ussd = USSDService(
+            self._executor, self.bus, command_timeout=self.config.command_timeout
+        )
 
         self._reconnect_task = None
         self._reconnect_lock = asyncio.Lock()
@@ -112,6 +127,28 @@ class TestModemInit:
             assert any("AT+COLP=1" in w for w in written)
             # SMS init
             assert any("AT+CMGF=1" in w for w in written)
+
+    async def test_initialization_uses_configured_command_timeout(self):
+        modem = MockModem(ModemConfig(command_timeout=1.25))
+        calls = []
+
+        async def record_execute(command, expect=("OK",), timeout=5.0):
+            calls.append((command, timeout))
+            if command == "AT+CPIN?":
+                return ATResponse(success=True, lines=["+CPIN: READY", "OK"])
+            return ATResponse(success=True, lines=["OK"])
+
+        modem._executor.execute = record_execute
+
+        await modem._initialize_modem()
+
+        assert calls == [
+            ("ATE0", 1.25),
+            ("AT+CPIN?", 1.25),
+            ("AT+CLIP=1", 1.25),
+            ("AT+CVHU=0", 1.25),
+            ("AT+COLP=1", 1.25),
+        ]
 
     async def test_close_is_idempotent(self):
         modem = MockModem()
@@ -224,6 +261,21 @@ class TestModemExecute:
 
             assert resp.success is True
             assert any("+CSQ:" in line for line in resp.lines)
+
+    async def test_raw_at_command_uses_configured_default_timeout(self):
+        modem = MockModem(ModemConfig(command_timeout=1.25))
+        calls = []
+
+        async def record_execute(command, **kwargs):
+            calls.append((command, kwargs.get("timeout")))
+            return ATResponse(success=True, lines=["OK"])
+
+        modem._executor.execute = record_execute
+
+        await modem.execute("AT")
+        await modem.execute("ATI", timeout=9.0)
+
+        assert calls == [("AT", 1.25), ("ATI", 9.0)]
 
 
 class TestModemURCReader:

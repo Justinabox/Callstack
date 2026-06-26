@@ -31,10 +31,17 @@ class CallService:
     lifecycle (PCM registration on call connect, teardown on hangup).
     """
 
-    def __init__(self, executor: ATCommandExecutor, audio: AudioPipeline, bus: EventBus):
+    def __init__(
+        self,
+        executor: ATCommandExecutor,
+        audio: AudioPipeline,
+        bus: EventBus,
+        command_timeout: float = 5.0,
+    ):
         self._at = executor
         self._audio = audio
         self._bus = bus
+        self._command_timeout = command_timeout
         self._fsm = CallStateMachine()
         self._audio_enable_lock = asyncio.Lock()
         self._audio_bridge_registered = False
@@ -120,7 +127,9 @@ class CallService:
         """End the current call."""
         logger.info("Hanging up")
         await self._at.execute(
-            ATCommand.HANGUP, expect=["OK", "VOICE CALL: END"], timeout=5.0
+            ATCommand.HANGUP,
+            expect=["OK", "VOICE CALL: END"],
+            timeout=self._command_timeout,
         )
 
         if self._fsm.state not in (CallState.ENDED, CallState.IDLE):
@@ -130,7 +139,9 @@ class CallService:
     async def reject(self) -> None:
         """Reject an incoming call without answering."""
         logger.info("Rejecting call")
-        await self._at.execute(ATCommand.HANGUP, expect=["OK"], timeout=5.0)
+        await self._at.execute(
+            ATCommand.HANGUP, expect=["OK"], timeout=self._command_timeout
+        )
         if self._fsm.state not in (CallState.ENDED, CallState.IDLE):
             await self._fsm.transition(CallState.ENDED)
         await self._cleanup()
@@ -149,7 +160,9 @@ class CallService:
         """Register PCM audio channel after call connects."""
         logger.debug("Enabling audio bridge")
         try:
-            resp = await self._at.execute(ATCommand.CPCMREG_ON, expect=["OK"], timeout=5.0)
+            resp = await self._at.execute(
+                ATCommand.CPCMREG_ON, expect=["OK"], timeout=self._command_timeout
+            )
         except Exception as exc:
             logger.warning("Audio bridge registration failed: %s — call may have no audio", exc)
             return
@@ -169,7 +182,11 @@ class CallService:
             await self._audio.stop()
         if self._audio_bridge_registered:
             try:
-                await self._at.execute(ATCommand.CPCMREG_OFF, expect=["OK", "ERROR"], timeout=5.0)
+                await self._at.execute(
+                    ATCommand.CPCMREG_OFF,
+                    expect=["OK", "ERROR"],
+                    timeout=self._command_timeout,
+                )
             finally:
                 self._audio_bridge_registered = False
 
@@ -410,7 +427,9 @@ class CallSession:
             if not self.is_active:
                 raise RuntimeError("Cannot send DTMF without an active call")
             await self.service._at.execute(
-                ATCommand.send_dtmf(digit), expect=["OK"], timeout=5.0
+                ATCommand.send_dtmf(digit),
+                expect=["OK"],
+                timeout=getattr(self.service, "_command_timeout", 5.0),
             )
             if len(digits) > 1:
                 await asyncio.sleep(duration_ms / 1000.0)
