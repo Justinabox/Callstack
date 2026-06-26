@@ -4,6 +4,7 @@ import asyncio
 import pytest
 from callstack.events.bus import EventBus
 from callstack.events.types import DTMFEvent
+from callstack.protocol.urc import URCDispatcher
 from callstack.voice.dtmf import DTMFCollector
 
 
@@ -45,6 +46,22 @@ async def test_collect_stops_at_terminator(bus):
     asyncio.create_task(_emit_digits(bus, "42#99"))
     result = await collector.collect()
     assert result == "42"
+
+
+async def test_collect_stops_at_quoted_terminator_from_urc(bus):
+    collector = DTMFCollector(bus, max_digits=10, timeout=2.0, terminator="#")
+    urc = URCDispatcher(bus)
+
+    async def emit_quoted_urcs():
+        await asyncio.sleep(0.01)
+        await urc.dispatch('+DTMF: "4"')
+        await urc.dispatch('+DTMF: "#"')
+        await urc.dispatch('+DTMF: "9"')
+
+    emit_task = asyncio.create_task(emit_quoted_urcs())
+    result = await collector.collect()
+    await emit_task
+    assert result == "4"
 
 
 async def test_collect_timeout_returns_partial(bus):

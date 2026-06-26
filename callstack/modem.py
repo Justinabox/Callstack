@@ -84,10 +84,22 @@ class Modem:
         # Wire incoming call routing (subscribe once, not per-connection)
         self.bus.subscribe(RingEvent, self._on_ring)
 
+    @property
+    def connected(self) -> bool:
+        """Whether the modem has completed startup and is currently connected."""
+        return self._connected
+
     # -- Context manager --
 
     async def __aenter__(self) -> "Modem":
-        await self._connect()
+        try:
+            await self._connect()
+        except BaseException:
+            try:
+                await self._cleanup_partial_connect()
+            except Exception as exc:
+                logger.debug("Startup cleanup failed: %s", exc)
+            raise
         return self
 
     async def __aexit__(self, *exc) -> None:
@@ -106,6 +118,30 @@ class Modem:
         self._executor.on_reader_done(self._reader_done_callback)
 
         logger.info("Modem ready")
+
+    async def _cleanup_partial_connect(self) -> None:
+        """Best-effort cleanup after startup fails before __aexit__ can run."""
+        self._connected = False
+        try:
+            await self._executor.stop_reader()
+        except Exception as exc:
+            logger.debug("Executor stop during startup cleanup: %s", exc)
+        try:
+            await self._audio.stop()
+        except Exception as exc:
+            logger.debug("Audio stop during startup cleanup: %s", exc)
+        try:
+            await self.sms._store.close()
+        except Exception as exc:
+            logger.debug("SMS store close during startup cleanup: %s", exc)
+        try:
+            await self._audio_transport.close()
+        except Exception as exc:
+            logger.debug("Audio transport close during startup cleanup: %s", exc)
+        try:
+            await self._at_transport.close()
+        except Exception as exc:
+            logger.debug("AT transport close during startup cleanup: %s", exc)
 
     async def close(self) -> None:
         """Shut down all subsystems and close transports."""

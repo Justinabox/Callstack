@@ -21,9 +21,26 @@ logger = logging.getLogger("callstack.executor")
 FINAL_OK = ("OK",)
 FINAL_ERROR = ("ERROR",)
 FINAL_ERROR_PREFIXES = ("+CME ERROR:", "+CMS ERROR:")
+FINAL_DIAL_FAILURE = (
+    "BUSY",
+    "NO CARRIER",
+    "NO ANSWER",
+    "NO DIALTONE",
+    "NO DIAL TONE",
+)
 
 # Sentinel pushed into the line queue when the transport dies
 _TRANSPORT_ERROR = object()
+
+
+def _decode_transport_line(raw: bytes) -> str:
+    """Decode one transport-framed line without stripping message content."""
+    return raw.decode("ascii", errors="replace").rstrip("\r\n")
+
+
+def _normalize_control_line(line: str) -> str:
+    """Normalize AT control/header lines while keeping payload handling separate."""
+    return line.strip()
 
 
 @dataclass
@@ -41,6 +58,7 @@ class ATResponse:
         if (
             final_line in FINAL_OK
             or final_line in FINAL_ERROR
+            or final_line in FINAL_DIAL_FAILURE
             or any(final_line.startswith(e) for e in FINAL_ERROR_PREFIXES)
         ):
             return self.lines[:-1]
@@ -130,27 +148,31 @@ class ATCommandExecutor:
                     continue
 
                 consecutive_errors = 0
-                line = raw.decode("ascii", errors="replace").strip()
-                if not line:
-                    continue
+                raw_line = _decode_transport_line(raw)
 
                 if self._command_in_flight:
-                    await self._line_queue.put(line)
+                    await self._line_queue.put(raw_line)
+                    continue
+
+                control_line = _normalize_control_line(raw_line)
+                if not control_line:
+                    continue
+
+                # Idle — dispatch URCs using normalized control headers while
+                # preserving any follow-up payload body as framed.
+                if self._urc.is_urc(control_line):
+                    followup = ""
+                    if self._urc.needs_followup(control_line):
+                        try:
+                            raw_f = await asyncio.wait_for(
+                                self._transport.readline(), timeout=2.0
+                            )
+                            followup = _decode_transport_line(raw_f)
+                        except asyncio.TimeoutError:
+                            pass
+                    await self._urc.dispatch(control_line, followup)
                 else:
-                    # Idle — dispatch URCs
-                    if self._urc.is_urc(line):
-                        followup = ""
-                        if self._urc.needs_followup(line):
-                            try:
-                                raw_f = await asyncio.wait_for(
-                                    self._transport.readline(), timeout=2.0
-                                )
-                                followup = raw_f.decode("ascii", errors="replace").strip()
-                            except asyncio.TimeoutError:
-                                pass
-                        await self._urc.dispatch(line, followup)
-                    else:
-                        logger.debug("Ignoring non-URC idle line: %s", line)
+                    logger.debug("Ignoring non-URC idle line: %s", control_line)
         finally:
             self._command_in_flight = False
 
@@ -254,8 +276,56 @@ class ATCommandExecutor:
                 raise TransportError(
                     f"Transport error during command: {exc}"
                 ) from exc
-            line = raw.decode("ascii", errors="replace").strip()
+            line = _decode_transport_line(raw)
             return line
+
+    def _command_preserves_urc_like_payload(self, command: str) -> bool:
+        """Return true for commands whose data payload may look like URCs."""
+        return command.startswith(("AT+CMGR", "AT+CMGL"))
+
+    def _response_line_for_command(
+        self, command: str, raw_line: str, control_line: str
+    ) -> str:
+        """Choose the response line representation exposed to callers.
+
+        General AT control/header lines keep the historical stripped behavior.
+        SMS read/list payload lines keep leading/trailing body whitespace.
+        """
+        if command.startswith("AT+CMGR"):
+            if control_line.startswith("+CMGR:"):
+                return control_line
+            return raw_line
+        if command.startswith("AT+CMGL"):
+            if control_line.startswith("+CMGL:"):
+                return control_line
+            return raw_line
+        return control_line
+
+    def _line_matches_success(
+        self,
+        command: str,
+        raw_line: str,
+        control_line: str,
+        expect: list[str] | tuple[str, ...],
+    ) -> bool:
+        """Return true when a line is an expected command terminator."""
+        if self._command_preserves_urc_like_payload(command):
+            return raw_line in expect
+        return control_line in expect
+
+    def _line_matches_error(
+        self, command: str, raw_line: str, control_line: str
+    ) -> bool:
+        """Return true when a line is a final error result."""
+        if self._command_preserves_urc_like_payload(command):
+            line = raw_line
+        else:
+            line = control_line
+        return line in FINAL_ERROR or any(line.startswith(e) for e in FINAL_ERROR_PREFIXES)
+
+    def _line_matches_dial_failure(self, command: str, control_line: str) -> bool:
+        """Return true for terminal voice-call results that fail ATD promptly."""
+        return command.startswith("ATD") and control_line in FINAL_DIAL_FAILURE
 
     async def _collect_response(
         self,
@@ -276,27 +346,44 @@ class ATCommandExecutor:
                 )
 
             try:
-                line = await self._next_line(remaining)
+                raw_line = await self._next_line(remaining)
             except asyncio.TimeoutError:
                 raise ATTimeoutError(
                     f"Timeout after {timeout}s waiting for {expect} (command: {display_command})"
                 )
 
-            if not line:
+            control_line = _normalize_control_line(raw_line)
+            if not control_line and not self._command_preserves_urc_like_payload(command):
                 continue
 
             # Echo suppression: skip if the line matches the command we sent.
             # Log only the redacted display command for sensitive commands.
-            if line == command:
+            if control_line == command:
                 logger.debug("RX: %s", display_command)
                 continue
 
-            logger.debug("RX: %s", line)
+            logger.debug("RX: %s", raw_line)
 
-            # Check if this is a URC that arrived during command execution
-            if self._urc.is_urc(line):
+            # During outbound dial, these modem call-progress results are the
+            # terminal command result, not unsolicited remote-hangup URCs.  When
+            # they arrive while idle they are still handled by the reader loop as
+            # URCs outside command execution.
+            if self._line_matches_dial_failure(command, control_line):
+                lines.append(
+                    self._response_line_for_command(command, raw_line, control_line)
+                )
+                return ATResponse(success=False, lines=lines)
+
+            # Check if this is a URC that arrived during command execution.
+            # SMS read/list responses can legitimately contain user text that
+            # starts with URC prefixes, so keep those lines framed by the
+            # command response's final result code instead of dispatching them.
+            if (
+                self._urc.is_urc(control_line)
+                and not self._command_preserves_urc_like_payload(command)
+            ):
                 followup = ""
-                if self._urc.needs_followup(line):
+                if self._urc.needs_followup(control_line):
                     try:
                         followup_remaining = deadline - loop.time()
                         followup = await self._next_line(
@@ -304,17 +391,22 @@ class ATCommandExecutor:
                         )
                     except asyncio.TimeoutError:
                         pass
-                await self._urc.dispatch(line, followup)
+                await self._urc.dispatch(control_line, followup)
                 continue
 
-            lines.append(line)
+            lines.append(
+                self._response_line_for_command(command, raw_line, control_line)
+            )
 
-            # Check for expected success result codes
-            if line in expect:
+            # Check for expected success result codes. For SMS read/list commands,
+            # do not trim body lines such as "OK "; they are payload until an
+            # exact final result code frames the response. SMS send prompts still
+            # match via normalized control lines because they are not CMGR/CMGL.
+            if self._line_matches_success(command, raw_line, control_line, expect):
                 return ATResponse(success=True, lines=lines)
 
-            # Check for error result codes
-            if line in FINAL_ERROR or any(line.startswith(e) for e in FINAL_ERROR_PREFIXES):
+            # Check for error result codes.
+            if self._line_matches_error(command, raw_line, control_line):
                 return ATResponse(success=False, lines=lines)
 
 

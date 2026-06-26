@@ -3,6 +3,8 @@
 import re
 
 _PHONE_RE = re.compile(r'^[0-9+*#]+$')
+_SMS_RECIPIENT_RE = re.compile(r'^\+?[0-9]{3,15}$')
+_USSD_BREAKOUT_CHARS = frozenset({'"', "\r", "\n"})
 
 
 def _validate_phone(number: str) -> str:
@@ -10,6 +12,32 @@ def _validate_phone(number: str) -> str:
     if not number or not _PHONE_RE.match(number):
         raise ValueError(f"Invalid phone number: {number!r} (only digits, +, *, # allowed)")
     return number
+
+
+def _validate_sms_recipient(number: str) -> str:
+    """Validate and sanitize an SMS recipient for AT+CMGS."""
+    if not isinstance(number, str) or not _SMS_RECIPIENT_RE.fullmatch(number):
+        raise ValueError(
+            f"Invalid SMS recipient: {number!r} "
+            "(use optional leading + followed by 3-15 digits)"
+        )
+    return number
+
+
+def _validate_ussd_code(code: str) -> str:
+    """Validate USSD/menu input before embedding it in a quoted AT command."""
+    if not isinstance(code, str) or not code:
+        raise ValueError("Invalid USSD code")
+    if any(char in code for char in _USSD_BREAKOUT_CHARS):
+        raise ValueError("Invalid USSD code")
+    return code
+
+
+def _validate_ussd_encoding(encoding: int) -> int:
+    """Validate USSD data coding scheme values used by AT+CUSD."""
+    if type(encoding) is not int or not (0 <= encoding <= 255):
+        raise ValueError("Invalid USSD encoding")
+    return encoding
 
 
 class ATCommand:
@@ -41,7 +69,7 @@ class ATCommand:
     SMS_TEXT_MODE = "AT+CMGF=1"
     SMS_PDU_MODE = "AT+CMGF=0"
     SMS_CHARSET_GSM = 'AT+CSCS="GSM"'
-    SMS_NOTIFY = "AT+CNMI=2,2,0,1,0"
+    SMS_NOTIFY = "AT+CNMI=2,1,0,1,0"
     SMS_DELIVERY_REPORT = "AT+CSMP=49,167,0,0"
 
     # Network
@@ -55,7 +83,7 @@ class ATCommand:
 
     @staticmethod
     def send_sms(number: str) -> str:
-        return f'AT+CMGS="{_validate_phone(number)}"'
+        return f'AT+CMGS="{_validate_sms_recipient(number)}"'
 
     _VALID_SMS_STATUSES = frozenset({
         "ALL", "REC UNREAD", "REC READ", "STO UNSENT", "STO SENT",
@@ -112,6 +140,6 @@ class ATCommand:
     # USSD
     @staticmethod
     def ussd_send(code: str, encoding: int = 15) -> str:
-        return f'AT+CUSD=1,"{code}",{encoding}'
+        return f'AT+CUSD=1,"{_validate_ussd_code(code)}",{_validate_ussd_encoding(encoding)}'
 
     USSD_CANCEL = "AT+CUSD=2"

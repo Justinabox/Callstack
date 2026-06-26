@@ -1,6 +1,8 @@
 """Tests for the SMS service."""
 
 import asyncio
+from datetime import timedelta
+
 import pytest
 from callstack.events.bus import EventBus
 from callstack.events.types import IncomingSMSEvent, SMSSentEvent, _RawSMSNotification
@@ -56,7 +58,7 @@ async def test_initialize(sms_service, transport):
     written = transport.all_written
     assert any("CMGF=1" in w for w in written)
     assert any("CSCS" in w for w in written)
-    assert any("CNMI" in w for w in written)
+    assert 'AT+CNMI=2,1,0,1,0\r\n' in written
 
 
 # -- Sending --
@@ -91,7 +93,7 @@ async def test_send_gsm_charset_non_ascii_without_replacement(sms_service, trans
     transport.feed("> ")
     transport.feed("+CMGS: 43", "OK")
 
-    sms = await sms_service.send("+155****1234", "Café")
+    sms = await sms_service.send("+15551234567", "Café")
 
     assert sms.body == "Café"
     assert transport._written[-1] == b"Caf\x05\x1A"
@@ -103,7 +105,7 @@ async def test_send_gsm_charset_extension_table_without_literal_ascii(sms_servic
     transport.feed("> ")
     transport.feed("+CMGS: 44", "OK")
 
-    await sms_service.send("+155****1234", "{^}")
+    await sms_service.send("+15551234567", "{^}")
 
     assert transport._written[-1] == b"\x1B\x28\x1B\x14\x1B\x29\x1A"
 
@@ -111,7 +113,7 @@ async def test_send_gsm_charset_extension_table_without_literal_ascii(sms_servic
 async def test_send_ucs2_required_text_fails_before_contacting_modem(sms_service, transport):
     """Unsupported text must not be lossy-replaced or sent to the modem."""
     with pytest.raises(SMSSendError, match="cannot be encoded"):
-        await sms_service.send("+155****1234", "Code 中")
+        await sms_service.send("+15551234567", "Code 中")
 
     assert transport._written == []
 
@@ -122,7 +124,7 @@ async def test_send_reserved_gsm_escape_slot_fails_before_contacting_modem(sms_s
     transport.feed("+CMGS: 45", "OK")
 
     with pytest.raises(SMSSendError, match="cannot be encoded"):
-        await sms_service.send("+155****1234", "\u00a0")
+        await sms_service.send("+15551234567", "\u00a0")
 
     assert transport._written == []
 
@@ -133,7 +135,7 @@ async def test_send_gsm_terminator_character_fails_before_contacting_modem(sms_s
     transport.feed("+CMGS: 46", "OK")
 
     with pytest.raises(SMSSendError, match="cannot be encoded"):
-        await sms_service.send("+155****1234", "Ξ")
+        await sms_service.send("+15551234567", "Ξ")
 
     assert transport._written == []
 
@@ -219,19 +221,70 @@ async def test_receive_cmt(sms_service, bus, store):
 async def test_list_messages(sms_service, transport):
     """List messages from SIM."""
     transport.feed(
-        '+CMGL: 0,"REC UNREAD","+15551111","","24/12/25,10:00:00+04"',
+        '+CMGL: 0,"REC UNREAD","+155****1111","","24/12/25,10:00:00+04"',
         "Hello",
-        '+CMGL: 1,"REC READ","+15552222","","24/12/25,11:00:00+04"',
+        '+CMGL: 1,"REC READ","+155****2222","","24/12/25,11:00:00+04"',
         "World",
         "OK",
     )
     messages = await sms_service.list_messages()
     assert len(messages) == 2
-    assert messages[0].sender == "+15551111"
+    assert messages[0].sender == "+155****1111"
     assert messages[0].body == "Hello"
     assert messages[0].storage_index == 0
-    assert messages[1].sender == "+15552222"
+    assert messages[0].timestamp.utcoffset() == timedelta(hours=1)
+    assert messages[1].sender == "+155****2222"
     assert messages[1].body == "World"
+    assert messages[1].timestamp.utcoffset() == timedelta(hours=1)
+
+
+async def test_list_messages_preserves_signed_timezone_offsets(sms_service, transport):
+    """CMGL text-mode timestamps preserve signed GSM quarter-hour offsets."""
+    transport.feed(
+        '+CMGL: 0,"REC UNREAD","+155****1111","","24/12/25,10:00:00+04"',
+        "East",
+        '+CMGL: 1,"REC READ","+155****2222","","24/12/25,11:00:00-04"',
+        "West",
+        "OK",
+    )
+
+    messages = await sms_service.list_messages()
+
+    assert len(messages) == 2
+    assert messages[0].timestamp.utcoffset() == timedelta(hours=1)
+    assert messages[1].timestamp.utcoffset() == -timedelta(hours=1)
+
+
+async def test_list_messages_preserves_multiline_body(sms_service, transport):
+    """CMGL parsing keeps body lines until the next message header."""
+    transport.feed(
+        '+CMGL: 0,"REC UNREAD","+155****1111","","24/12/25,10:00:00+04"',
+        "first line",
+        "second line",
+        '+CMGL: 1,"REC READ","+155****2222","","24/12/25,11:00:00+04"',
+        "world",
+        "OK",
+    )
+
+    messages = await sms_service.list_messages()
+
+    assert len(messages) == 2
+    assert messages[0].body == "first line\nsecond line"
+    assert messages[1].body == "world"
+
+
+async def test_list_messages_preserves_body_line_edge_spaces(sms_service, transport):
+    """CMGL text-mode bodies keep leading and trailing body spaces."""
+    transport.feed(
+        '+CMGL: 0,"REC UNREAD","+155****1111","","24/12/25,10:00:00+04"',
+        "  padded code 123  ",
+        "OK",
+    )
+
+    messages = await sms_service.list_messages()
+
+    assert len(messages) == 1
+    assert messages[0].body == "  padded code 123  "
 
 
 async def test_list_messages_empty(sms_service, transport):
@@ -244,15 +297,146 @@ async def test_list_messages_empty(sms_service, transport):
 async def test_read_message(sms_service, transport):
     """Read a single message."""
     transport.feed(
-        '+CMGR: "REC UNREAD","+15551234","","24/12/25,14:30:00+04"',
+        '+CMGR: "REC UNREAD","+155****1234","","24/12/25,14:30:00+04"',
         "Test body",
         "OK",
     )
     sms = await sms_service.read_message(0)
     assert sms is not None
-    assert sms.sender == "+15551234"
+    assert sms.sender == "+155****1234"
     assert sms.body == "Test body"
     assert sms.storage_index == 0
+    assert sms.timestamp.utcoffset() == timedelta(hours=1)
+
+
+async def test_read_message_preserves_signed_timezone_offset(sms_service, transport):
+    """CMGR text-mode timestamps preserve negative GSM quarter-hour offsets."""
+    transport.feed(
+        '+CMGR: "REC UNREAD","+155****1234","","24/12/25,14:30:00-04"',
+        "Test body",
+        "OK",
+    )
+
+    sms = await sms_service.read_message(0)
+
+    assert sms is not None
+    assert sms.timestamp.utcoffset() == -timedelta(hours=1)
+
+
+async def test_read_message_preserves_multiline_body(sms_service, transport):
+    """CMGR parsing keeps all body lines before the final result code."""
+    transport.feed(
+        '+CMGR: "REC UNREAD","+155****1234","","24/12/25,14:30:00+04"',
+        "first line",
+        "second line",
+        "OK",
+    )
+
+    sms = await sms_service.read_message(0)
+
+    assert sms is not None
+    assert sms.body == "first line\nsecond line"
+
+
+async def test_read_message_preserves_body_line_edge_spaces(sms_service, transport):
+    """CMGR text-mode bodies keep leading and trailing body spaces."""
+    transport.feed(
+        '+CMGR: "REC UNREAD","+155****1234","","24/12/25,14:30:00+04"',
+        "  padded code 123  ",
+        "OK",
+    )
+
+    sms = await sms_service.read_message(0)
+
+    assert sms is not None
+    assert sms.body == "  padded code 123  "
+
+
+async def test_read_message_preserves_ok_with_trailing_space_body_line(sms_service, transport):
+    """CMGR body lines that look like padded OK are not final results."""
+    transport.feed(
+        '+CMGR: "REC UNREAD","+155****1234","","24/12/25,14:30:00+04"',
+        "OK ",
+        "second line",
+        "OK",
+    )
+
+    sms = await sms_service.read_message(0)
+
+    assert sms is not None
+    assert sms.body == "OK \nsecond line"
+
+
+async def test_read_message_preserves_blank_and_space_only_body_lines_with_reader(
+    sms_service, executor, transport
+):
+    """Reader-loop CMGR collection keeps blank and all-space body lines."""
+    await executor.start_reader()
+    try:
+        task = asyncio.create_task(sms_service.read_message(0))
+        await asyncio.sleep(0)
+        transport.feed(
+            '+CMGR: "REC UNREAD","+155****1234","","24/12/25,14:30:00+04"',
+            "first",
+            "",
+            "   ",
+            "second",
+            "OK",
+        )
+
+        sms = await task
+    finally:
+        await executor.stop_reader()
+
+    assert sms is not None
+    assert sms.body == "first\n\n   \nsecond"
+
+
+async def test_read_message_normalizes_leading_padded_header(sms_service, transport):
+    """CMGR headers remain control lines even with leading modem whitespace."""
+    transport.feed(
+        '  +CMGR: "REC UNREAD","+155****1234","","24/12/25,14:30:00+04"',
+        "body",
+        "OK",
+    )
+
+    sms = await sms_service.read_message(0)
+
+    assert sms is not None
+    assert sms.body == "body"
+
+
+async def test_read_message_preserves_cmgl_shaped_body_line(sms_service, transport):
+    """CMGR parsing treats +CMGL-shaped text as body content."""
+    transport.feed(
+        '+CMGR: "REC UNREAD","+155****1234","","24/12/25,14:30:00+04"',
+        "carrier copied diagnostic:",
+        '+CMGL: 9,"REC READ","+155****9999","","24/12/25,15:00:00+04"',
+        "OK",
+    )
+
+    sms = await sms_service.read_message(0)
+
+    assert sms is not None
+    assert sms.body == (
+        "carrier copied diagnostic:\n"
+        '+CMGL: 9,"REC READ","+155****9999","","24/12/25,15:00:00+04"'
+    )
+
+
+async def test_read_message_preserves_urc_shaped_body_line(sms_service, transport):
+    """CMGR command responses keep +CMTI-shaped text as SMS body content."""
+    transport.feed(
+        '+CMGR: "REC UNREAD","+155****1234","","24/12/25,14:30:00+04"',
+        "carrier copied notification:",
+        '+CMTI: "SM",99',
+        "OK",
+    )
+
+    sms = await sms_service.read_message(7)
+
+    assert sms is not None
+    assert sms.body == "carrier copied notification:\n+CMTI: \"SM\",99"
 
 
 async def test_read_message_not_found(sms_service, transport):
@@ -367,6 +551,16 @@ async def test_parse_timestamp():
     assert ts.day == 25
     assert ts.hour == 14
     assert ts.minute == 30
+    assert ts.utcoffset() == timedelta(hours=1)
+
+    negative = _parse_timestamp("24/12/25,14:30:00-04")
+    assert negative is not None
+    assert negative.utcoffset() == -timedelta(hours=1)
+
+    no_offset = _parse_timestamp("24/12/25,14:30:00")
+    assert no_offset is not None
+    assert no_offset.tzinfo is None
 
     assert _parse_timestamp("") is None
     assert _parse_timestamp("invalid") is None
+    assert _parse_timestamp("24/12/25,14:30:00+99") is None

@@ -22,8 +22,8 @@ class ATResponseParser:
     # Signal quality: +CSQ: rssi,ber
     _CSQ_RE = re.compile(r"^\+CSQ:\s*(\d+),(\d+)$")
 
-    # Registration: +CREG: n,stat
-    _CREG_RE = re.compile(r"^\+CREG:\s*(\d+),(\d+)")
+    # Registration: +CREG/+CGREG/+CEREG: n,stat
+    _CREG_RE = re.compile(r"^\+C(?:G|E)?REG:\s*(\d+),(\d+)")
 
     # Caller ID: +CLIP: "number",type
     _CLIP_RE = re.compile(r'^\+CLIP:\s*"([^"]*)"')
@@ -47,7 +47,7 @@ class ATResponseParser:
 
     @staticmethod
     def parse_registration(line: str) -> Optional[tuple[int, int]]:
-        """Parse +CREG response. Returns (mode, status) or None."""
+        """Parse +CREG/+CGREG/+CEREG response. Returns (mode, status) or None."""
         m = ATResponseParser._CREG_RE.match(line)
         if m:
             return int(m.group(1)), int(m.group(2))
@@ -108,10 +108,21 @@ class ATResponseParser:
         m = ATResponseParser._CUSD_RE.match(line)
         if m:
             status = int(m.group(1))
-            message = m.group(2) or ""
+            raw_message = m.group(2) or ""
             encoding = int(m.group(3)) if m.group(3) else 15
+            message = ATResponseParser._decode_cusd_message(raw_message, encoding)
             return status, message, encoding
         return None
+
+    @staticmethod
+    def _decode_cusd_message(message: str, encoding: int) -> str:
+        """Decode known CUSD payload encodings, falling back to raw text."""
+        if encoding == 72 and message:
+            try:
+                return bytes.fromhex(message).decode("utf-16-be")
+            except (ValueError, UnicodeDecodeError):
+                return message
+        return message
 
     @staticmethod
     def parse_cdsi(line: str) -> Optional[tuple[str, int]]:

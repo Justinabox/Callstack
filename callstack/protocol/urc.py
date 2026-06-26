@@ -15,6 +15,7 @@ from callstack.events.types import (
     _RawDeliveryReport,
     _RawSMSNotification,
 )
+from callstack.protocol.commands import ATCommand
 from callstack.protocol.parser import ATResponseParser
 
 logger = logging.getLogger("callstack.urc")
@@ -27,7 +28,7 @@ class URCDispatcher:
         "RING", "+CLIP", "+DTMF", "RXDTMF",
         "+CMT", "+CMTI", "+CDSI",
         "VOICE CALL", "NO CARRIER", "BUSY", "NO ANSWER",
-        "+CUSD", "+CREG", "+CGREG",
+        "+CUSD", "+CREG", "+CGREG", "+CEREG",
     )
 
     def __init__(self, event_bus: EventBus):
@@ -88,9 +89,11 @@ class URCDispatcher:
 
         elif line.startswith("+DTMF:") or line.startswith("RXDTMF:"):
             parts = line.split(":", 1)
-            digit = parts[1].strip() if len(parts) > 1 else ""
+            digit = self._parse_dtmf_digit(parts[1] if len(parts) > 1 else "")
             if digit:
                 await self._bus.emit(DTMFEvent(digit=digit))
+            else:
+                logger.debug("Ignoring invalid DTMF URC payload")
 
         elif line == "VOICE CALL: BEGIN":
             await self._bus.emit(CallStateEvent(state=CallState.ACTIVE))
@@ -126,8 +129,24 @@ class URCDispatcher:
             else:
                 logger.warning("Could not parse USSD response: %s", line)
 
-        elif line.startswith("+CREG:") or line.startswith("+CGREG:"):
-            logger.info("Network registration: %s", line)
+        elif line.startswith(("+CREG:", "+CGREG:", "+CEREG:")):
+            family = line.split(":", 1)[0]
+            parsed = ATResponseParser.parse_registration(line)
+            if parsed:
+                _, status = parsed
+                logger.info("Network registration: %s status=%s", family, status)
+            else:
+                logger.info("Network registration: %s", family)
 
         else:
             logger.warning("Unhandled URC: %s", line)
+
+    @staticmethod
+    def _parse_dtmf_digit(payload: str) -> str:
+        """Normalize and validate a modem DTMF URC payload."""
+        digit = payload.strip()
+        if len(digit) >= 2 and digit[0] == digit[-1] and digit[0] in {'\"', "'"}:
+            digit = digit[1:-1].strip()
+        if len(digit) == 1 and digit in ATCommand._VALID_DTMF:
+            return digit
+        return ""

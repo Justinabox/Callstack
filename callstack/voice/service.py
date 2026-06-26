@@ -37,6 +37,7 @@ class CallService:
         self._bus = bus
         self._fsm = CallStateMachine()
         self._audio_enable_lock = asyncio.Lock()
+        self._audio_bridge_registered = False
         self._active_call: Optional[CallSession] = None
         self._pending_caller: Optional[str] = None
 
@@ -74,13 +75,11 @@ class CallService:
                 ATCommand.dial(number), expect=["OK"], timeout=timeout
             )
         except Exception:
-            await self._fsm.transition(CallState.ENDED)
-            await self._reset_to_idle()
+            await self._cleanup_failed_dial()
             raise
 
         if not resp.success:
-            await self._fsm.transition(CallState.ENDED)
-            await self._reset_to_idle()
+            await self._cleanup_failed_dial()
             raise DialError(resp.lines)
 
         session = CallSession(number=number, direction="outbound", service=self)
@@ -93,10 +92,15 @@ class CallService:
         """Answer an incoming call. Returns a CallSession handle."""
         logger.info("Answering call from %s", self._pending_caller or "unknown")
 
-        resp = await self._at.execute(
-            ATCommand.ANSWER, expect=["OK", "VOICE CALL: BEGIN"], timeout=10.0
-        )
+        try:
+            resp = await self._at.execute(
+                ATCommand.ANSWER, expect=["OK", "VOICE CALL: BEGIN"], timeout=10.0
+            )
+        except Exception:
+            await self._cleanup_failed_answer()
+            raise
         if not resp.success:
+            await self._cleanup_failed_answer()
             raise AnswerError(resp.lines)
 
         if self._fsm.state != CallState.ACTIVE:
@@ -136,23 +140,38 @@ class CallService:
     async def _ensure_audio_enabled(self) -> None:
         """Enable the audio bridge at most once across concurrent connect paths."""
         async with self._audio_enable_lock:
-            if not self._audio.running:
+            if self._fsm.state != CallState.ACTIVE:
+                return
+            if not self._audio.running and not self._audio_bridge_registered:
                 await self._enable_audio()
 
     async def _enable_audio(self) -> None:
         """Register PCM audio channel after call connects."""
         logger.debug("Enabling audio bridge")
-        resp = await self._at.execute(ATCommand.CPCMREG_ON, expect=["OK"], timeout=5.0)
+        try:
+            resp = await self._at.execute(ATCommand.CPCMREG_ON, expect=["OK"], timeout=5.0)
+        except Exception as exc:
+            logger.warning("Audio bridge registration failed: %s — call may have no audio", exc)
+            return
         if resp.success:
-            await self._audio.start()
+            self._audio_bridge_registered = True
+            try:
+                await self._audio.start()
+            except Exception as exc:
+                logger.warning("Audio pipeline start failed: %s — call may have no audio", exc)
         else:
             logger.warning("Audio bridge registration failed: %s — call may have no audio", resp.lines)
 
     async def _disable_audio(self) -> None:
         """Tear down audio bridge."""
         logger.debug("Disabling audio bridge")
-        await self._audio.stop()
-        await self._at.execute(ATCommand.CPCMREG_OFF, expect=["OK", "ERROR"], timeout=5.0)
+        if self._audio.running:
+            await self._audio.stop()
+        if self._audio_bridge_registered:
+            try:
+                await self._at.execute(ATCommand.CPCMREG_OFF, expect=["OK", "ERROR"], timeout=5.0)
+            finally:
+                self._audio_bridge_registered = False
 
     # -- Internal event handlers --
 
@@ -178,7 +197,8 @@ class CallService:
         ):
             # "VOICE CALL: END" or "NO CARRIER" URC — remote hangup
             await self._fsm.transition(CallState.ENDED)
-            await self._disable_audio()
+            async with self._audio_enable_lock:
+                await self._disable_audio()
             if self._active_call:
                 self._active_call._ended.set()
             self._active_call = None
@@ -189,8 +209,36 @@ class CallService:
 
     async def _cleanup(self) -> None:
         """Clean up after a call ends."""
-        if self._audio.running:
-            await self._disable_audio()
+        async with self._audio_enable_lock:
+            if self._audio.running or self._audio_bridge_registered:
+                await self._disable_audio()
+        self._active_call = None
+        self._pending_caller = None
+        await self._reset_to_idle()
+
+    async def _cleanup_failed_dial(self) -> None:
+        """Clean up an outbound dial attempt that failed before a session existed."""
+        if self._fsm.state not in (CallState.ENDED, CallState.IDLE):
+            await self._fsm.transition(CallState.ENDED)
+        async with self._audio_enable_lock:
+            if self._audio.running or self._audio_bridge_registered:
+                try:
+                    await self._disable_audio()
+                except Exception as exc:
+                    logger.debug("Audio cleanup after failed dial failed: %s", exc)
+        self._active_call = None
+        await self._reset_to_idle()
+
+    async def _cleanup_failed_answer(self) -> None:
+        """Clean up an inbound call attempt that failed before a session existed."""
+        if self._fsm.state not in (CallState.ENDED, CallState.IDLE):
+            await self._fsm.transition(CallState.ENDED)
+        async with self._audio_enable_lock:
+            if self._audio.running or self._audio_bridge_registered:
+                try:
+                    await self._disable_audio()
+                except Exception as exc:
+                    logger.debug("Audio cleanup after failed answer failed: %s", exc)
         self._active_call = None
         self._pending_caller = None
         await self._reset_to_idle()
@@ -212,7 +260,7 @@ class CallSession:
 
     @property
     def is_active(self) -> bool:
-        return self.service.state == CallState.ACTIVE
+        return self.service.state == CallState.ACTIVE and self.service.active_call is self
 
     async def hangup(self) -> None:
         """End this call."""
@@ -289,26 +337,62 @@ class CallSession:
         )
 
         if interrupt:
-            # Use a single stream context to avoid losing events between
-            # collect_one and collect calls
+            # Use a single stream context to avoid losing events between the
+            # first keypress race and any remaining digit collection. The
+            # no-input timeout starts after prompt playback unless a digit
+            # arrives early and interrupts the prompt.
             async with self.service._bus.stream(DTMFEvent) as events:
                 play_task = asyncio.create_task(self.play(audio_path))
-                first = await collector.collect_one_from_stream(events, timeout=timeout)
-                if first:
-                    play_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await play_task
+                first_event_task = asyncio.create_task(events.next())
+
+                def event_digit(event: object) -> str | None:
+                    if isinstance(event, DTMFEvent) and event.digit != terminator:
+                        return event.digit
+                    return None
+
+                async def finish_collection(first: str | None) -> str:
+                    if not first:
+                        return ""
                     if max_digits > 1:
                         remaining = await collector.collect_from_stream(
                             events, max_digits=max_digits - 1, timeout=timeout
                         )
                         return first + remaining
                     return first
-                # No digit received during playback — wait for remaining timeout
-                play_task.cancel()
-                with suppress(asyncio.CancelledError):
+
+                try:
+                    done, _ = await asyncio.wait(
+                        {play_task, first_event_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+
+                    if first_event_task in done:
+                        event = first_event_task.result()
+                        first = event_digit(event)
+                        play_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await play_task
+                        return await finish_collection(first)
+
                     await play_task
-                return ""
+                    try:
+                        event = await asyncio.wait_for(first_event_task, timeout=timeout)
+                    except asyncio.TimeoutError:
+                        first_event_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await first_event_task
+                        return ""
+                    first = event_digit(event)
+                    return await finish_collection(first)
+                finally:
+                    if not first_event_task.done():
+                        first_event_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await first_event_task
+                    if not play_task.done():
+                        play_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await play_task
         else:
             await self.play(audio_path)
             return await collector.collect()
@@ -320,7 +404,11 @@ class CallSession:
             digits: One or more DTMF digits (0-9, *, #, A-D).
             duration_ms: Tone duration in milliseconds (modem default used if 0).
         """
+        if not self.is_active:
+            raise RuntimeError("Cannot send DTMF without an active call")
         for digit in digits:
+            if not self.is_active:
+                raise RuntimeError("Cannot send DTMF without an active call")
             await self.service._at.execute(
                 ATCommand.send_dtmf(digit), expect=["OK"], timeout=5.0
             )

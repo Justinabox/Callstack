@@ -1,5 +1,7 @@
 """Tests for SMS delivery report handling."""
 
+import logging
+
 import pytest
 from callstack.events.bus import EventBus
 from callstack.events.types import (
@@ -8,8 +10,11 @@ from callstack.events.types import (
     _RawDeliveryReport,
     _RawSMSNotification,
 )
+from callstack.protocol.executor import ATCommandExecutor
 from callstack.protocol.parser import ATResponseParser
 from callstack.protocol.urc import URCDispatcher
+from callstack.sms.service import SMSService
+from callstack.transport.mock import MockTransport
 
 
 @pytest.fixture
@@ -44,6 +49,82 @@ class TestCDSIDispatch:
             assert isinstance(event, _RawDeliveryReport)
             assert event.storage == "SM"
             assert event.index == 5
+
+
+class TestDeliveryReportService:
+    async def test_text_mode_report_preserves_reference_recipient_and_status(self, bus, urc):
+        transport = MockTransport()
+        service = SMSService(ATCommandExecutor(transport, urc), bus)
+
+        async with bus.stream(SMSDeliveryReportEvent) as stream:
+            transport.feed(
+                '+CMGR: "REC READ",6,"+120****0123",145,'
+                '"24/12/25,14:30:00+04","24/12/25,14:30:05+04",0',
+                "OK",
+                "OK",
+            )
+            await service._on_delivery_report(_RawDeliveryReport(storage="SM", index=5))
+            event = await stream.next(timeout=1.0)
+
+        assert event.reference == 6
+        assert event.recipient == "+120****0123"
+        assert event.status == "delivered"
+
+    @pytest.mark.parametrize(
+        ("status_code", "expected_status"),
+        [
+            (1, "pending"),
+            (31, "pending"),
+            (32, "failed"),
+        ],
+    )
+    async def test_text_mode_report_maps_pending_and_failure_status_ranges(
+        self, bus, urc, status_code, expected_status
+    ):
+        transport = MockTransport()
+        service = SMSService(ATCommandExecutor(transport, urc), bus)
+
+        async with bus.stream(SMSDeliveryReportEvent) as stream:
+            transport.feed(
+                f'+CMGR: "REC READ",7,"+120****0456",145,'
+                f'"24/12/25,14:30:00+04","24/12/25,14:30:05+04",{status_code}',
+                "OK",
+                "OK",
+            )
+            await service._on_delivery_report(_RawDeliveryReport(storage="SM", index=6))
+            event = await stream.next(timeout=1.0)
+
+        assert event.reference == 7
+        assert event.recipient == "+120****0456"
+        assert event.status == expected_status
+
+    async def test_malformed_report_does_not_emit_false_delivery_success(self, bus, urc):
+        transport = MockTransport()
+        service = SMSService(ATCommandExecutor(transport, urc), bus)
+
+        async with bus.stream(SMSDeliveryReportEvent) as stream:
+            transport.feed('+CMGR: "REC READ",not-a-reference,"+120****0999"', "OK", "OK")
+            await service._on_delivery_report(_RawDeliveryReport(storage="SM", index=7))
+            event = await stream.next(timeout=0.01)
+
+        assert event is None
+
+    async def test_delivery_report_logs_status_without_recipient(self, bus, urc, caplog):
+        transport = MockTransport()
+        service = SMSService(ATCommandExecutor(transport, urc), bus)
+
+        with caplog.at_level(logging.INFO, logger="callstack.sms"):
+            transport.feed(
+                '+CMGR: "REC READ",8,"+15550001234",145,'
+                '"24/12/25,14:30:00+04","24/12/25,14:30:05+04",0',
+                "OK",
+                "OK",
+            )
+            await service._on_delivery_report(_RawDeliveryReport(storage="SM", index=8))
+
+        assert "+15550001234" not in caplog.text
+        assert "reference 8" in caplog.text
+        assert "delivered" in caplog.text
 
 
 class TestDeliveryReportEvent:

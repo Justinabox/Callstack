@@ -1,8 +1,10 @@
 """Tests for API key authentication middleware."""
 
 import time
+from types import SimpleNamespace
+from typing import cast
+
 import pytest
-from unittest.mock import AsyncMock
 from aiohttp import web
 from aiohttp.test_utils import AioHTTPTestCase, TestClient, TestServer
 
@@ -11,7 +13,11 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from server import APIKeyAuth
+from callstack.events.bus import EventBus
+from callstack.protocol.executor import ATCommandExecutor
+from callstack.ussd import USSDService
+import server
+from server import APIKeyAuth, create_app
 
 
 @pytest.fixture
@@ -73,6 +79,45 @@ class TestAPIKeyAuthEnabled:
         assert resp.status == 401
 
 
+class TestAPIKeyConstantTimeComparison:
+    def test_helper_compares_candidate_against_each_stored_key_without_self_compare(self, monkeypatch):
+        auth = APIKeyAuth(api_keys=["test-key-123", "another-key"])
+        calls = []
+
+        def fake_compare_digest(left, right):
+            calls.append((left, right))
+            return left == right
+
+        monkeypatch.setattr(server.secrets, "compare_digest", fake_compare_digest)
+
+        assert auth._is_valid_key("wrong-key") is False
+
+        assert len(calls) == 2
+        assert set(calls) == {
+            ("wrong-key", "test-key-123"),
+            ("wrong-key", "another-key"),
+        }
+        assert ("wrong-key", "wrong-key") not in calls
+
+    def test_helper_does_not_short_circuit_after_valid_key_match(self, monkeypatch):
+        auth = APIKeyAuth(api_keys=["matching-key", "other-key"])
+        auth._keys = cast(set[str], ("matching-key", "other-key"))
+        calls = []
+
+        def fake_compare_digest(left, right):
+            calls.append((left, right))
+            return left == right
+
+        monkeypatch.setattr(server.secrets, "compare_digest", fake_compare_digest)
+
+        assert auth._is_valid_key("matching-key") is True
+
+        assert calls == [
+            ("matching-key", "matching-key"),
+            ("matching-key", "other-key"),
+        ]
+
+
 class TestAPIKeyManagement:
     def test_add_key(self):
         auth = APIKeyAuth()
@@ -107,3 +152,25 @@ class TestRateLimiting:
         assert resp.status == 429
         data = await resp.json()
         assert "Rate limit" in data["error"]
+
+
+class TestUSSDEndpointValidation:
+    async def test_ussd_validation_error_returns_400_json_without_modem_write(self, aiohttp_client):
+        class RecordingExecutor:
+            def __init__(self):
+                self.commands = []
+
+            async def execute(self, command, **_kwargs):
+                self.commands.append(command)
+                raise AssertionError("USSD validation should run before modem writes")
+
+        executor = RecordingExecutor()
+        modem = SimpleNamespace(ussd=USSDService(cast(ATCommandExecutor, executor), EventBus()))
+        client = await aiohttp_client(create_app(modem))
+
+        resp = await client.post("/ussd/send", json={"code": "*100#\rAT+CMGD=1,4"})
+
+        assert resp.status == 400
+        data = await resp.json()
+        assert data == {"error": "Invalid USSD code"}
+        assert executor.commands == []

@@ -14,7 +14,7 @@ from callstack.events.types import (
     RingEvent,
     CallerIDEvent,
 )
-from callstack.errors import TransportError, SIMPUKRequired
+from callstack.errors import SIMPINRequired, SIMPUKRequired, TransportError
 from callstack.modem import Modem
 from callstack.transport.mock import MockTransport
 
@@ -90,6 +90,15 @@ class TestModemInit:
 
         assert modem._connected is False
 
+    async def test_connected_property_tracks_modem_readiness(self):
+        modem = MockModem()
+        _feed_init_responses(modem._at_transport)
+
+        assert modem.connected is False
+        async with modem:
+            assert modem.connected is True
+        assert modem.connected is False
+
     async def test_initialization_sends_at_commands(self):
         modem = MockModem()
         _feed_init_responses(modem._at_transport)
@@ -113,6 +122,39 @@ class TestModemInit:
 
         # Calling close again should not raise
         await modem.close()
+
+    async def test_context_manager_failure_closes_partial_startup_resources(self):
+        modem = MockModem()
+        modem._at_transport.feed("OK")  # ATE0
+        modem._at_transport.feed("+CPIN: SIM PIN", "OK")
+
+        with pytest.raises(SIMPINRequired, match="SIM is locked"):
+            await modem.__aenter__()
+
+        assert modem._at_transport._open is False
+        assert modem._audio_transport._open is False
+        assert modem._connected is False
+        assert modem._executor._reader_active is False
+
+        # Cleanup after a failed enter remains idempotent for retry/supervisor paths.
+        await modem.close()
+
+    async def test_context_manager_failure_preserves_error_when_cleanup_step_fails(self):
+        modem = MockModem()
+        modem._at_transport.feed("OK")  # ATE0
+        modem._at_transport.feed("+CPIN: SIM PIN", "OK")
+
+        async def failing_audio_close():
+            raise RuntimeError("audio close failed")
+
+        modem._audio_transport.close = failing_audio_close
+
+        with pytest.raises(SIMPINRequired, match="SIM is locked"):
+            await modem.__aenter__()
+
+        assert modem._at_transport._open is False
+        assert modem._connected is False
+        assert modem._executor._reader_active is False
 
 
 class TestModemOnCall:

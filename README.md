@@ -14,12 +14,13 @@ Callstack provides a high-level Python API for managing GSM/LTE modem connection
 | Feature | Status | Notes |
 |---------|--------|-------|
 | **Voice Calls** | ✅ Ready | Inbound/outbound, recording, tone playback, IVR menus, DTMF send/collect |
-| **SMS** | ✅ Ready | Send/receive/subscribe, SQLite persistence, delivery reports, multipart UDH metadata |
+| **SMS** | ✅ Ready | Send/receive/subscribe, SQLite persistence, delivery reports, multipart UDH metadata; full multipart reassembly is planned |
 | **SIM + Network** | ✅ Ready | SIM PIN unlock, registration/signal snapshots, BER descriptions |
 | **USSD** | ✅ Ready | `AT+CUSD` balance checks/carrier menus via service + HTTP endpoint |
 | **Raw AT Commands** | ✅ Ready | Direct modem control via `Modem.execute()` |
-| **HTTP Server** | ✅ Ready | API-key auth, rate limiting, SMS/USSD/delivery-report endpoints |
-| **Auto-reconnect** | ✅ Ready | Handles USB disconnect/reconnect gracefully |
+| **HTTP Server** | ✅ Ready | API-key auth, rate limiting, SMS/USSD/delivery-report endpoints, `/healthz`, and PII-safe `/metrics` |
+| **CLI** | ✅ Partial | `callstack status`, `callstack send`, and safe `callstack doctor`; PII-safe live monitoring is planned |
+| **Auto-reconnect** | ✅ Ready | Handles USB disconnect/reconnect gracefully; active multi-port auto-detection is planned |
 
 ---
 
@@ -51,7 +52,7 @@ from callstack import Modem, ModemConfig
 async def main():
     async with Modem(ModemConfig()) as modem:
         # Send an SMS
-        sms = await modem.sms.send("+1234567890", "Hello from Callstack!")
+        sms = await modem.sms.send("5551234", "Hello from Callstack!")
         print(f"Sent! Reference: {sms.reference}")
         
         # Subscribe to incoming messages
@@ -67,6 +68,12 @@ asyncio.run(main())
 
 ### HTTP Server Mode
 
+Install the HTTP server runtime dependencies with the server extra:
+
+```bash
+pip install -e ".[server,sqlite]"
+```
+
 Run the built-in HTTP server for external integrations:
 
 ```bash
@@ -74,13 +81,31 @@ python server.py
 ```
 
 Endpoints:
-- `POST /sms/send` — Send SMS (`{"to": "+123...", "body": "..."}`)
+- `POST /sms/send` — Send SMS (`{"to": "5551234", "body": "..."}`); `to` must be an optional leading `+` followed by 3-15 digits in real requests (use redacted values only in public docs/logs)
 - `POST /sms/subscribe` — Register webhook for incoming SMS
 - `GET /sms/messages` — List received messages
 - `GET /sms/delivery-reports` — List delivery status reports
 - `POST /ussd/send` — Send USSD short codes (`{"code": "*123#"}`)
+- `GET /healthz` — Return a public-safe readiness payload with modem connectivity, uptime, and SMS-store readiness
+- `GET /metrics` — Return Prometheus text metrics with aggregate counters/gauges only; labels and values intentionally avoid phone numbers, SMS bodies, USSD payloads, SIM identifiers, API keys, and raw modem identifiers
 
-If `create_app(..., api_keys=[...])` is configured, HTTP requests must include `Authorization: Bearer <api_key>` and are rate-limited per key.
+If `create_app(..., api_keys=[...])` is configured, HTTP requests must include an `Authorization` bearer-token header (for example, `Authorization: Bearer ***`) and are rate-limited per key.
+
+### CLI
+
+The package exposes a `callstack` command for local Raspberry Pi workflows:
+
+```bash
+callstack status --json
+callstack send --to 5551234 --body "Hello from Callstack"
+callstack doctor --ports /dev/ttyUSB2,/dev/ttyUSB3 --json
+```
+
+- `callstack status` connects to the configured modem and prints registration, operator, and signal details.
+- `callstack send` sends one SMS through the configured modem and prints only the modem reference.
+- `callstack doctor` is the safest first hardware bring-up command. It probes only explicit candidate ports with non-mutating identity/attention commands and avoids SMS, USSD, call, SIM unlock, storage, IMEI, IMSI, ICCID, or SIM-number commands.
+
+Planned CLI follow-ups include a PII-safe `callstack monitor` live event tail and environment/config loading helpers for server and CLI deployments.
 
 ---
 
@@ -185,6 +210,20 @@ See `modules/auth/_sms_otp.py` in CourseXScrapper for production implementation.
 ---
 
 ## 🔧 Troubleshooting
+
+Start with the safe doctor probe before checking live status. It only sends
+non-mutating identity/attention commands (`AT`, `ATI`, `AT+GMI`, `AT+GMM`,
+`AT+GMR`) to explicit ports you provide, and does not send SMS, USSD, call, SIM
+unlock, storage, IMEI, IMSI, ICCID, or SIM-number commands.
+
+```bash
+callstack doctor
+callstack doctor --ports /dev/ttyUSB2,/dev/ttyUSB3
+callstack doctor --ports /dev/ttyUSB2 --json
+```
+
+Review the reported AT port, confidence, manufacturer/model, capabilities, and
+notes before running `callstack status`.
 
 ### Modem not responding
 - Check USB ports: `ls /dev/ttyUSB*`

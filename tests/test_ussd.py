@@ -1,12 +1,16 @@
 """Tests for USSD service."""
 
 import asyncio
+from typing import cast
+
 import pytest
 from callstack.events.bus import EventBus
 from callstack.events.types import USSDResponseEvent
 from callstack.protocol.commands import ATCommand
+from callstack.protocol.executor import ATCommandExecutor
 from callstack.protocol.parser import ATResponseParser
 from callstack.protocol.urc import URCDispatcher
+from callstack.ussd import USSDService
 
 
 @pytest.fixture
@@ -26,8 +30,44 @@ class TestUSSDCommand:
     def test_ussd_send_custom_encoding(self):
         assert ATCommand.ussd_send("*100#", encoding=0) == 'AT+CUSD=1,"*100#",0'
 
+    @pytest.mark.parametrize("code", ['*100#"', "*100#\rAT+CMGD=1,4", "*100#\nAT+CMGD=1,4"])
+    def test_ussd_send_rejects_command_breakout_characters(self, code):
+        with pytest.raises(ValueError, match="Invalid USSD code"):
+            ATCommand.ussd_send(code)
+
+    @pytest.mark.parametrize("encoding", [-1, 256, "15", True])
+    def test_ussd_send_rejects_unsupported_encoding_values(self, encoding):
+        with pytest.raises(ValueError, match="Invalid USSD encoding"):
+            ATCommand.ussd_send("*100#", encoding=encoding)
+
     def test_ussd_cancel(self):
         assert ATCommand.USSD_CANCEL == "AT+CUSD=2"
+
+
+class TestUSSDServiceValidation:
+    async def test_invalid_ussd_code_fails_before_modem_write(self, bus):
+        class FailingExecutor:
+            async def execute(self, *_args, **_kwargs):
+                raise AssertionError("USSD validation should run before modem writes")
+
+        service = USSDService(cast(ATCommandExecutor, FailingExecutor()), bus)
+
+        with pytest.raises(ValueError, match="Invalid USSD code"):
+            await service.send("*100#\rAT+CMGD=1,4", timeout=0.01)
+
+    async def test_ussd_timeout_error_does_not_echo_code(self, bus):
+        class SuccessfulExecutor:
+            async def execute(self, *_args, **_kwargs):
+                return type("Response", (), {"success": True})()
+
+        service = USSDService(cast(ATCommandExecutor, SuccessfulExecutor()), bus)
+
+        private_code = "*123*9999#"
+        with pytest.raises(TimeoutError) as excinfo:
+            await service.send(private_code, timeout=0.001)
+
+        assert private_code not in str(excinfo.value)
+        assert "USSD response" in str(excinfo.value)
 
 
 class TestCUSDParser:
@@ -46,6 +86,16 @@ class TestCUSDParser:
     def test_parse_cusd_no_encoding(self):
         result = ATResponseParser.parse_cusd('+CUSD: 0,"Balance: $10"')
         assert result == (0, "Balance: $10", 15)
+
+    def test_parse_cusd_decodes_ucs2_message(self):
+        result = ATResponseParser.parse_cusd(
+            '+CUSD: 0,"0059006F00750072002000620061006C0061006E00630065002000690073002000240035002E00300030",72'
+        )
+        assert result == (0, "Your balance is $5.00", 72)
+
+    def test_parse_cusd_malformed_ucs2_falls_back_to_raw_message(self):
+        result = ATResponseParser.parse_cusd('+CUSD: 0,"0059006",72')
+        assert result == (0, "0059006", 72)
 
     def test_parse_cusd_invalid(self):
         result = ATResponseParser.parse_cusd("OK")
@@ -68,6 +118,16 @@ class TestCUSDDispatch:
             event = await stream.next(timeout=1.0)
             assert event.status == 2
             assert event.message == ""
+
+    async def test_cusd_emits_decoded_ucs2_event(self, bus, urc):
+        async with bus.stream(USSDResponseEvent) as stream:
+            await urc.dispatch(
+                '+CUSD: 0,"0059006F00750072002000620061006C0061006E00630065002000690073002000240035002E00300030",72'
+            )
+            event = await stream.next(timeout=1.0)
+            assert event.status == 0
+            assert event.message == "Your balance is $5.00"
+            assert event.encoding == 72
 
 
 class TestUSSDResponseEvent:

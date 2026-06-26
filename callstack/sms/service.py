@@ -1,9 +1,10 @@
 """Full SMS service: send, receive, subscribe, manage."""
 
+import csv
 import logging
 import re
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Optional
 
 from callstack.errors import SMSSendError, SMSReadError
@@ -106,7 +107,8 @@ class SMSService:
         await self._at.execute(ATCommand.SMS_TEXT_MODE)
         # GSM charset
         await self._at.execute(ATCommand.SMS_CHARSET_GSM)
-        # Route new SMS directly to TE (+CMT URCs)
+        # Route new SMS to SIM storage (+CMTI URCs), then fetch via +CMGR so
+        # modem final result codes frame complete multiline message bodies.
         await self._at.execute(ATCommand.SMS_NOTIFY)
         # Enable delivery status reports
         await self._at.execute(ATCommand.SMS_DELIVERY_REPORT)
@@ -225,36 +227,32 @@ class SMSService:
             logger.warning("Failed to read delivery report at index %d", event.index)
             return
 
-        # Parse the delivery status from response lines
-        # Typical format: +CMGR: "REC READ","+number","","timestamp","timestamp",status
+        # Parse the delivery status from response lines.
+        # Text-mode status report format:
+        # +CMGR: "REC READ",<mr>,"<recipient>",<tora>,"<scts>","<dt>",<st>
+        reference = 0
         recipient = ""
-        status = "delivered"
+        status = ""
         for line in resp.data_lines:
             if line.startswith("+CMGR:"):
-                # Extract recipient from delivery report header
-                parts = line.split(",")
-                if len(parts) >= 2:
-                    recipient = parts[1].strip().strip('"')
-                # Check for failure indicators
-                if len(parts) >= 6:
-                    try:
-                        status_code = int(parts[-1].strip())
-                        if status_code == 0:
-                            status = "delivered"
-                        elif 1 <= status_code <= 31:
-                            status = "pending"
-                        else:
-                            status = "failed"
-                    except ValueError:
-                        pass
+                report = _parse_cmgr_status_report(line)
+                if report is not None:
+                    reference, recipient, status = report
 
         await self._at.execute(ATCommand.delete_sms(event.index), expect=["OK"])
 
+        if not status:
+            logger.warning(
+                "Could not parse delivery report at index %d", event.index
+            )
+            return
+
         await self._bus.emit(SMSDeliveryReportEvent(
+            reference=reference,
             recipient=recipient,
             status=status,
         ))
-        logger.info("Delivery report for %s: %s", recipient, status)
+        logger.info("Delivery report reference %d: %s", reference, status)
 
     # -- Subscription API --
 
@@ -344,12 +342,11 @@ class SMSService:
                 sender = m.group(3)
                 timestamp_str = m.group(5) if m.group(5) else m.group(4)
                 timestamp = _parse_timestamp(timestamp_str)
-
-                # Next line is the message body
-                body = ""
-                if i + 1 < len(lines) and lines[i + 1] != "OK":
-                    body = lines[i + 1]
-                    i += 1
+                body, next_index = _collect_message_body(
+                    lines,
+                    i + 1,
+                    stop_on_cmgl_header=True,
+                )
 
                 messages.append(SMS(
                     sender=sender,
@@ -358,6 +355,8 @@ class SMSService:
                     timestamp=timestamp,
                     storage_index=index,
                 ))
+                i = next_index
+                continue
             i += 1
         return messages
 
@@ -371,10 +370,11 @@ class SMSService:
                 sender = m.group(2)
                 timestamp_str = m.group(4) if m.group(4) else m.group(3)
                 timestamp = _parse_timestamp(timestamp_str)
-
-                body = ""
-                if i + 1 < len(lines) and lines[i + 1] != "OK":
-                    body = lines[i + 1]
+                body, _ = _collect_message_body(
+                    lines,
+                    i + 1,
+                    stop_on_cmgl_header=False,
+                )
 
                 return SMS(
                     sender=sender,
@@ -386,15 +386,87 @@ class SMSService:
         return None
 
 
+def _parse_cmgr_status_report(line: str) -> Optional[tuple[int, str, str]]:
+    """Parse a text-mode +CMGR status-report header.
+
+    Uses CSV parsing so quoted timestamps containing commas remain a single field.
+    """
+    if not line.startswith("+CMGR:"):
+        return None
+
+    payload = line.split(":", 1)[1].strip()
+    try:
+        fields = next(csv.reader([payload], skipinitialspace=True))
+    except csv.Error:
+        return None
+
+    if len(fields) < 7:
+        return None
+
+    try:
+        reference = int(fields[1].strip())
+        status_code = int(fields[-1].strip())
+    except ValueError:
+        return None
+
+    if status_code == 0:
+        status = "delivered"
+    elif 1 <= status_code <= 31:
+        status = "pending"
+    else:
+        status = "failed"
+
+    return reference, fields[2].strip(), status
+
+
+def _collect_message_body(
+    lines: list[str],
+    start: int,
+    *,
+    stop_on_cmgl_header: bool,
+) -> tuple[str, int]:
+    """Collect SMS body lines until a record boundary or final result code."""
+    body_lines: list[str] = []
+    i = start
+    while i < len(lines):
+        line = lines[i]
+        if _is_final_result_code(line) or (stop_on_cmgl_header and _CMGL_RE.match(line)):
+            break
+        body_lines.append(line)
+        i += 1
+    return "\n".join(body_lines), i
+
+
+def _is_final_result_code(line: str) -> bool:
+    """Return True for AT final result lines that terminate SMS reads."""
+    return line in {"OK", "ERROR"} or line.startswith(("+CME ERROR:", "+CMS ERROR:"))
+
+
 def _parse_timestamp(ts_str: str) -> Optional[datetime]:
     """Parse modem timestamp string (e.g. '24/12/25,14:30:00+04')."""
     if not ts_str:
         return None
-    # Strip timezone offset for parsing
-    ts_clean = re.sub(r'[+-]\d{1,2}$', '', ts_str)
+
+    tzinfo = None
+    ts_clean = ts_str
+    tz_match = re.search(r"([+-])(\d{1,2})$", ts_str)
+    if tz_match:
+        sign, quarters = tz_match.groups()
+        offset_minutes = int(quarters) * 15
+        if sign == "-":
+            offset_minutes *= -1
+        try:
+            tzinfo = timezone(timedelta(minutes=offset_minutes))
+        except ValueError:
+            return None
+        ts_clean = ts_str[: tz_match.start()]
+
     for fmt in ("%y/%m/%d,%H:%M:%S", "%Y/%m/%d,%H:%M:%S"):
         try:
-            return datetime.strptime(ts_clean, fmt)
+            parsed = datetime.strptime(ts_clean, fmt)
+            if tzinfo is not None:
+                return parsed.replace(tzinfo=tzinfo)
+            return parsed
         except ValueError:
             continue
     return None

@@ -12,7 +12,7 @@ from callstack.events.types import (
     CallerIDEvent,
     RingEvent,
 )
-from callstack.errors import DialError, AnswerError
+from callstack.errors import DialError, AnswerError, ATTimeoutError
 from callstack.protocol.urc import URCDispatcher
 from callstack.protocol.executor import ATCommandExecutor, ATResponse
 from callstack.voice.audio import AudioPipeline
@@ -93,6 +93,68 @@ class TestCallService:
 
         assert service.state == CallState.IDLE
 
+    @pytest.mark.parametrize(
+        "terminal_result",
+        ["BUSY", "NO CARRIER", "NO ANSWER", "NO DIALTONE", "NO DIAL TONE"],
+    )
+    async def test_dial_terminal_result_fails_promptly_with_dial_error(
+        self, service, at_transport, terminal_result
+    ):
+        async def respond():
+            await asyncio.sleep(0.01)
+            at_transport.feed(terminal_result, "OK")
+        asyncio.create_task(respond())
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        with pytest.raises(DialError) as exc_info:
+            await service.dial("+123****7890", timeout=0.5)
+        elapsed = loop.time() - started
+
+        assert terminal_result in str(exc_info.value)
+        assert exc_info.value.lines == [terminal_result]
+        assert elapsed < 0.25
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
+
+    async def test_dial_terminal_failure_cleans_up_inflight_audio_enable(self, bus):
+        class LockedAT:
+            def __init__(self):
+                self.calls: list[str] = []
+                self._lock = asyncio.Lock()
+
+            async def execute(self, command, **kwargs):
+                async with self._lock:
+                    self.calls.append(command)
+                    if command.startswith("ATD"):
+                        await bus.emit(CallStateEvent(state=CallState.ACTIVE))
+                        await asyncio.sleep(0.01)
+                        return ATResponse(success=False, lines=["NO CARRIER"])
+                    return ATResponse(success=True, lines=["OK"])
+
+        class FakeAudio:
+            def __init__(self):
+                self.running = False
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+
+        at = LockedAT()
+        audio = FakeAudio()
+        service = CallService(at, audio, bus)
+
+        with pytest.raises(DialError):
+            await service.dial("+123****7890")
+        await asyncio.sleep(0.05)
+
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
+        assert audio.running is False
+        assert at.calls == ["ATD+123****7890;", "AT+CPCMREG=1", "AT+CPCMREG=0"]
+
     async def test_incoming_ring_transitions_to_ringing(self, service, bus):
         await bus.emit(RingEvent())
         await asyncio.sleep(0.01)
@@ -157,20 +219,138 @@ class TestCallService:
         service = CallService(at, audio, bus)
         await bus.emit(RingEvent())
         await asyncio.sleep(0.01)
-        await bus.emit(CallerIDEvent(number="+5551234"))
+        await bus.emit(CallerIDEvent(number="+5****34"))
         await asyncio.sleep(0.01)
 
         session = await service.answer()
         await asyncio.sleep(0.01)
 
-        assert session.number == "+5551234"
+        assert session.number == "+5****34"
         assert session.direction == "inbound"
         assert service.state == CallState.ACTIVE
         assert audio.starts == 1
         assert at.calls == ["ATA", "AT+CPCMREG=1"]
 
-    async def test_answer_failure(self, service, bus, at_transport):
+    async def test_active_urc_and_answer_do_not_register_audio_twice_after_start_failure(self, bus):
+        class FakeAT:
+            def __init__(self):
+                self.calls: list[str] = []
+
+            async def execute(self, command, **kwargs):
+                self.calls.append(command)
+                if command == "ATA":
+                    await bus.emit(CallStateEvent(state=CallState.ACTIVE))
+                    await asyncio.sleep(0.01)
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeAudio:
+            running = False
+
+            async def start(self):
+                raise RuntimeError("audio transport failed to open")
+
+            async def stop(self):
+                self.running = False
+
+        at = FakeAT()
+        audio = FakeAudio()
+        service = CallService(at, audio, bus)
         await bus.emit(RingEvent())
+        await asyncio.sleep(0.01)
+        await bus.emit(CallerIDEvent(number="+5****34"))
+        await asyncio.sleep(0.01)
+
+        session = await service.answer()
+        await asyncio.sleep(0.01)
+
+        assert session.is_active
+        assert audio.running is False
+        assert at.calls == ["ATA", "AT+CPCMREG=1"]
+
+    async def test_answer_keeps_active_call_when_audio_enable_times_out(self, bus):
+        class FakeAT:
+            def __init__(self):
+                self.calls: list[str] = []
+
+            async def execute(self, command, **kwargs):
+                self.calls.append(command)
+                if command == "AT+CPCMREG=1":
+                    raise ATTimeoutError("audio enable timed out")
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeAudio:
+            def __init__(self):
+                self.running = False
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+
+        at = FakeAT()
+        audio = FakeAudio()
+        service = CallService(at, audio, bus)
+        await bus.emit(RingEvent())
+        await asyncio.sleep(0.01)
+        await bus.emit(CallerIDEvent(number="+5****34"))
+        await asyncio.sleep(0.01)
+
+        session = await service.answer()
+
+        assert session.number == "+5****34"
+        assert session.direction == "inbound"
+        assert service.state == CallState.ACTIVE
+        assert service.active_call is session
+        assert service._pending_caller is None
+        assert audio.running is False
+        assert at.calls == ["ATA", "AT+CPCMREG=1"]
+
+    async def test_answer_keeps_active_call_when_audio_start_fails(self, bus):
+        class FakeAT:
+            def __init__(self):
+                self.calls: list[str] = []
+
+            async def execute(self, command, **kwargs):
+                self.calls.append(command)
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeAudio:
+            running = False
+
+            async def start(self):
+                raise RuntimeError("audio transport failed to open")
+
+            async def stop(self):
+                self.running = False
+
+        at = FakeAT()
+        audio = FakeAudio()
+        service = CallService(at, audio, bus)
+        await bus.emit(RingEvent())
+        await asyncio.sleep(0.01)
+        await bus.emit(CallerIDEvent(number="+5****34"))
+        await asyncio.sleep(0.01)
+
+        session = await service.answer()
+
+        assert session.number == "+5****34"
+        assert session.direction == "inbound"
+        assert service.state == CallState.ACTIVE
+        assert service.active_call is session
+        assert service._pending_caller is None
+        assert audio.running is False
+        assert at.calls == ["ATA", "AT+CPCMREG=1"]
+
+        await service.hangup()
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
+        assert at.calls == ["ATA", "AT+CPCMREG=1", "ATH", "AT+CPCMREG=0"]
+
+    async def test_answer_failure_resets_ringing_state_for_next_call(self, service, bus, at_transport):
+        await bus.emit(RingEvent())
+        await asyncio.sleep(0.01)
+        await bus.emit(CallerIDEvent(number="+5****34"))
         await asyncio.sleep(0.01)
 
         async def respond():
@@ -180,6 +360,126 @@ class TestCallService:
 
         with pytest.raises(AnswerError):
             await service.answer()
+
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
+        assert service._pending_caller is None
+
+        await bus.emit(RingEvent())
+        await asyncio.sleep(0.01)
+        assert service.state == CallState.RINGING
+
+    async def test_answer_timeout_resets_ringing_state_for_next_call(self, service, bus, monkeypatch):
+        await bus.emit(RingEvent())
+        await asyncio.sleep(0.01)
+        await bus.emit(CallerIDEvent(number="+5****34"))
+        await asyncio.sleep(0.01)
+
+        async def raise_timeout(*args, **kwargs):
+            raise ATTimeoutError("ATA timed out")
+        monkeypatch.setattr(service._at, "execute", raise_timeout)
+
+        with pytest.raises(ATTimeoutError):
+            await service.answer()
+
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
+        assert service._pending_caller is None
+
+        await bus.emit(RingEvent())
+        await asyncio.sleep(0.01)
+        assert service.state == CallState.RINGING
+
+    async def test_answer_timeout_after_active_urc_cleans_audio_and_next_ring(self, bus):
+        class FakeAT:
+            def __init__(self):
+                self.calls: list[str] = []
+
+            async def execute(self, command, **kwargs):
+                self.calls.append(command)
+                if command == "ATA":
+                    await bus.emit(CallStateEvent(state=CallState.ACTIVE))
+                    await asyncio.sleep(0.01)
+                    raise ATTimeoutError("ATA timed out after active URC")
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeAudio:
+            def __init__(self):
+                self.running = False
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+
+        at = FakeAT()
+        audio = FakeAudio()
+        service = CallService(at, audio, bus)
+        await bus.emit(RingEvent())
+        await asyncio.sleep(0.01)
+        await bus.emit(CallerIDEvent(number="+5****34"))
+        await asyncio.sleep(0.01)
+
+        with pytest.raises(ATTimeoutError):
+            await service.answer()
+
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
+        assert service._pending_caller is None
+        assert audio.running is False
+        assert at.calls == ["ATA", "AT+CPCMREG=1", "AT+CPCMREG=0"]
+
+        await bus.emit(RingEvent())
+        await asyncio.sleep(0.01)
+        assert service.state == CallState.RINGING
+
+    async def test_answer_timeout_waits_for_inflight_active_urc_audio_enable_before_cleanup(self, bus):
+        class LockedAT:
+            def __init__(self):
+                self.calls: list[str] = []
+                self._lock = asyncio.Lock()
+
+            async def execute(self, command, **kwargs):
+                async with self._lock:
+                    self.calls.append(command)
+                    if command == "ATA":
+                        await bus.emit(CallStateEvent(state=CallState.ACTIVE))
+                        await asyncio.sleep(0.01)
+                        raise ATTimeoutError("ATA timed out while audio enable was queued")
+                    return ATResponse(success=True, lines=["OK"])
+
+        class FakeAudio:
+            def __init__(self):
+                self.running = False
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+
+        at = LockedAT()
+        audio = FakeAudio()
+        service = CallService(at, audio, bus)
+        await bus.emit(RingEvent())
+        await asyncio.sleep(0.01)
+        await bus.emit(CallerIDEvent(number="+5****34"))
+        await asyncio.sleep(0.01)
+
+        with pytest.raises(ATTimeoutError):
+            await service.answer()
+        await asyncio.sleep(0.05)
+
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
+        assert service._pending_caller is None
+        assert audio.running is False
+        assert at.calls == ["ATA", "AT+CPCMREG=1", "AT+CPCMREG=0"]
+
+        await bus.emit(RingEvent())
+        await asyncio.sleep(0.01)
+        assert service.state == CallState.RINGING
 
     async def test_hangup(self, service, bus, at_transport):
         # Set up an active call
@@ -231,6 +531,163 @@ class TestCallService:
         await asyncio.sleep(0.05)
 
         assert service.state == CallState.IDLE
+
+    async def test_idle_no_carrier_urc_hangs_up_active_call(
+        self, service, executor, bus, at_transport
+    ):
+        """NO CARRIER remains an idle URC that cleans up an active call."""
+        await executor.start_reader()
+        try:
+            await bus.emit(RingEvent())
+            await asyncio.sleep(0.01)
+
+            async def answer_respond():
+                await asyncio.sleep(0.01)
+                at_transport.feed("OK")
+                await asyncio.sleep(0.01)
+                at_transport.feed("OK")  # CPCMREG on
+            asyncio.create_task(answer_respond())
+            session = await service.answer()
+            assert session.is_active
+
+            async def cpcm_off_respond():
+                await asyncio.sleep(0.02)
+                at_transport.feed("OK")
+            asyncio.create_task(cpcm_off_respond())
+
+            at_transport.feed("NO CARRIER")
+            await asyncio.sleep(0.05)
+
+            assert service.state == CallState.IDLE
+            assert service.active_call is None
+            assert session.is_active is False
+        finally:
+            await executor.stop_reader()
+
+    async def test_remote_hangup_waits_for_inflight_audio_enable_before_cleanup(self, bus):
+        class SlowAT:
+            def __init__(self):
+                self.calls: list[str] = []
+                self._lock = asyncio.Lock()
+                self.cpcmreg_on_started = asyncio.Event()
+                self.finish_cpcmreg_on = asyncio.Event()
+
+            async def execute(self, command, **kwargs):
+                async with self._lock:
+                    self.calls.append(command)
+                    if command == "AT+CPCMREG=1":
+                        self.cpcmreg_on_started.set()
+                        await self.finish_cpcmreg_on.wait()
+                    return ATResponse(success=True, lines=["OK"])
+
+        class FakeAudio:
+            def __init__(self):
+                self.running = False
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+
+        at = SlowAT()
+        audio = FakeAudio()
+        service = CallService(at, audio, bus)
+        await bus.emit(RingEvent())
+        await asyncio.sleep(0.01)
+        await bus.emit(CallStateEvent(state=CallState.ACTIVE))
+        await asyncio.wait_for(at.cpcmreg_on_started.wait(), timeout=1.0)
+
+        await bus.emit(CallStateEvent(state=CallState.ENDED))
+        await asyncio.sleep(0.01)
+        at.finish_cpcmreg_on.set()
+        await asyncio.sleep(0.05)
+
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
+        assert audio.running is False
+        assert at.calls == ["AT+CPCMREG=1", "AT+CPCMREG=0"]
+
+    async def test_local_hangup_waits_for_inflight_audio_enable_before_cleanup(self, bus):
+        class SlowAT:
+            def __init__(self):
+                self.calls: list[str] = []
+                self.cpcmreg_on_started = asyncio.Event()
+                self.finish_cpcmreg_on = asyncio.Event()
+
+            async def execute(self, command, **kwargs):
+                self.calls.append(command)
+                if command == "AT+CPCMREG=1":
+                    self.cpcmreg_on_started.set()
+                    await self.finish_cpcmreg_on.wait()
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeAudio:
+            def __init__(self):
+                self.running = False
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+
+        at = SlowAT()
+        audio = FakeAudio()
+        service = CallService(at, audio, bus)
+        await bus.emit(RingEvent())
+        await asyncio.sleep(0.01)
+        await bus.emit(CallStateEvent(state=CallState.ACTIVE))
+        await asyncio.wait_for(at.cpcmreg_on_started.wait(), timeout=1.0)
+
+        hangup_task = asyncio.create_task(service.hangup())
+        await asyncio.sleep(0.01)
+        at.finish_cpcmreg_on.set()
+        await hangup_task
+        await asyncio.sleep(0.01)
+
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
+        assert audio.running is False
+        assert at.calls == ["AT+CPCMREG=1", "ATH", "AT+CPCMREG=0"]
+
+    async def test_active_urc_rechecks_state_before_audio_enable_after_remote_hangup(self, bus):
+        class FakeAT:
+            def __init__(self):
+                self.calls: list[str] = []
+
+            async def execute(self, command, **kwargs):
+                self.calls.append(command)
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeAudio:
+            def __init__(self):
+                self.running = False
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+
+        at = FakeAT()
+        audio = FakeAudio()
+        service = CallService(at, audio, bus)
+
+        async def end_call_during_active_transition(old_state, new_state):
+            if new_state == CallState.ACTIVE:
+                await bus.emit(CallStateEvent(state=CallState.ENDED))
+                await asyncio.sleep(0.01)
+        service._fsm.on_transition(end_call_during_active_transition)
+
+        await bus.emit(RingEvent())
+        await asyncio.sleep(0.01)
+        await bus.emit(CallStateEvent(state=CallState.ACTIVE))
+        await asyncio.sleep(0.05)
+
+        assert service.state == CallState.IDLE
+        assert audio.running is False
+        assert at.calls == []
 
     async def test_reject_incoming_call(self, service, bus, at_transport):
         await bus.emit(RingEvent())
@@ -298,6 +755,105 @@ class TestCallSession:
         output = str(tmp_path / "rec.wav")
         result = await session.record(output, max_duration=0.1)
         assert result == output
+
+    async def test_send_dtmf_rejects_inactive_session_before_modem_write(self):
+        class FakeAT:
+            def __init__(self):
+                self.commands = []
+
+            async def execute(self, command, **kwargs):
+                self.commands.append((command, kwargs))
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeService:
+            state = CallState.IDLE
+            active_call = None
+
+            def __init__(self):
+                self._at = FakeAT()
+
+        service = FakeService()
+        session = CallSession(number="+1234", direction="outbound", service=service)
+
+        with pytest.raises(RuntimeError, match="active call"):
+            await session.send_dtmf("5")
+
+        assert service._at.commands == []
+
+    async def test_send_dtmf_rejects_inactive_empty_digits_before_modem_write(self):
+        class FakeAT:
+            def __init__(self):
+                self.commands = []
+
+            async def execute(self, command, **kwargs):
+                self.commands.append((command, kwargs))
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeService:
+            state = CallState.IDLE
+            active_call = None
+
+            def __init__(self):
+                self._at = FakeAT()
+
+        service = FakeService()
+        session = CallSession(number="+1234", direction="outbound", service=service)
+
+        with pytest.raises(RuntimeError, match="active call"):
+            await session.send_dtmf("")
+
+        assert service._at.commands == []
+
+    async def test_send_dtmf_rejects_stale_session_when_another_call_is_active(self):
+        class FakeAT:
+            def __init__(self):
+                self.commands = []
+
+            async def execute(self, command, **kwargs):
+                self.commands.append((command, kwargs))
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeService:
+            def __init__(self):
+                self.state = CallState.ACTIVE
+                self.active_call = None
+                self._at = FakeAT()
+
+        service = FakeService()
+        stale_session = CallSession(number="+1234", direction="outbound", service=service)
+        current_session = CallSession(number="+5678", direction="outbound", service=service)
+        service.active_call = current_session
+
+        with pytest.raises(RuntimeError, match="active call"):
+            await stale_session.send_dtmf("5")
+
+        assert service._at.commands == []
+
+    async def test_send_dtmf_stops_if_call_becomes_inactive_between_digits(self):
+        class FakeService:
+            def __init__(self):
+                self.state = CallState.ACTIVE
+                self.active_call = None
+                self._at = FakeAT(self)
+
+        class FakeAT:
+            def __init__(self, service):
+                self.service = service
+                self.commands = []
+
+            async def execute(self, command, **kwargs):
+                self.commands.append((command, kwargs))
+                self.service.state = CallState.IDLE
+                return ATResponse(success=True, lines=["OK"])
+
+        service = FakeService()
+        session = CallSession(number="+1234", direction="outbound", service=service)
+        service.active_call = session
+
+        with pytest.raises(RuntimeError, match="active call"):
+            await session.send_dtmf("56", duration_ms=0)
+
+        assert [command for command, _kwargs in service._at.commands] == ["AT+VTS=5"]
 
     async def test_wait_for_end(self, service):
         session = CallSession(number="+1234", direction="outbound", service=service)

@@ -5,8 +5,8 @@ import io
 import logging
 import pytest
 from callstack.events.bus import EventBus
-from callstack.events.types import RingEvent, DTMFEvent
-from callstack.errors import ATTimeoutError
+from callstack.events.types import CallState, CallStateEvent, RingEvent, DTMFEvent
+from callstack.errors import ATTimeoutError, TransportError
 from callstack.protocol.executor import ATCommandExecutor, ATResponse
 from callstack.protocol.urc import URCDispatcher
 from callstack.transport.mock import MockTransport
@@ -60,6 +60,27 @@ async def test_data_lines(executor, transport):
     assert resp.data_lines == ["+CSQ: 20,0"]
 
 
+async def test_padded_ok_final_result_is_normalized_for_control_responses(executor, transport):
+    """Trailing modem whitespace on control final codes is not response data."""
+    transport.feed("+CSQ: 20,0 ", "OK  ")
+
+    resp = await executor.execute("AT+CSQ")
+
+    assert resp.success is True
+    assert resp.lines == ["+CSQ: 20,0", "OK"]
+    assert resp.data_lines == ["+CSQ: 20,0"]
+
+
+async def test_padded_error_final_result_is_normalized_for_control_responses(executor, transport):
+    """Trailing modem whitespace on ERROR still completes as a failure."""
+    transport.feed("ERROR  ")
+
+    resp = await executor.execute("AT+INVALID")
+
+    assert resp.success is False
+    assert resp.lines == ["ERROR"]
+
+
 def test_data_lines_only_excludes_trailing_final_result_code():
     """Final-code-looking payload lines before the terminator remain data."""
     response = ATResponse(
@@ -76,6 +97,13 @@ def test_data_lines_only_excludes_trailing_final_result_code():
         "+CME ERROR details from an SMS body",
         "+CMS ERROR details from an SMS body",
     ]
+
+
+def test_data_lines_excludes_dial_terminal_failure_result_code():
+    """Dial failure result codes are terminal metadata, not response data."""
+    response = ATResponse(success=False, lines=["NO CARRIER"])
+
+    assert response.data_lines == []
 
 
 async def test_success_result_code_requires_exact_line(executor, transport):
@@ -121,8 +149,42 @@ async def test_cms_error(executor, transport):
 
 async def test_timeout(executor, transport):
     """No response within timeout raises ATTimeoutError."""
-    with pytest.raises(ATTimeoutError):
+    with pytest.raises(ATTimeoutError) as exc_info:
         await executor.execute("AT", timeout=0.1)
+
+    message = str(exc_info.value)
+    assert "AT" in message
+    assert "OK" in message
+
+
+async def test_direct_read_timeout_raises_at_timeout_with_command_and_expect(transport, urc):
+    """A direct transport read timeout is an AT timeout, not a transport failure."""
+    executor = ATCommandExecutor(transport, urc)
+
+    with pytest.raises(ATTimeoutError) as exc_info:
+        await executor.execute("AT+CSQ", expect=("READY",), timeout=0.01)
+
+    message = str(exc_info.value)
+    assert "AT+CSQ" in message
+    assert "READY" in message
+    assert transport.last_written == "AT+CSQ\r\n"
+
+
+async def test_direct_read_transport_oserror_raises_transport_error(transport, urc):
+    """Real transport read failures still surface as TransportError."""
+    executor = ATCommandExecutor(transport, urc)
+
+    async def raise_oserror():
+        raise OSError("serial disconnected")
+
+    transport.readline = raise_oserror
+
+    with pytest.raises(TransportError) as exc_info:
+        await executor.execute("AT", timeout=0.1)
+
+    message = str(exc_info.value)
+    assert "Transport error during command" in message
+    assert "serial disconnected" in message
 
 
 async def test_echo_suppression(executor, transport):
@@ -203,6 +265,52 @@ async def test_urc_during_command(executor, transport, bus):
 
     await asyncio.sleep(0.01)  # Let the URC handler task run
     assert len(received_urcs) == 1
+
+
+@pytest.mark.parametrize(
+    "terminal_result",
+    ["BUSY", "NO CARRIER", "NO ANSWER", "NO DIALTONE", "NO DIAL TONE"],
+)
+async def test_dial_terminal_result_is_failed_response_not_urc(
+    executor, transport, bus, terminal_result
+):
+    """ATD terminal call results complete the dial command instead of dispatching."""
+    received_call_states = []
+
+    @bus.on(CallStateEvent)
+    async def on_call_state(event):
+        received_call_states.append(event.state)
+
+    transport.feed(terminal_result, "OK")
+
+    resp = await executor.execute("ATD+123****7890;", expect=["OK"], timeout=1.0)
+
+    assert resp.success is False
+    assert resp.lines == [terminal_result]
+    await asyncio.sleep(0.01)  # Let any incorrectly-dispatched URC task run
+    assert received_call_states == []
+
+
+async def test_idle_no_carrier_still_dispatches_call_state_urc(transport, bus, urc):
+    """The ATD special case must not disable idle NO CARRIER URC handling."""
+    executor = ATCommandExecutor(transport, urc)
+    received_call_states = []
+
+    @bus.on(CallStateEvent)
+    async def on_call_state(event):
+        received_call_states.append(event.state)
+
+    await executor.start_reader()
+    try:
+        transport.feed("NO CARRIER")
+        for _ in range(10):
+            if received_call_states:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await executor.stop_reader()
+
+    assert received_call_states == [CallState.ENDED]
 
 
 async def test_blank_lines_skipped(executor, transport):
