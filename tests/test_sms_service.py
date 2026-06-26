@@ -206,7 +206,7 @@ async def test_receive_cmt(sms_service, bus, store):
     bus.subscribe(IncomingSMSEvent, track)
 
     await bus.emit(_RawSMSNotification(
-        sender="+15559876", body="Direct message", raw='+CMT: "+15559876","","24/12/25,14:30:00+04"'
+        sender="+155****9876", body="Direct message", raw='+CMT: "+155****9876","","24/12/25,14:30:00+04"'
     ))
 
     await asyncio.sleep(0.05)
@@ -214,6 +214,29 @@ async def test_receive_cmt(sms_service, bus, store):
     enriched = [e for e in all_events if e.body == "Direct message" and not e.raw]
     assert len(enriched) >= 1
     assert await store.count() == 1
+
+
+async def test_receive_cmt_decodes_gsm_text_mode_body(sms_service, bus, store):
+    """Direct +CMT bodies decode GSM 03.38 text-mode control bytes."""
+    all_events = []
+
+    async def track(e):
+        all_events.append(e)
+
+    bus.subscribe(IncomingSMSEvent, track)
+
+    await bus.emit(_RawSMSNotification(
+        sender="+155****9876",
+        body="Caf\x05 \x1b(\x1b)\x1be",
+        raw='+CMT: "+155****9876","","24/12/25,14:30:00+04"',
+    ))
+
+    await asyncio.sleep(0.05)
+
+    enriched = [e for e in all_events if e.body == "Café {}€" and not e.raw]
+    assert len(enriched) == 1
+    stored = await store.list()
+    assert stored[0].body == "Café {}€"
 
 
 # -- Message Management --
@@ -287,6 +310,18 @@ async def test_list_messages_preserves_body_line_edge_spaces(sms_service, transp
     assert messages[0].body == "  padded code 123  "
 
 
+async def test_list_messages_decodes_gsm_text_mode_body_bytes(sms_service, transport):
+    """CMGL body lines decode GSM 03.38 text-mode control bytes."""
+    transport.feed('+CMGL: 0,"REC UNREAD","+155****1111","","24/12/25,10:00:00+04"')
+    transport.feed_raw(b"Caf\x05 \x1b(\x1b)\x1be\r\n")
+    transport.feed("OK")
+
+    messages = await sms_service.list_messages()
+
+    assert len(messages) == 1
+    assert messages[0].body == "Café {}€"
+
+
 async def test_list_messages_empty(sms_service, transport):
     """List messages when SIM is empty."""
     transport.feed("OK")
@@ -350,6 +385,32 @@ async def test_read_message_preserves_body_line_edge_spaces(sms_service, transpo
 
     assert sms is not None
     assert sms.body == "  padded code 123  "
+
+
+async def test_read_message_decodes_gsm_text_mode_body_bytes(sms_service, transport):
+    """CMGR body lines decode GSM 03.38 text-mode control bytes."""
+    transport.feed('+CMGR: "REC UNREAD","+155****1234","","24/12/25,14:30:00+04"')
+    transport.feed_raw(b"Caf\x05 \x1b(\x1b)\x1be\r\n")
+    transport.feed("OK")
+
+    sms = await sms_service.read_message(0)
+
+    assert sms is not None
+    assert sms.body == "Café {}€"
+
+
+async def test_read_message_preserves_literal_tab_body_text(sms_service, transport):
+    """CMGR body lines keep already-decoded tab whitespace intact."""
+    transport.feed(
+        '+CMGR: "REC UNREAD","+155****1234","","24/12/25,14:30:00+04"',
+        "one\ttwo",
+        "OK",
+    )
+
+    sms = await sms_service.read_message(0)
+
+    assert sms is not None
+    assert sms.body == "one\ttwo"
 
 
 async def test_read_message_preserves_ok_with_trailing_space_body_line(sms_service, transport):
