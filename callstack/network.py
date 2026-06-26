@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
+from callstack.errors import ATTimeoutError
 from callstack.events.bus import EventBus
 from callstack.events.types import SignalQualityEvent
 from callstack.protocol.commands import ATCommand
@@ -96,21 +97,36 @@ class NetworkService:
         )
 
     async def registration(self) -> RegistrationInfo:
-        """Query network registration status (AT+CREG?).
+        """Query network registration status (AT+CREG?/AT+CGREG?/AT+CEREG?).
 
-        +CREG is a URC prefix, so the executor dispatches the response line
-        as a URC rather than including it in resp.lines. We capture it via
-        the executor's capture_urcs context manager.
+        Registration response prefixes are URC prefixes, so the executor
+        dispatches response lines as URCs rather than including them in
+        resp.lines. We capture them via the executor's capture_urcs context
+        manager.
         """
         with self._at.capture_urcs("+CREG:", "+CGREG:", "+CEREG:") as cap:
-            await self._at.execute(ATCommand.REGISTRATION, timeout=self._command_timeout)
+            for command in (
+                ATCommand.REGISTRATION,
+                ATCommand.PACKET_REGISTRATION,
+                ATCommand.LTE_REGISTRATION,
+            ):
+                try:
+                    await self._at.execute(command, timeout=self._command_timeout)
+                except ATTimeoutError:
+                    logger.debug("Network registration query timed out: %s", command)
+                    break
 
+        first_parsed: RegistrationInfo | None = None
         for line in cap.lines:
             parsed = ATResponseParser.parse_registration(line)
             if parsed:
                 mode, status = parsed
-                return RegistrationInfo(status=status, mode=mode)
-        return RegistrationInfo(status=0, mode=0)
+                info = RegistrationInfo(status=status, mode=mode)
+                if info.registered:
+                    return info
+                if first_parsed is None:
+                    first_parsed = info
+        return first_parsed or RegistrationInfo(status=0, mode=0)
 
     async def operator(self) -> Optional[str]:
         """Query current network operator name (AT+COPS?)."""

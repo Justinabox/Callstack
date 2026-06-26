@@ -75,6 +75,8 @@ class ATCommand:
     # Network
     SIGNAL_QUALITY = "AT+CSQ"
     REGISTRATION = "AT+CREG?"
+    PACKET_REGISTRATION = "AT+CGREG?"
+    LTE_REGISTRATION = "AT+CEREG?"
     OPERATOR = "AT+COPS?"
 
     @staticmethod

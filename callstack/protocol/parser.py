@@ -22,8 +22,10 @@ class ATResponseParser:
     # Signal quality: +CSQ: rssi,ber
     _CSQ_RE = re.compile(r"^\+CSQ:\s*(\d+),(\d+)$")
 
-    # Registration: +CREG/+CGREG/+CEREG: n,stat
-    _CREG_RE = re.compile(r"^\+C(?:G|E)?REG:\s*(\d+),(\d+)")
+    # Registration: +CREG/+CGREG/+CEREG: n,stat[,verbose...] or one-field URC stat
+    _CREG_RE = re.compile(
+        r'^\+C(?:G|E)?REG:\s*(?:(\d+),(\d+)(?:,(?:"[0-9A-Fa-f]+"|\d+))*|(\d+))$'
+    )
 
     # Caller ID: +CLIP: "number",type
     _CLIP_RE = re.compile(r'^\+CLIP:\s*"([^"]*)"')
@@ -50,6 +52,8 @@ class ATResponseParser:
         """Parse +CREG/+CGREG/+CEREG response. Returns (mode, status) or None."""
         m = ATResponseParser._CREG_RE.match(line)
         if m:
+            if m.group(3) is not None:
+                return 0, int(m.group(3))
             return int(m.group(1)), int(m.group(2))
         return None
 
