@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from callstack.events.bus import EventBus
 from callstack.protocol.executor import ATCommandExecutor
 from callstack.ussd import USSDService
+import server
 from server import APIKeyAuth, create_app
 
 
@@ -76,6 +77,45 @@ class TestAPIKeyAuthEnabled:
         client = await aiohttp_client(_make_app(auth))
         resp = await client.get("/test", headers={"Authorization": "Basic abc123"})
         assert resp.status == 401
+
+
+class TestAPIKeyConstantTimeComparison:
+    def test_helper_compares_candidate_against_each_stored_key_without_self_compare(self, monkeypatch):
+        auth = APIKeyAuth(api_keys=["test-key-123", "another-key"])
+        calls = []
+
+        def fake_compare_digest(left, right):
+            calls.append((left, right))
+            return left == right
+
+        monkeypatch.setattr(server.secrets, "compare_digest", fake_compare_digest)
+
+        assert auth._is_valid_key("wrong-key") is False
+
+        assert len(calls) == 2
+        assert set(calls) == {
+            ("wrong-key", "test-key-123"),
+            ("wrong-key", "another-key"),
+        }
+        assert ("wrong-key", "wrong-key") not in calls
+
+    def test_helper_does_not_short_circuit_after_valid_key_match(self, monkeypatch):
+        auth = APIKeyAuth(api_keys=["matching-key", "other-key"])
+        auth._keys = cast(set[str], ("matching-key", "other-key"))
+        calls = []
+
+        def fake_compare_digest(left, right):
+            calls.append((left, right))
+            return left == right
+
+        monkeypatch.setattr(server.secrets, "compare_digest", fake_compare_digest)
+
+        assert auth._is_valid_key("matching-key") is True
+
+        assert calls == [
+            ("matching-key", "matching-key"),
+            ("matching-key", "other-key"),
+        ]
 
 
 class TestAPIKeyManagement:

@@ -4,6 +4,7 @@ Handles GSM 7-bit default alphabet encoding/decoding and PDU frame
 construction for modems operating in PDU mode (AT+CMGF=0).
 """
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -13,13 +14,41 @@ from typing import Optional
 GSM7_BASIC = (
     "@\xa3$\xa5\xe8\xe9\xf9\xec\xf2\xc7\n\xd8\xf8\r\xc5\xe5"
     "\u0394_\u03a6\u0393\u039b\u03a9\u03a0\u03a8\u03a3\u0398\u039e"
-    "\xa0\xc6\xe6\xdf\xc9 !\"#\xa4%&'()*+,-./0123456789:;<=>?"
+    "\x1b\xc6\xe6\xdf\xc9 !\"#\xa4%&'()*+,-./0123456789:;<=>?"
     "\xa1ABCDEFGHIJKLMNOPQRSTUVWXYZ\xc4\xd6\xd1\xdc\xa7"
     "\xbfabcdefghijklmnopqrstuvwxyz\xe4\xf6\xf1\xfc\xe0"
 )
 
-# Reverse lookup for encoding
+# GSM 03.38 extension table characters are encoded as ESC (0x1B)
+# followed by the extension-table code.
+GSM7_ESCAPE = 0x1B
+GSM7_EXTENSION = {
+    "\f": 0x0A,
+    "^": 0x14,
+    "{": 0x28,
+    "}": 0x29,
+    "\\": 0x2F,
+    "[": 0x3C,
+    "~": 0x3D,
+    "]": 0x3E,
+    "|": 0x40,
+    "€": 0x65,
+}
+
+# Reverse lookup for encoding/decoding
 _GSM7_ENCODE = {c: i for i, c in enumerate(GSM7_BASIC)}
+_GSM7_EXTENSION_DECODE = {code: char for char, code in GSM7_EXTENSION.items()}
+_SMS_RECIPIENT_RE = re.compile(r"\+?[0-9]{3,15}\Z")
+
+
+def _validate_sms_recipient(recipient: str) -> str:
+    """Validate a PDU-mode SMS destination address before semi-octet encoding."""
+    if not isinstance(recipient, str) or not _SMS_RECIPIENT_RE.fullmatch(recipient):
+        raise ValueError(
+            f"Invalid SMS recipient: {recipient!r} "
+            "(use optional leading + followed by 3-15 digits)"
+        )
+    return recipient
 
 
 class PDUEncoder:
@@ -70,6 +99,11 @@ class PDUEncoder:
         """
         septets = []
         for char in text:
+            extension_code = GSM7_EXTENSION.get(char)
+            if extension_code is not None:
+                septets.extend((GSM7_ESCAPE, extension_code))
+                continue
+
             code = _GSM7_ENCODE.get(char)
             if code is None:
                 code = _GSM7_ENCODE.get("?", 0x3F)
@@ -107,6 +141,7 @@ class PDUEncoder:
         mr = "00"
 
         # Destination address
+        recipient = _validate_sms_recipient(recipient)
         clean = recipient.lstrip("+")
         da_len = f"{len(clean):02X}"
         da_encoded, da_toa = PDUEncoder.encode_phone_number(recipient)
@@ -206,7 +241,26 @@ class PDUDecoder:
                 byte_val >>= 7
                 bits -= 7
 
-        return "".join(GSM7_BASIC[s] if s < len(GSM7_BASIC) else "?" for s in septets)
+        decoded = []
+        idx = 0
+        while idx < len(septets):
+            septet = septets[idx]
+            if septet == GSM7_ESCAPE:
+                if idx + 1 >= len(septets):
+                    decoded.append(GSM7_BASIC[septet])
+                    idx += 1
+                    continue
+
+                extension_char = _GSM7_EXTENSION_DECODE.get(septets[idx + 1])
+                if extension_char is not None:
+                    decoded.append(extension_char)
+                    idx += 2
+                    continue
+
+            decoded.append(GSM7_BASIC[septet] if septet < len(GSM7_BASIC) else "?")
+            idx += 1
+
+        return "".join(decoded)
 
     @staticmethod
     def decode_timestamp(ts_hex: str) -> Optional[datetime]:

@@ -18,7 +18,9 @@ import aiohttp
 from aiohttp import web
 
 from callstack import Modem, ModemConfig, CallSession, IncomingSMSEvent
+from callstack.errors import ATTimeoutError, SMSSendError, TransportError
 from callstack.events.types import SMSDeliveryReportEvent
+from callstack.metrics import CallstackMetrics
 from callstack.protocol.commands import ATCommand
 
 logger = logging.getLogger("server")
@@ -70,7 +72,7 @@ class APIKeyAuth:
             )
 
         key = auth_header[7:]
-        if not secrets.compare_digest(key, key) or key not in self._keys:
+        if not self._is_valid_key(key):
             return web.json_response({"error": "Invalid API key."}, status=403)
 
         # Rate limiting
@@ -89,6 +91,12 @@ class APIKeyAuth:
         log.append(now)
 
         return await handler(request)
+
+    def _is_valid_key(self, candidate_key: str) -> bool:
+        valid = False
+        for stored_key in self._keys:
+            valid |= secrets.compare_digest(candidate_key, stored_key)
+        return valid
 
     def add_key(self, key: str) -> None:
         self._keys.add(key)
@@ -166,9 +174,21 @@ def _valid_webhook_url(url: str) -> bool:
     return ip.is_global and not ip.is_multicast
 
 
+def _is_sms_body_encoding_error(exc: SMSSendError) -> bool:
+    return "SMS body cannot be encoded" in exc.detail
+
+
 def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Application:
     auth = APIKeyAuth(api_keys=api_keys)
     app = web.Application(middlewares=[auth.middleware])
+    metrics = CallstackMetrics(modem)
+    app["callstack_metrics"] = metrics
+
+    async def healthz(request: web.Request) -> web.Response:
+        return web.json_response(metrics.health_payload(), status=metrics.health_status())
+
+    async def render_metrics(request: web.Request) -> web.Response:
+        return web.Response(text=metrics.render_prometheus(), content_type="text/plain")
 
     async def send_sms(request: web.Request) -> web.Response:
         data, error = await _json_body(request)
@@ -191,6 +211,17 @@ def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Applicati
             sms = await modem.sms.send(to, body)
         except ValueError:
             return web.json_response({"error": "invalid SMS request"}, status=400)
+        except (ATTimeoutError, TimeoutError):
+            logger.warning("SMS send timed out; returning redacted HTTP 504")
+            return web.json_response({"error": "SMS send timed out"}, status=504)
+        except SMSSendError as exc:
+            if _is_sms_body_encoding_error(exc):
+                return web.json_response({"error": "invalid SMS request"}, status=400)
+            logger.warning("SMS send failed; returning redacted HTTP 502")
+            return web.json_response({"error": "SMS send failed"}, status=502)
+        except TransportError:
+            logger.warning("SMS send failed; returning redacted HTTP 502")
+            return web.json_response({"error": "SMS send failed"}, status=502)
         return web.json_response({
             "status": "sent",
             "to": sms.recipient,
@@ -241,9 +272,15 @@ def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Applicati
             if error_message not in {"Invalid USSD code", "Invalid USSD encoding"}:
                 error_message = "invalid USSD request"
             return web.json_response({"error": error_message}, status=400)
-        except (TimeoutError, RuntimeError) as exc:
-            return web.json_response({"error": str(exc)}, status=504)
+        except (ATTimeoutError, TimeoutError):
+            logger.warning("USSD request timed out; returning redacted HTTP 504")
+            return web.json_response({"error": "USSD request timed out"}, status=504)
+        except (TransportError, RuntimeError):
+            logger.warning("USSD request failed; returning redacted HTTP 502")
+            return web.json_response({"error": "USSD request failed"}, status=502)
 
+    app.router.add_get("/healthz", healthz)
+    app.router.add_get("/metrics", render_metrics)
     app.router.add_post("/sms/send", send_sms)
     app.router.add_post("/sms/subscribe", subscribe)
     app.router.add_get("/sms/messages", list_messages)

@@ -1,9 +1,12 @@
 """Tests for the installable Callstack CLI."""
 
 import json
+from dataclasses import asdict
 
 from callstack.config import ModemConfig
 from callstack.errors import SMSSendError
+from callstack.hardware.discovery import ModemDiscoveryReport, ModemIdentity
+from callstack.hardware.profiles import classify_capabilities
 from callstack.network import RegistrationInfo, SignalInfo
 from callstack.sms.types import SMS
 
@@ -206,6 +209,7 @@ def test_help_includes_status_and_send_commands(capsys):
     output = capsys.readouterr().out
     assert "status" in output
     assert "send" in output
+    assert "doctor" in output
     assert "--at-port" in output
 
 
@@ -224,6 +228,119 @@ def test_subcommand_help_includes_command_and_config_flags(capsys):
     assert "--to" in send_output
     assert "--body" in send_output
     assert "--at-port" in send_output
+
+
+def test_doctor_defaults_to_configured_at_port_when_ports_are_omitted(monkeypatch, capsys):
+    import callstack.cli as cli
+
+    called = {}
+    report = ModemDiscoveryReport(at_port="/dev/ttyUSB2")
+
+    async def fake_probe(ports, **kwargs):
+        called["ports"] = ports
+        return report
+
+    monkeypatch.setattr(cli, "probe_modem_ports", fake_probe)
+
+    code = cli.main(["doctor", "--json"])
+
+    assert code == 0
+    assert called == {"ports": ["/dev/ttyUSB2"]}
+    assert json.loads(capsys.readouterr().out)["at_port"] == "/dev/ttyUSB2"
+
+
+def test_doctor_passes_configured_baudrate_to_probe(monkeypatch, capsys):
+    import callstack.cli as cli
+
+    called = {}
+    report = ModemDiscoveryReport(at_port="/dev/subAT")
+
+    async def fake_probe(ports, **kwargs):
+        called["ports"] = ports
+        called.update(kwargs)
+        return report
+
+    monkeypatch.setattr(cli, "probe_modem_ports", fake_probe)
+
+    code = cli.main(["doctor", "--at-port", "/dev/subAT", "--baudrate", "9600", "--json"])
+
+    assert code == 0
+    assert called["ports"] == ["/dev/subAT"]
+    assert called["baudrate"] == 9600
+    json.loads(capsys.readouterr().out)
+
+
+def test_doctor_json_uses_probe_and_serializes_pii_safe_report(monkeypatch, capsys):
+    import callstack.cli as cli
+
+    sentinel = "SENSITIVE_SENTINEL_SHOULD_NOT_APPEAR"
+    called = {}
+    report = ModemDiscoveryReport(
+        at_port="/dev/fakeAT",
+        audio_port=None,
+        identity=ModemIdentity(
+            manufacturer="SIMCOM INCORPORATED",
+            model="SIMCOM_SIM7600E-H",
+            revision="LE20B01SIM7600M22",
+        ),
+        confidence="profile-match",
+        notes=("SIMCom profile matched", f"redacted marker omitted: {sentinel}".replace(sentinel, "[redacted]")),
+    )
+
+    async def fake_probe(ports, **kwargs):
+        called["ports"] = ports
+        return report
+
+    monkeypatch.setattr(cli, "probe_modem_ports", fake_probe)
+
+    code = cli.main(["doctor", "--ports", "/dev/fakeAT,/dev/other", "--json"])
+
+    assert code == 0
+    assert called == {"ports": ["/dev/fakeAT", "/dev/other"]}
+    output = capsys.readouterr().out
+    assert sentinel not in output
+    payload = json.loads(output)
+    assert payload == {
+        "at_port": "/dev/fakeAT",
+        "audio_port": None,
+        "identity": asdict(report.identity),
+        "capabilities": asdict(report.capabilities),
+        "confidence": "profile-match",
+        "notes": list(report.notes),
+    }
+
+
+def test_doctor_human_output_includes_safe_summary_capabilities_notes_and_safety_text(monkeypatch, capsys):
+    import callstack.cli as cli
+
+    identity = ModemIdentity(manufacturer="Quectel", model="EC25", revision="EC25EFAR06A08M4G")
+    report = ModemDiscoveryReport(
+        at_port="/dev/fakeAT",
+        identity=identity,
+        capabilities=classify_capabilities(identity),
+        confidence="profile-match",
+        notes=("Quectel-like identity matched", "Audio probing is intentionally not performed."),
+    )
+
+    async def fake_probe(ports, **kwargs):
+        assert ports == ["/dev/fakeAT"]
+        return report
+
+    monkeypatch.setattr(cli, "probe_modem_ports", fake_probe)
+
+    code = cli.main(["doctor", "--ports", "/dev/fakeAT"])
+
+    assert code == 0
+    output = capsys.readouterr().out
+    assert "AT port: /dev/fakeAT (confidence: profile-match)" in output
+    assert "Audio port: unknown" in output
+    assert "Manufacturer: Quectel" in output
+    assert "Model: EC25" in output
+    assert "sms_text_mode: supported" in output
+    assert "voice_calls: unknown" in output
+    assert "Quectel-like identity matched" in output
+    assert "no SMS, USSD, call, SIM unlock, or storage commands were sent" in output
+
 
 def test_send_defaults_to_warning_logging_to_avoid_private_info_logs(monkeypatch, capsys):
     cli = _install_fake_modem(monkeypatch)

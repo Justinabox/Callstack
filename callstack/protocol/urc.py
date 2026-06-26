@@ -28,7 +28,7 @@ class URCDispatcher:
         "RING", "+CLIP", "+DTMF", "RXDTMF",
         "+CMT", "+CMTI", "+CDSI",
         "VOICE CALL", "NO CARRIER", "BUSY", "NO ANSWER",
-        "+CUSD", "+CREG", "+CGREG",
+        "+CUSD", "+CREG", "+CGREG", "+CEREG",
     )
 
     def __init__(self, event_bus: EventBus):
@@ -129,8 +129,14 @@ class URCDispatcher:
             else:
                 logger.warning("Could not parse USSD response: %s", line)
 
-        elif line.startswith("+CREG:") or line.startswith("+CGREG:"):
-            logger.info("Network registration: %s", line)
+        elif line.startswith(("+CREG:", "+CGREG:", "+CEREG:")):
+            family = line.split(":", 1)[0]
+            parsed = ATResponseParser.parse_registration(line)
+            if parsed:
+                _, status = parsed
+                logger.info("Network registration: %s status=%s", family, status)
+            else:
+                logger.info("Network registration: %s", family)
 
         else:
             logger.warning("Unhandled URC: %s", line)

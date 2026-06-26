@@ -1,5 +1,7 @@
 """Tests for PDU encoder/decoder."""
 
+import pytest
+
 from callstack.sms.pdu import PDUEncoder, PDUDecoder, GSM7_BASIC
 
 
@@ -26,6 +28,22 @@ class TestGSM7Encoding:
         packed, count = PDUEncoder.encode_gsm7(text)
         decoded = PDUDecoder.decode_gsm7(packed, count)
         assert decoded == text
+
+    def test_roundtrip_extension_table_characters(self):
+        text = "Braces {}[] cost €5 ~^|\\"
+        packed, count = PDUEncoder.encode_gsm7(text)
+
+        decoded = PDUDecoder.decode_gsm7(packed, count)
+
+        assert decoded == text
+        assert count == len(text) + sum(1 for ch in text if ch in "{}[]€~^|\\")
+
+    def test_nbsp_falls_back_without_becoming_extension_escape(self):
+        packed, count = PDUEncoder.encode_gsm7("\xa0(")
+
+        decoded = PDUDecoder.decode_gsm7(packed, count)
+
+        assert decoded == "?("
 
     def test_full_alphabet_coverage(self):
         # Ensure every GSM7 char survives roundtrip
@@ -98,10 +116,27 @@ class TestSubmitPDU:
 
     def test_submit_pdu_length_counts_full_tpdu_after_sca(self):
         for body in ("Hi", "Hello World"):
-            pdu, length = PDUEncoder.build_submit_pdu("+120****0123", body)
+            pdu, length = PDUEncoder.build_submit_pdu("+12055550123", body)
             sca_octets = int(pdu[:2], 16)
             expected_tpdu_octets = (len(pdu) // 2) - (1 + sca_octets)
             assert length == expected_tpdu_octets
+
+    @pytest.mark.parametrize(
+        "recipient",
+        [
+            "bad\"number",
+            "++123",
+            "12+34",
+            "*123#",
+            "+123\n",
+            "+123\r",
+            "+12",
+            "+1234567890123456",
+        ],
+    )
+    def test_build_submit_pdu_rejects_invalid_recipient_before_encoding(self, recipient):
+        with pytest.raises(ValueError, match="Invalid SMS recipient"):
+            PDUEncoder.build_submit_pdu(recipient, "Hi")
 
 
 class TestDeliverPDU:

@@ -122,6 +122,71 @@ async def test_multiple_subscribers(bus):
     assert len(results["b"]) == 1
 
 
+async def test_sync_subscriber_does_not_abort_stream_delivery(bus):
+    received = []
+
+    bus.subscribe(RingEvent, lambda event: received.append(event))
+
+    async with bus.stream(RingEvent) as stream:
+        await bus.emit(RingEvent())
+        streamed = await stream.next(timeout=0.05)
+
+    assert len(received) == 1
+    assert isinstance(streamed, RingEvent)
+
+
+async def test_subscriber_exception_is_logged_without_aborting_stream(bus, caplog):
+    def failing_handler(event):
+        raise RuntimeError("private sms body secret")
+
+    bus.subscribe(RingEvent, failing_handler)
+
+    async with bus.stream(RingEvent) as stream:
+        with caplog.at_level("ERROR", logger="callstack.events.bus"):
+            await bus.emit(RingEvent())
+        streamed = await stream.next(timeout=0.05)
+
+    assert isinstance(streamed, RingEvent)
+    assert "Event subscriber raised RuntimeError" in caplog.text
+    assert "private sms body secret" not in caplog.text
+
+
+async def test_failing_subscriber_does_not_abort_later_subscribers(bus, caplog):
+    received = []
+
+    def failing_handler(event):
+        raise RuntimeError("boom")
+
+    async def later_handler(event):
+        received.append(event)
+
+    bus.subscribe(RingEvent, failing_handler)
+    bus.subscribe(RingEvent, later_handler)
+
+    with caplog.at_level("ERROR", logger="callstack.events.bus"):
+        await bus.emit(RingEvent())
+    await asyncio.sleep(0.01)
+
+    assert len(received) == 1
+    assert "Event subscriber raised RuntimeError" in caplog.text
+
+
+async def test_async_subscriber_exception_is_logged_without_aborting_stream(bus, caplog):
+    async def failing_handler(event):
+        raise RuntimeError("boom")
+
+    bus.subscribe(RingEvent, failing_handler)
+
+    async with bus.stream(RingEvent) as stream:
+        with caplog.at_level("ERROR", logger="callstack.events.bus"):
+            await bus.emit(RingEvent())
+            await asyncio.sleep(0.01)
+        streamed = await stream.next(timeout=0.05)
+
+    assert isinstance(streamed, RingEvent)
+    assert "Event subscriber raised RuntimeError" in caplog.text
+
+
 async def test_event_frozen():
     """Events should be immutable."""
     event = DTMFEvent(digit="5")

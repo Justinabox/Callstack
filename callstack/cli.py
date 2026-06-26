@@ -7,9 +7,12 @@ import asyncio
 import json
 import os
 import sys
+from dataclasses import asdict, fields
 from typing import Any
 
 from callstack.config import ModemConfig
+from callstack.hardware.discovery import ModemDiscoveryReport
+from callstack.hardware.probe import probe_modem_ports
 from callstack.modem import Modem
 
 
@@ -77,6 +80,21 @@ def _build_parser() -> argparse.ArgumentParser:
     send_parser.add_argument("--to", required=True, help="Destination phone number")
     send_parser.add_argument("--body", required=True, help="SMS message body")
 
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        parents=[subcommand_config],
+        help="Safely probe modem ports with non-mutating identity commands",
+    )
+    doctor_parser.add_argument(
+        "--ports",
+        default=None,
+        help=(
+            "Comma-separated candidate AT serial ports to probe; "
+            "defaults to the configured --at-port and performs no automatic hardware scan"
+        ),
+    )
+    doctor_parser.add_argument("--json", action="store_true", dest="as_json", help="Emit machine-readable JSON")
+
     return parser
 
 
@@ -126,6 +144,47 @@ def _print_human_status(payload: dict[str, Any]) -> None:
         )
 
 
+def _parse_ports(value: str) -> list[str]:
+    return [port.strip() for port in value.split(",") if port.strip()]
+
+
+def _doctor_payload(report: ModemDiscoveryReport) -> dict[str, Any]:
+    return {
+        "at_port": report.at_port,
+        "audio_port": report.audio_port,
+        "identity": asdict(report.identity),
+        "capabilities": asdict(report.capabilities),
+        "confidence": report.confidence,
+        "notes": list(report.notes),
+    }
+
+
+def _unknown(value: str | None) -> str:
+    return value or "unknown"
+
+
+def _print_human_doctor(report: ModemDiscoveryReport) -> None:
+    identity = report.identity
+    capabilities = report.capabilities
+
+    print("Callstack doctor")
+    print(f"AT port: {_unknown(report.at_port)} (confidence: {report.confidence})")
+    print(f"Audio port: {_unknown(report.audio_port)}")
+    print(f"Manufacturer: {_unknown(identity.manufacturer)}")
+    print(f"Model: {_unknown(identity.model)}")
+    print(f"Revision: {_unknown(identity.revision)}")
+    print("Capabilities:")
+    for capability in fields(capabilities):
+        print(f"  {capability.name}: {getattr(capabilities, capability.name)}")
+    print("Notes:")
+    if report.notes:
+        for note in report.notes:
+            print(f"  - {note}")
+    else:
+        print("  - No additional notes.")
+    print("Safety: no SMS, USSD, call, SIM unlock, or storage commands were sent.")
+
+
 async def _status(args: argparse.Namespace) -> int:
     config = _config_from_args(args)
     async with Modem(config) as modem:
@@ -156,11 +215,23 @@ async def _send(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _doctor(args: argparse.Namespace) -> int:
+    ports = _parse_ports(args.ports) if args.ports else [args.at_port]
+    report = await probe_modem_ports(ports, baudrate=args.baudrate)
+    if args.as_json:
+        print(json.dumps(_doctor_payload(report)))
+    else:
+        _print_human_doctor(report)
+    return 0
+
+
 async def _run(args: argparse.Namespace) -> int:
     if args.command == "status":
         return await _status(args)
     if args.command == "send":
         return await _send(args)
+    if args.command == "doctor":
+        return await _doctor(args)
     raise RuntimeError(f"unsupported command: {args.command}")
 
 
