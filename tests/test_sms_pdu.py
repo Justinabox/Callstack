@@ -5,6 +5,32 @@ import pytest
 from callstack.sms.pdu import PDUEncoder, PDUDecoder, GSM7_BASIC
 
 
+def _submit_pdu_fields(pdu: str) -> dict:
+    """Return structural SMS-SUBMIT fields needed by multipart tests."""
+    pos = 0
+    sca_octets = int(pdu[pos:pos + 2], 16)
+    pos += 2 + (sca_octets * 2)
+    pdu_type = int(pdu[pos:pos + 2], 16)
+    pos += 2
+    pos += 2  # MR
+    address_digits = int(pdu[pos:pos + 2], 16)
+    pos += 2
+    pos += 2  # TOA
+    pos += (address_digits + (address_digits % 2))
+    pos += 2  # PID
+    pos += 2  # DCS
+    pos += 2  # VP
+    user_data_length = int(pdu[pos:pos + 2], 16)
+    pos += 2
+    user_data = bytes.fromhex(pdu[pos:])
+    return {
+        "pdu_type": pdu_type,
+        "user_data_length": user_data_length,
+        "user_data": user_data,
+    }
+
+
+
 class TestGSM7Encoding:
     def test_encode_hello(self):
         packed, count = PDUEncoder.encode_gsm7("Hello")
@@ -137,6 +163,60 @@ class TestSubmitPDU:
     def test_build_submit_pdu_rejects_invalid_recipient_before_encoding(self, recipient):
         with pytest.raises(ValueError, match="Invalid SMS recipient"):
             PDUEncoder.build_submit_pdu(recipient, "Hi")
+
+
+class TestMultipartSubmitPDU:
+    def test_build_multipart_submit_pdus_uses_16bit_udh_for_each_segment(self):
+        segments = PDUEncoder.build_multipart_submit_pdus(
+            "5550100", "A" * 161, reference=0x1234
+        )
+
+        assert [segment.sequence for segment in segments] == [1, 2]
+        assert {segment.total_parts for segment in segments} == {2}
+        assert {segment.reference for segment in segments} == {0x1234}
+        assert "".join(segment.body for segment in segments) == "A" * 161
+        assert [segment.body for segment in segments] == ["A" * 152, "A" * 9]
+
+        for segment in segments:
+            fields = _submit_pdu_fields(segment.pdu)
+            assert fields["pdu_type"] & 0x40  # UDHI set
+            assert fields["user_data_length"] <= 160
+            udh_octets = fields["user_data"][0] + 1
+            info = PDUDecoder.parse_concatenation_udh(
+                fields["user_data"][:udh_octets]
+            )
+            assert info is not None
+            assert info.is_16bit is True
+            assert info.reference == 0x1234
+            assert info.total_parts == 2
+            assert info.sequence == segment.sequence
+            sca_octets = int(segment.pdu[:2], 16)
+            expected_tpdu_octets = (len(segment.pdu) // 2) - (1 + sca_octets)
+            assert segment.tpdu_length == expected_tpdu_octets
+
+    def test_build_multipart_submit_pdus_never_splits_gsm7_extension_pairs(self):
+        body = ("A" * 151) + "€" + ("B" * 10)
+
+        segments = PDUEncoder.build_multipart_submit_pdus(
+            "5550100", body, reference=0xBEEF
+        )
+
+        assert [segment.body for segment in segments] == ["A" * 151, "€" + ("B" * 10)]
+        assert [segment.payload_septets for segment in segments] == [151, 12]
+
+    def test_build_multipart_submit_pdus_rejects_ucs2_required_text_before_encoding(self):
+        with pytest.raises(ValueError, match="GSM 03.38"):
+            PDUEncoder.build_multipart_submit_pdus(
+                "5550100", "A" * 160 + "漢", reference=0x1234
+            )
+
+    def test_build_multipart_submit_pdus_rejects_messages_over_255_segments(self):
+        body = "A" * ((152 * 255) + 1)
+
+        with pytest.raises(ValueError, match="at most 255 segments"):
+            PDUEncoder.build_multipart_submit_pdus(
+                "5550100", body, reference=0x1234
+            )
 
 
 class TestDeliverPDU:
