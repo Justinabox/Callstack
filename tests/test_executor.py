@@ -3,7 +3,7 @@
 import asyncio
 import pytest
 from callstack.events.bus import EventBus
-from callstack.events.types import RingEvent, DTMFEvent
+from callstack.events.types import CallState, CallStateEvent, RingEvent, DTMFEvent
 from callstack.errors import ATTimeoutError, TransportError
 from callstack.protocol.executor import ATCommandExecutor, ATResponse
 from callstack.protocol.urc import URCDispatcher
@@ -95,6 +95,13 @@ def test_data_lines_only_excludes_trailing_final_result_code():
         "+CME ERROR details from an SMS body",
         "+CMS ERROR details from an SMS body",
     ]
+
+
+def test_data_lines_excludes_dial_terminal_failure_result_code():
+    """Dial failure result codes are terminal metadata, not response data."""
+    response = ATResponse(success=False, lines=["NO CARRIER"])
+
+    assert response.data_lines == []
 
 
 async def test_success_result_code_requires_exact_line(executor, transport):
@@ -206,6 +213,49 @@ async def test_urc_during_command(executor, transport, bus):
 
     await asyncio.sleep(0.01)  # Let the URC handler task run
     assert len(received_urcs) == 1
+
+
+@pytest.mark.parametrize("terminal_result", ["BUSY", "NO CARRIER", "NO ANSWER"])
+async def test_dial_terminal_result_is_failed_response_not_urc(
+    executor, transport, bus, terminal_result
+):
+    """ATD terminal call results complete the dial command instead of dispatching."""
+    received_call_states = []
+
+    @bus.on(CallStateEvent)
+    async def on_call_state(event):
+        received_call_states.append(event.state)
+
+    transport.feed(terminal_result, "OK")
+
+    resp = await executor.execute("ATD+123****7890;", expect=["OK"], timeout=1.0)
+
+    assert resp.success is False
+    assert resp.lines == [terminal_result]
+    await asyncio.sleep(0.01)  # Let any incorrectly-dispatched URC task run
+    assert received_call_states == []
+
+
+async def test_idle_no_carrier_still_dispatches_call_state_urc(transport, bus, urc):
+    """The ATD special case must not disable idle NO CARRIER URC handling."""
+    executor = ATCommandExecutor(transport, urc)
+    received_call_states = []
+
+    @bus.on(CallStateEvent)
+    async def on_call_state(event):
+        received_call_states.append(event.state)
+
+    await executor.start_reader()
+    try:
+        transport.feed("NO CARRIER")
+        for _ in range(10):
+            if received_call_states:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await executor.stop_reader()
+
+    assert received_call_states == [CallState.ENDED]
 
 
 async def test_blank_lines_skipped(executor, transport):

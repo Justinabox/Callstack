@@ -93,6 +93,65 @@ class TestCallService:
 
         assert service.state == CallState.IDLE
 
+    @pytest.mark.parametrize("terminal_result", ["BUSY", "NO CARRIER", "NO ANSWER"])
+    async def test_dial_terminal_result_fails_promptly_with_dial_error(
+        self, service, at_transport, terminal_result
+    ):
+        async def respond():
+            await asyncio.sleep(0.01)
+            at_transport.feed(terminal_result, "OK")
+        asyncio.create_task(respond())
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        with pytest.raises(DialError) as exc_info:
+            await service.dial("+123****7890", timeout=0.5)
+        elapsed = loop.time() - started
+
+        assert terminal_result in str(exc_info.value)
+        assert exc_info.value.lines == [terminal_result]
+        assert elapsed < 0.25
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
+
+    async def test_dial_terminal_failure_cleans_up_inflight_audio_enable(self, bus):
+        class LockedAT:
+            def __init__(self):
+                self.calls: list[str] = []
+                self._lock = asyncio.Lock()
+
+            async def execute(self, command, **kwargs):
+                async with self._lock:
+                    self.calls.append(command)
+                    if command.startswith("ATD"):
+                        await bus.emit(CallStateEvent(state=CallState.ACTIVE))
+                        await asyncio.sleep(0.01)
+                        return ATResponse(success=False, lines=["NO CARRIER"])
+                    return ATResponse(success=True, lines=["OK"])
+
+        class FakeAudio:
+            def __init__(self):
+                self.running = False
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+
+        at = LockedAT()
+        audio = FakeAudio()
+        service = CallService(at, audio, bus)
+
+        with pytest.raises(DialError):
+            await service.dial("+123****7890")
+        await asyncio.sleep(0.05)
+
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
+        assert audio.running is False
+        assert at.calls == ["ATD+123****7890;", "AT+CPCMREG=1", "AT+CPCMREG=0"]
+
     async def test_incoming_ring_transitions_to_ringing(self, service, bus):
         await bus.emit(RingEvent())
         await asyncio.sleep(0.01)
@@ -469,6 +528,38 @@ class TestCallService:
         await asyncio.sleep(0.05)
 
         assert service.state == CallState.IDLE
+
+    async def test_idle_no_carrier_urc_hangs_up_active_call(
+        self, service, executor, bus, at_transport
+    ):
+        """NO CARRIER remains an idle URC that cleans up an active call."""
+        await executor.start_reader()
+        try:
+            await bus.emit(RingEvent())
+            await asyncio.sleep(0.01)
+
+            async def answer_respond():
+                await asyncio.sleep(0.01)
+                at_transport.feed("OK")
+                await asyncio.sleep(0.01)
+                at_transport.feed("OK")  # CPCMREG on
+            asyncio.create_task(answer_respond())
+            session = await service.answer()
+            assert session.is_active
+
+            async def cpcm_off_respond():
+                await asyncio.sleep(0.02)
+                at_transport.feed("OK")
+            asyncio.create_task(cpcm_off_respond())
+
+            at_transport.feed("NO CARRIER")
+            await asyncio.sleep(0.05)
+
+            assert service.state == CallState.IDLE
+            assert service.active_call is None
+            assert session.is_active is False
+        finally:
+            await executor.stop_reader()
 
     async def test_remote_hangup_waits_for_inflight_audio_enable_before_cleanup(self, bus):
         class SlowAT:
