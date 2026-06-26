@@ -37,6 +37,11 @@ class SMSStore:
         self._db_path = db_path
         self._db = None
         self._lock = asyncio.Lock()
+        # Saves made while a SQLite-backed store is not connected are kept in
+        # memory and flushed on the next initialize(). The bool records whether
+        # the ID was auto-assigned by this instance, which lets reopen logic
+        # resolve external SQLite ID collisions without dropping new messages.
+        self._pending_saves: dict[int, tuple[SMS, bool]] = {}
 
     async def initialize(self) -> None:
         """Open SQLite connection if db_path was provided, and load existing messages."""
@@ -53,13 +58,22 @@ class SMSStore:
                 self._db = None
                 return
 
+            pending_saves = list(self._pending_saves.values())
             self._db = await aiosqlite.connect(self._db_path)
             try:
                 await self._db.execute(_CREATE_TABLE)
                 await self._db.commit()
 
-                # Load existing messages from SQLite
+                # Load existing messages from SQLite. Rebuild the in-memory
+                # working set so close()+initialize() on the same store object
+                # does not append persisted rows a second time. Dirty saves made
+                # while SQLite was closed are then flushed deterministically.
                 from datetime import datetime
+
+                loaded_messages: list[SMS] = []
+                loaded_ids: set[int] = set()
+                loaded_index_by_id: dict[int, int] = {}
+                next_id = 1
                 async with self._db.execute(
                     "SELECT id, sender, recipient, body, timestamp, status, reference, storage_index "
                     "FROM messages ORDER BY id"
@@ -76,9 +90,62 @@ class SMSStore:
                             reference=row[6],
                             storage_index=row[7],
                         )
-                        self._messages.append(sms)
-                        if row[0] is not None and row[0] >= self._next_id:
-                            self._next_id = row[0] + 1
+                        loaded_messages.append(sms)
+                        if row[0] is not None:
+                            loaded_ids.add(row[0])
+                            loaded_index_by_id[row[0]] = len(loaded_messages) - 1
+                            if row[0] >= next_id:
+                                next_id = row[0] + 1
+
+                reserved_pending_ids = {
+                    sms.id for sms, _ in pending_saves if sms.id is not None
+                }
+                for sms, auto_assigned_id in pending_saves:
+                    if sms.id is None:
+                        sms.id = next_id
+                        next_id += 1
+
+                    if sms.id in loaded_ids and auto_assigned_id:
+                        reserved_pending_ids.discard(sms.id)
+                        while next_id in loaded_ids or next_id in reserved_pending_ids:
+                            next_id += 1
+                        sms.id = next_id
+                        reserved_pending_ids.add(sms.id)
+                        next_id += 1
+
+                    ts_iso = sms.timestamp.isoformat() if sms.timestamp else None
+                    if sms.id in loaded_ids:
+                        await self._db.execute(
+                            "UPDATE messages SET sender=?, recipient=?, body=?, timestamp=?, "
+                            "status=?, reference=?, storage_index=? WHERE id=?",
+                            (
+                                sms.sender, sms.recipient, sms.body, ts_iso,
+                                sms.status, sms.reference, sms.storage_index, sms.id,
+                            ),
+                        )
+                        loaded_messages[loaded_index_by_id[sms.id]] = sms
+                    else:
+                        await self._db.execute(
+                            "INSERT INTO messages (id, sender, recipient, body, timestamp, status, reference, storage_index) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                sms.id, sms.sender, sms.recipient, sms.body, ts_iso,
+                                sms.status, sms.reference, sms.storage_index,
+                            ),
+                        )
+                        loaded_messages.append(sms)
+                        loaded_ids.add(sms.id)
+                        loaded_index_by_id[sms.id] = len(loaded_messages) - 1
+                    if sms.id >= next_id:
+                        next_id = sms.id + 1
+
+                if pending_saves:
+                    await self._db.commit()
+                    self._pending_saves.clear()
+
+                loaded_messages.sort(key=lambda sms: sms.id or 0)
+                self._messages = loaded_messages
+                self._next_id = next_id
 
                 logger.info(
                     "SMS store initialized with SQLite: %s (%d messages loaded)",
@@ -98,6 +165,7 @@ class SMSStore:
     async def save(self, sms: SMS) -> SMS:
         """Save an SMS message. Assigns an ID if not set. Updates if ID already exists."""
         async with self._lock:
+            auto_assigned_id = sms.id is None
             if sms.id is None:
                 sms.id = self._next_id
                 self._next_id += 1
@@ -131,6 +199,10 @@ class SMSStore:
                         ),
                     )
                 await self._db.commit()
+            elif self._db_path is not None:
+                previous = self._pending_saves.get(sms.id)
+                pending_auto_assigned = auto_assigned_id or (previous[1] if previous else False)
+                self._pending_saves[sms.id] = (sms, pending_auto_assigned)
 
             # Now update in-memory state
             if existing_index is not None:
@@ -172,6 +244,7 @@ class SMSStore:
             for i, msg in enumerate(self._messages):
                 if msg.id == id:
                     self._messages.pop(i)
+                    self._pending_saves.pop(id, None)
                     if self._db is not None:
                         await self._db.execute("DELETE FROM messages WHERE id = ?", (id,))
                         await self._db.commit()
@@ -187,6 +260,7 @@ class SMSStore:
         """Delete all messages."""
         async with self._lock:
             self._messages.clear()
+            self._pending_saves.clear()
             if self._db is not None:
                 await self._db.execute("DELETE FROM messages")
                 await self._db.commit()

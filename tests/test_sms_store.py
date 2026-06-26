@@ -113,6 +113,214 @@ async def test_sqlite_initialize_is_idempotent(tmp_path):
         await store.close()
 
 
+async def test_sqlite_close_then_initialize_reloads_without_duplicate_rows(tmp_path):
+    pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await store.initialize()
+        saved = await store.save(SMS(body="hello", status="unread"))
+        assert saved.id == 1
+        await store.close()
+
+        await store.initialize()
+
+        assert await store.count() == 1
+        messages = await store.list()
+        assert [(m.id, m.body, m.status) for m in messages] == [(saved.id, "hello", "unread")]
+        next_saved = await store.save(SMS(body="after reopen"))
+        assert next_saved.id == 2
+    finally:
+        await store.close()
+
+
+async def test_sqlite_initialize_preserves_save_before_first_initialize(tmp_path):
+    pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        pending = await store.save(SMS(body="queued before init"))
+
+        await store.initialize()
+
+        assert await store.count() == 1
+        messages = await store.list()
+        assert [(m.id, m.body) for m in messages] == [(pending.id, "queued before init")]
+        assert (await store.save(SMS(body="after init"))).id == 2
+        await store.close()
+        await store.initialize()
+        assert [(m.id, m.body) for m in await store.list()] == [
+            (pending.id, "queued before init"),
+            (2, "after init"),
+        ]
+    finally:
+        await store.close()
+
+
+async def test_sqlite_initialize_preserves_save_after_close(tmp_path):
+    pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await store.initialize()
+        persisted = await store.save(SMS(body="persisted"))
+        await store.close()
+        pending = await store.save(SMS(body="queued while closed"))
+
+        await store.initialize()
+
+        assert await store.count() == 2
+        messages = await store.list()
+        assert [(m.id, m.body) for m in messages] == [
+            (persisted.id, "persisted"),
+            (pending.id, "queued while closed"),
+        ]
+        assert (await store.save(SMS(body="after reopen"))).id == 3
+        await store.close()
+        await store.initialize()
+        assert [(m.id, m.body) for m in await store.list()] == [
+            (persisted.id, "persisted"),
+            (pending.id, "queued while closed"),
+            (3, "after reopen"),
+        ]
+    finally:
+        await store.close()
+
+
+async def test_sqlite_initialize_persists_update_saved_after_close(tmp_path):
+    pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await store.initialize()
+        persisted = await store.save(SMS(body="old", status="unread"))
+        await store.close()
+        await store.save(SMS(id=persisted.id, body="updated", status="read"))
+
+        await store.initialize()
+
+        assert [(m.id, m.body, m.status) for m in await store.list()] == [
+            (persisted.id, "updated", "read")
+        ]
+        await store.close()
+        await store.initialize()
+        assert [(m.id, m.body, m.status) for m in await store.list()] == [
+            (persisted.id, "updated", "read")
+        ]
+    finally:
+        await store.close()
+
+
+async def test_sqlite_initialize_reassigns_pending_insert_id_collision(tmp_path):
+    pytest.importorskip("aiosqlite")
+    db_path = str(tmp_path / "sms.db")
+    existing = SMSStore(db_path=db_path)
+    try:
+        await existing.initialize()
+        persisted = await existing.save(SMS(body="persisted elsewhere"))
+    finally:
+        await existing.close()
+
+    store = SMSStore(db_path=db_path)
+    try:
+        pending = await store.save(SMS(body="queued before init"))
+        assert pending.id == persisted.id
+
+        await store.initialize()
+
+        assert pending.id == 2
+        assert [(m.id, m.body) for m in await store.list()] == [
+            (persisted.id, "persisted elsewhere"),
+            (pending.id, "queued before init"),
+        ]
+        await store.close()
+        await store.initialize()
+        assert [(m.id, m.body) for m in await store.list()] == [
+            (persisted.id, "persisted elsewhere"),
+            (pending.id, "queued before init"),
+        ]
+    finally:
+        await store.close()
+
+
+async def test_sqlite_initialize_preserves_auto_insert_after_pending_update_collision(tmp_path):
+    pytest.importorskip("aiosqlite")
+    db_path = str(tmp_path / "sms.db")
+    existing = SMSStore(db_path=db_path)
+    try:
+        await existing.initialize()
+        persisted = await existing.save(SMS(body="persisted elsewhere"))
+    finally:
+        await existing.close()
+
+    store = SMSStore(db_path=db_path)
+    try:
+        pending = await store.save(SMS(body="queued before init"))
+        updated = await store.save(SMS(id=pending.id, body="queued updated before init"))
+
+        await store.initialize()
+
+        assert updated.id == 2
+        assert [(m.id, m.body) for m in await store.list()] == [
+            (persisted.id, "persisted elsewhere"),
+            (updated.id, "queued updated before init"),
+        ]
+    finally:
+        await store.close()
+
+
+async def test_sqlite_initialize_reassigns_auto_collision_around_pending_explicit_id(tmp_path):
+    pytest.importorskip("aiosqlite")
+    db_path = str(tmp_path / "sms.db")
+    existing = SMSStore(db_path=db_path)
+    try:
+        await existing.initialize()
+        persisted = await existing.save(SMS(body="persisted id 1"))
+    finally:
+        await existing.close()
+
+    store = SMSStore(db_path=db_path)
+    try:
+        auto_pending = await store.save(SMS(body="auto pending"))
+        explicit_pending = await store.save(SMS(id=2, body="explicit pending"))
+
+        await store.initialize()
+
+        assert auto_pending.id == 3
+        assert [(m.id, m.body) for m in await store.list()] == [
+            (persisted.id, "persisted id 1"),
+            (explicit_pending.id, "explicit pending"),
+            (auto_pending.id, "auto pending"),
+        ]
+    finally:
+        await store.close()
+
+
+async def test_sqlite_delete_removes_pending_save_before_initialize(tmp_path):
+    pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        pending = await store.save(SMS(body="delete before init"))
+        assert pending.id is not None
+        assert await store.delete(pending.id)
+
+        await store.initialize()
+
+        assert await store.count() == 0
+    finally:
+        await store.close()
+
+
+async def test_sqlite_clear_removes_pending_saves_before_initialize(tmp_path):
+    pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await store.save(SMS(body="clear before init"))
+        await store.clear()
+
+        await store.initialize()
+
+        assert await store.count() == 0
+    finally:
+        await store.close()
+
+
 async def test_sqlite_initialize_serializes_concurrent_calls(tmp_path, monkeypatch):
     aiosqlite = pytest.importorskip("aiosqlite")
     original_connect = aiosqlite.connect
