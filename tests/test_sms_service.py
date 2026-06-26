@@ -67,6 +67,7 @@ async def test_initialize(sms_service, transport):
 
 
 async def test_initialize_uses_configured_command_timeout(executor, bus, store):
+    """SMS startup commands use the configured base command timeout."""
     calls = []
 
     async def record_execute(command, expect=("OK",), timeout=5.0):
@@ -86,6 +87,7 @@ async def test_initialize_uses_configured_command_timeout(executor, bus, store):
 
 
 async def test_stored_message_management_uses_configured_command_timeout(executor, bus, store):
+    """Basic stored-message reads/deletes use the configured command timeout."""
     calls = []
 
     async def record_execute(command, expect=("OK",), timeout=5.0):
@@ -108,7 +110,10 @@ async def test_stored_message_management_uses_configured_command_timeout(executo
     ]
 
 
-async def test_delivery_report_read_and_delete_use_configured_command_timeout(executor, bus, store):
+async def test_delivery_report_read_and_delete_use_configured_command_timeout(
+    executor, bus, store
+):
+    """Delivery report follow-up reads/deletes use the configured timeout."""
     calls = []
 
     async def record_execute(command, expect=("OK",), timeout=5.0):
@@ -126,7 +131,10 @@ async def test_delivery_report_read_and_delete_use_configured_command_timeout(ex
 
     await service._on_delivery_report(_RawDeliveryReport(storage="SM", index=4))
 
-    assert calls == [("AT+CMGR=4", 1.75), ("AT+CMGD=4", 1.75)]
+    assert calls == [
+        ("AT+CMGR=4", 1.75),
+        ("AT+CMGD=4", 1.75),
+    ]
 
 
 # -- Sending --
