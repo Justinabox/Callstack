@@ -8,12 +8,23 @@ import json
 import os
 import sys
 from dataclasses import asdict, fields
-from typing import Any
+from typing import Any, NoReturn
 
 from callstack.config import ModemConfig
 from callstack.hardware.discovery import ModemDiscoveryReport
 from callstack.hardware.probe import probe_modem_ports
 from callstack.modem import Modem
+from callstack.sms.store import SMSStore
+from callstack.sms.types import SMS
+
+
+class CLIUsageError(Exception):
+    """Private argparse usage error that avoids echoing raw arguments."""
+
+
+class RedactingArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        raise CLIUsageError("invalid command usage")
 
 
 def _add_config_args(
@@ -55,15 +66,25 @@ def _add_config_args(
     )
 
 
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a positive integer") from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
 def _build_parser() -> argparse.ArgumentParser:
     defaults = ModemConfig()
-    parser = argparse.ArgumentParser(prog="callstack")
+    parser = RedactingArgumentParser(prog="callstack")
     _add_config_args(parser, defaults)
 
-    subcommand_config = argparse.ArgumentParser(add_help=False)
+    subcommand_config = RedactingArgumentParser(add_help=False)
     _add_config_args(subcommand_config, defaults, default=argparse.SUPPRESS)
 
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command", required=True, parser_class=RedactingArgumentParser)
 
     status_parser = subparsers.add_parser(
         "status",
@@ -94,6 +115,21 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     doctor_parser.add_argument("--json", action="store_true", dest="as_json", help="Emit machine-readable JSON")
+
+    inbox_parser = subparsers.add_parser(
+        "inbox",
+        parents=[subcommand_config],
+        help="Read bounded persisted SMS history without polling modem hardware",
+    )
+    inbox_parser.add_argument("--limit", type=_positive_int, default=20, help="Maximum messages to print")
+    inbox_parser.add_argument(
+        "--status",
+        choices=("unread", "read", "all"),
+        default="all",
+        help="Filter by stored message status",
+    )
+    inbox_parser.add_argument("--sender", default=None, help="Filter by exact sender")
+    inbox_parser.add_argument("--json", action="store_true", dest="as_json", help="Emit machine-readable JSON")
 
     return parser
 
@@ -157,6 +193,42 @@ def _doctor_payload(report: ModemDiscoveryReport) -> dict[str, Any]:
         "confidence": report.confidence,
         "notes": list(report.notes),
     }
+
+
+def _sms_payload(message: SMS) -> dict[str, Any]:
+    return {
+        "id": message.id,
+        "sender": message.sender,
+        "body": message.body,
+        "timestamp": message.timestamp.isoformat() if message.timestamp else None,
+        "status": message.status,
+        "storage_index": message.storage_index,
+    }
+
+
+def _single_line(value: str, *, max_chars: int = 80) -> str:
+    preview = " ".join(value.splitlines())
+    preview = "".join(
+        char if ord(char) >= 32 and ord(char) != 127 and not 0x80 <= ord(char) <= 0x9F else "?"
+        for char in preview
+    )
+    if len(preview) > max_chars:
+        return f"{preview[: max_chars - 1]}…"
+    return preview
+
+
+def _print_human_inbox(messages: list[SMS]) -> None:
+    if not messages:
+        print("No stored SMS messages found.")
+        return
+
+    print("Timestamp | Sender | Status | Body")
+    for message in messages:
+        timestamp = message.timestamp.isoformat() if message.timestamp else "unknown"
+        print(
+            f"{_single_line(timestamp)} | {_single_line(_unknown(message.sender))} | "
+            f"{_single_line(_unknown(message.status))} | {_single_line(message.body)}"
+        )
 
 
 def _unknown(value: str | None) -> str:
@@ -225,6 +297,25 @@ async def _doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _inbox(args: argparse.Namespace) -> int:
+    store = SMSStore(db_path=args.sms_db_path)
+    try:
+        await store.initialize(readonly=bool(args.sms_db_path))
+        if args.sms_db_path and getattr(store, "_db", None) is None:
+            raise RuntimeError("SMS SQLite persistence is unavailable")
+        status = None if args.status == "all" else args.status
+        messages = await store.list(sender=args.sender, status=status, limit=args.limit)
+    finally:
+        await store.close()
+
+    messages = list(reversed(messages))
+    if args.as_json:
+        print(json.dumps([_sms_payload(message) for message in messages]))
+    else:
+        _print_human_inbox(messages)
+    return 0
+
+
 async def _run(args: argparse.Namespace) -> int:
     if args.command == "status":
         return await _status(args)
@@ -232,6 +323,8 @@ async def _run(args: argparse.Namespace) -> int:
         return await _send(args)
     if args.command == "doctor":
         return await _doctor(args)
+    if args.command == "inbox":
+        return await _inbox(args)
     raise RuntimeError(f"unsupported command: {args.command}")
 
 
@@ -247,6 +340,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     try:
         args = parser.parse_args(argv)
+    except CLIUsageError as exc:
+        _print_error(exc)
+        return 2
     except SystemExit as exc:
         return int(exc.code or 0)
 

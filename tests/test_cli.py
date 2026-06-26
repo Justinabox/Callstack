@@ -1,13 +1,16 @@
 """Tests for the installable Callstack CLI."""
 
+import asyncio
 import json
 from dataclasses import asdict
+from datetime import datetime, timezone
 
 from callstack.config import ModemConfig
 from callstack.errors import SMSSendError
 from callstack.hardware.discovery import ModemDiscoveryReport, ModemIdentity
 from callstack.hardware.profiles import classify_capabilities
 from callstack.network import RegistrationInfo, SignalInfo
+from callstack.sms.store import SMSStore
 from callstack.sms.types import SMS
 
 
@@ -210,6 +213,7 @@ def test_help_includes_status_and_send_commands(capsys):
     assert "status" in output
     assert "send" in output
     assert "doctor" in output
+    assert "inbox" in output
     assert "--at-port" in output
 
 
@@ -350,3 +354,186 @@ def test_send_defaults_to_warning_logging_to_avoid_private_info_logs(monkeypatch
     assert code == 0
     assert FakeModem.instances[0].config.log_level == "WARNING"
     capsys.readouterr()
+
+
+def _seed_sms_db(db_path, messages):
+    async def seed():
+        store = SMSStore(db_path=str(db_path))
+        try:
+            await store.initialize()
+            for message in messages:
+                await store.save(message)
+        finally:
+            await store.close()
+
+    asyncio.run(seed())
+
+
+def test_inbox_json_reads_bounded_persisted_messages_newest_first_without_modem(tmp_path, monkeypatch, capsys):
+    import callstack.cli as cli
+
+    class ExplodingModem:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("inbox must not instantiate a modem")
+
+    db_path = tmp_path / "sms.sqlite"
+    _seed_sms_db(
+        db_path,
+        [
+            SMS(sender="+155****0001", body="old", status="unread", timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc), storage_index=1),
+            SMS(sender="+155****0002", body="middle", status="read", timestamp=datetime(2026, 1, 2, tzinfo=timezone.utc), storage_index=2),
+            SMS(sender="+155****0003", body="new", status="unread", timestamp=datetime(2026, 1, 3, tzinfo=timezone.utc), storage_index=3),
+        ],
+    )
+    monkeypatch.setattr(cli, "Modem", ExplodingModem)
+
+    code = cli.main(["inbox", "--sms-db-path", str(db_path), "--json", "--limit", "2"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [message["body"] for message in payload] == ["new", "middle"]
+    assert payload[0] == {
+        "id": 3,
+        "sender": "+155****0003",
+        "body": "new",
+        "timestamp": "2026-01-03T00:00:00+00:00",
+        "status": "unread",
+        "storage_index": 3,
+    }
+
+
+def test_inbox_filters_sender_and_status_before_json_limit(tmp_path, capsys):
+    import callstack.cli as cli
+
+    db_path = tmp_path / "sms.sqlite"
+    _seed_sms_db(
+        db_path,
+        [
+            SMS(sender="+155****0001", body="skip sender", status="unread"),
+            SMS(sender="+155****0002", body="skip status", status="read"),
+            SMS(sender="+155****0002", body="match one", status="unread"),
+            SMS(sender="+155****0002", body="match two", status="unread"),
+        ],
+    )
+
+    code = cli.main(
+        [
+            "inbox",
+            "--sms-db-path",
+            str(db_path),
+            "--json",
+            "--sender",
+            "+155****0002",
+            "--status",
+            "unread",
+            "--limit",
+            "1",
+        ]
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [message["body"] for message in payload] == ["match two"]
+
+
+def test_inbox_human_output_is_bounded_and_single_line(tmp_path, capsys):
+    import callstack.cli as cli
+
+    db_path = tmp_path / "sms.sqlite"
+    _seed_sms_db(
+        db_path,
+        [
+            SMS(sender="+155****0001", body="old message", status="read"),
+            SMS(sender="+155****0002", body="line one\nline two", status="unread"),
+        ],
+    )
+
+    code = cli.main(["inbox", "--sms-db-path", str(db_path), "--limit", "1"])
+
+    assert code == 0
+    output = capsys.readouterr().out
+    assert "line one line two" in output
+    assert "old message" not in output
+
+
+def test_inbox_human_output_escapes_terminal_control_characters(tmp_path, capsys):
+    import callstack.cli as cli
+
+    db_path = tmp_path / "sms.sqlite"
+    _seed_sms_db(
+        db_path,
+        [SMS(sender="+155****0002\x1b]52", body="line\x1b[2Jbody", status="unread\x1b")],
+    )
+
+    code = cli.main(["inbox", "--sms-db-path", str(db_path), "--limit", "1"])
+
+    assert code == 0
+    output = capsys.readouterr().out
+    assert "\x1b" not in output
+    assert "]52" in output
+    assert "line?[2Jbody" in output
+
+
+def test_inbox_parse_errors_do_not_echo_private_argument_values(capsys):
+    import callstack.cli as cli
+
+    code = cli.main(["inbox", "--limit", "secret passcode", "--status", "unread"])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "Error:" in captured.err
+    assert "secret passcode" not in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_inbox_missing_sqlite_support_fails_closed_without_false_empty_result(monkeypatch, capsys):
+    import callstack.cli as cli
+
+    class UnavailableSQLiteStore:
+        def __init__(self, db_path=None):
+            self._db = None
+
+        async def initialize(self, **kwargs):
+            return None
+
+        async def list(self, **kwargs):
+            return []
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(cli, "SMSStore", UnavailableSQLiteStore)
+
+    code = cli.main(["inbox", "--sms-db-path", "/tmp/sms.sqlite", "--json"])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "Error:" in captured.err
+    assert "[]" not in captured.out
+    assert "Traceback" not in captured.err
+
+
+def test_inbox_failure_returns_nonzero_without_traceback_or_private_fields(monkeypatch, capsys):
+    import callstack.cli as cli
+
+    class FailingStore:
+        def __init__(self, db_path=None):
+            pass
+
+        async def initialize(self, **kwargs):
+            raise RuntimeError("failed reading +155****0001 secret body")
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(cli, "SMSStore", FailingStore)
+
+    code = cli.main(["inbox", "--sms-db-path", "/tmp/sms.sqlite", "--json"])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "Error:" in captured.err
+    assert "RuntimeError" in captured.err
+    assert "Traceback" not in captured.err
+    assert "+155****0001" not in captured.err
+    assert "secret body" not in captured.err
