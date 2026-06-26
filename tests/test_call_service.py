@@ -69,6 +69,46 @@ class TestCallService:
         assert service.state == CallState.IDLE
         assert service.active_call is None
 
+    async def test_control_commands_use_configured_command_timeout(self, bus):
+        class RecordingExecutor:
+            def __init__(self):
+                self.calls = []
+
+            async def execute(self, command, expect=("OK",), timeout=5.0):
+                self.calls.append((command, timeout))
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeAudio:
+            running = False
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+
+        executor = RecordingExecutor()
+        audio = FakeAudio()
+        service = CallService(executor, audio, bus, command_timeout=1.75)
+
+        await service.hangup()
+        await service.reject()
+        await service._fsm.transition(CallState.RINGING)
+        await service._fsm.transition(CallState.ACTIVE)
+        await service._ensure_audio_enabled()
+        await service._disable_audio()
+        session = CallSession(number="unknown", direction="inbound", service=service)
+        service._active_call = session
+        await session.send_dtmf("5")
+
+        assert executor.calls == [
+            ("ATH", 1.75),
+            ("ATH", 1.75),
+            ("AT+CPCMREG=1", 1.75),
+            ("AT+CPCMREG=0", 1.75),
+            ("AT+VTS=5", 1.75),
+        ]
+
     async def test_dial_success(self, service, at_transport):
         # Queue the modem response
         async def respond():

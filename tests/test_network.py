@@ -75,6 +75,34 @@ class TestSignalQuality:
 
 
 class TestRegistration:
+    async def test_uses_configured_command_timeout(self):
+        class Capture:
+            lines = ["+CREG: 0,1"]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        class RecordingExecutor:
+            def __init__(self):
+                self.calls = []
+
+            def capture_urcs(self, *prefixes):
+                return Capture()
+
+            async def execute(self, command, expect=("OK",), timeout=5.0):
+                self.calls.append((command, timeout))
+
+        executor = RecordingExecutor()
+        svc = NetworkService(executor, EventBus(), command_timeout=2.5)
+
+        info = await svc.registration()
+
+        assert info.registered is True
+        assert executor.calls == [("AT+CREG?", 2.5)]
+
     async def test_registered_home(self):
         svc, transport, _ = _make_service()
         await transport.open()

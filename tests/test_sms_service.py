@@ -5,9 +5,14 @@ from datetime import timedelta
 
 import pytest
 from callstack.events.bus import EventBus
-from callstack.events.types import IncomingSMSEvent, SMSSentEvent, _RawSMSNotification
+from callstack.events.types import (
+    IncomingSMSEvent,
+    SMSSentEvent,
+    _RawDeliveryReport,
+    _RawSMSNotification,
+)
 from callstack.errors import SMSSendError
-from callstack.protocol.executor import ATCommandExecutor
+from callstack.protocol.executor import ATCommandExecutor, ATResponse
 from callstack.protocol.urc import URCDispatcher
 from callstack.transport.mock import MockTransport
 from callstack.sms.service import SMSService
@@ -59,6 +64,77 @@ async def test_initialize(sms_service, transport):
     assert any("CMGF=1" in w for w in written)
     assert any("CSCS" in w for w in written)
     assert 'AT+CNMI=2,1,0,1,0\r\n' in written
+
+
+async def test_initialize_uses_configured_command_timeout(executor, bus, store):
+    """SMS startup commands use the configured base command timeout."""
+    calls = []
+
+    async def record_execute(command, expect=("OK",), timeout=5.0):
+        calls.append((command, timeout))
+
+    executor.execute = record_execute
+    service = SMSService(executor, bus, store, command_timeout=1.75)
+
+    await service.initialize()
+
+    assert calls == [
+        ("AT+CMGF=1", 1.75),
+        ('AT+CSCS="GSM"', 1.75),
+        ("AT+CNMI=2,1,0,1,0", 1.75),
+        ("AT+CSMP=49,167,0,0", 1.75),
+    ]
+
+
+async def test_stored_message_management_uses_configured_command_timeout(executor, bus, store):
+    """Basic stored-message reads/deletes use the configured command timeout."""
+    calls = []
+
+    async def record_execute(command, expect=("OK",), timeout=5.0):
+        calls.append((command, timeout))
+        return ATResponse(success=True, lines=["OK"])
+
+    executor.execute = record_execute
+    service = SMSService(executor, bus, store, command_timeout=1.75)
+
+    await service.list_messages()
+    await service.read_message(3)
+    await service.delete_message(3)
+    await service.delete_all()
+
+    assert calls == [
+        ('AT+CMGL="ALL"', 1.75),
+        ("AT+CMGR=3", 1.75),
+        ("AT+CMGD=3", 1.75),
+        ("AT+CMGD=1,4", 1.75),
+    ]
+
+
+async def test_delivery_report_read_and_delete_use_configured_command_timeout(
+    executor, bus, store
+):
+    """Delivery report follow-up reads/deletes use the configured timeout."""
+    calls = []
+
+    async def record_execute(command, expect=("OK",), timeout=5.0):
+        calls.append((command, timeout))
+        return ATResponse(
+            success=True,
+            lines=[
+                '+CMGR: "REC READ",6,"5551234",129,"24/06/25,12:00:00+00","24/06/25,12:00:05+00",0',
+                "OK",
+            ],
+        )
+
+    executor.execute = record_execute
+    service = SMSService(executor, bus, store, command_timeout=1.75)
+
+    await service._on_delivery_report(_RawDeliveryReport(storage="SM", index=4))
+
+    assert calls == [
+        ("AT+CMGR=4", 1.75),
+        ("AT+CMGD=4", 1.75),
+    ]
 
 
 # -- Sending --

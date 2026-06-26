@@ -45,6 +45,27 @@ class TestUSSDCommand:
 
 
 class TestUSSDServiceValidation:
+    async def test_send_and_cancel_use_configured_command_timeout(self, bus):
+        class RecordingExecutor:
+            def __init__(self):
+                self.calls = []
+
+            async def execute(self, command, expect=("OK",), timeout=5.0):
+                self.calls.append((command, timeout))
+                await bus.emit(USSDResponseEvent(status=0, message="balance", encoding=15))
+                return type("Response", (), {"success": True, "lines": ["OK"]})()
+
+        executor = RecordingExecutor()
+        service = USSDService(cast(ATCommandExecutor, executor), bus, command_timeout=1.75)
+
+        await service.send("*100#", timeout=0.1)
+        await service.cancel()
+
+        assert executor.calls == [
+            ('AT+CUSD=1,"*100#",15', 1.75),
+            ("AT+CUSD=2", 1.75),
+        ]
+
     async def test_invalid_ussd_code_fails_before_modem_write(self, bus):
         class FailingExecutor:
             async def execute(self, *_args, **_kwargs):

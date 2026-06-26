@@ -58,16 +58,22 @@ class RegistrationInfo:
 class NetworkService:
     """Queries modem for network-related information."""
 
-    def __init__(self, executor: ATCommandExecutor, bus: EventBus):
+    def __init__(
+        self,
+        executor: ATCommandExecutor,
+        bus: EventBus,
+        command_timeout: float = 5.0,
+    ):
         self._at = executor
         self._bus = bus
+        self._command_timeout = command_timeout
 
     async def signal_quality(self) -> SignalInfo:
         """Query current signal quality (AT+CSQ).
 
         +CSQ is not a URC prefix, so the response comes back in resp.lines.
         """
-        resp = await self._at.execute(ATCommand.SIGNAL_QUALITY, timeout=5.0)
+        resp = await self._at.execute(ATCommand.SIGNAL_QUALITY, timeout=self._command_timeout)
         for line in resp.lines:
             parsed = ATResponseParser.parse_signal_quality(line)
             if parsed:
@@ -97,7 +103,7 @@ class NetworkService:
         the executor's capture_urcs context manager.
         """
         with self._at.capture_urcs("+CREG:", "+CGREG:", "+CEREG:") as cap:
-            await self._at.execute(ATCommand.REGISTRATION, timeout=5.0)
+            await self._at.execute(ATCommand.REGISTRATION, timeout=self._command_timeout)
 
         for line in cap.lines:
             parsed = ATResponseParser.parse_registration(line)
@@ -108,7 +114,7 @@ class NetworkService:
 
     async def operator(self) -> Optional[str]:
         """Query current network operator name (AT+COPS?)."""
-        resp = await self._at.execute(ATCommand.OPERATOR, timeout=5.0)
+        resp = await self._at.execute(ATCommand.OPERATOR, timeout=self._command_timeout)
         for line in resp.lines:
             m = _COPS_RE.match(line)
             if m:
