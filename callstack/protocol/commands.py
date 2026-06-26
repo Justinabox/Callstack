@@ -134,10 +134,28 @@ class ATCommand:
     _VALID_DTMF = frozenset("0123456789*#ABCD")
 
     @staticmethod
-    def send_dtmf(digit: str) -> str:
+    def _dtmf_duration_units(duration_ms: int | None) -> int | None:
+        if duration_ms is None:
+            return None
+        if type(duration_ms) is not int:
+            raise ValueError("DTMF duration must be an integer number of milliseconds")
+        if duration_ms == 0:
+            return None
+        if not (100 <= duration_ms <= 25500) or duration_ms % 100 != 0:
+            raise ValueError(
+                "DTMF duration must be 0 for modem default or 100-25500 ms "
+                "in 100 ms increments"
+            )
+        return duration_ms // 100
+
+    @staticmethod
+    def send_dtmf(digit: str, duration_ms: int | None = None) -> str:
         if len(digit) != 1 or digit not in ATCommand._VALID_DTMF:
             raise ValueError(f"Invalid DTMF digit: {digit!r} (must be single char: 0-9, *, #, A-D)")
-        return f"AT+VTS={digit}"
+        duration_units = ATCommand._dtmf_duration_units(duration_ms)
+        if duration_units is None:
+            return f"AT+VTS={digit}"
+        return f"AT+VTS={digit},{duration_units}"
 
     # USSD
     @staticmethod

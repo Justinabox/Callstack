@@ -414,25 +414,39 @@ class CallSession:
             await self.play(audio_path)
             return await collector.collect()
 
-    async def send_dtmf(self, digits: str, duration_ms: int = 100) -> None:
+    async def send_dtmf(
+        self,
+        digits: str,
+        duration_ms: int = 100,
+        inter_digit_delay_ms: int = 0,
+    ) -> None:
         """Send DTMF tones during an active call.
 
         Args:
             digits: One or more DTMF digits (0-9, *, #, A-D).
-            duration_ms: Tone duration in milliseconds (modem default used if 0).
+            duration_ms: Tone duration in milliseconds. Encoded in the
+                AT+VTS duration field as tenths of a second; use 0 to request
+                the modem default. Non-zero values must be 100-25500 ms in
+                100 ms increments.
+            inter_digit_delay_ms: Optional local delay between DTMF commands;
+                this is separate from modem-side tone duration.
         """
+        if type(inter_digit_delay_ms) is not int or inter_digit_delay_ms < 0:
+            raise ValueError(
+                "DTMF inter-digit delay must be a non-negative integer number of milliseconds"
+            )
         if not self.is_active:
             raise RuntimeError("Cannot send DTMF without an active call")
-        for digit in digits:
+        for index, digit in enumerate(digits):
             if not self.is_active:
                 raise RuntimeError("Cannot send DTMF without an active call")
             await self.service._at.execute(
-                ATCommand.send_dtmf(digit),
+                ATCommand.send_dtmf(digit, duration_ms=duration_ms),
                 expect=["OK"],
                 timeout=getattr(self.service, "_command_timeout", 5.0),
             )
-            if len(digits) > 1:
-                await asyncio.sleep(duration_ms / 1000.0)
+            if index < len(digits) - 1 and inter_digit_delay_ms:
+                await asyncio.sleep(inter_digit_delay_ms / 1000.0)
 
     async def wait_for_end(self, timeout: float | None = None) -> bool:
         """Wait until the call ends. Returns True if ended, False on timeout."""

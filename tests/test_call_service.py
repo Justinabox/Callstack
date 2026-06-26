@@ -106,7 +106,7 @@ class TestCallService:
             ("ATH", 1.75),
             ("AT+CPCMREG=1", 1.75),
             ("AT+CPCMREG=0", 1.75),
-            ("AT+VTS=5", 1.75),
+            ("AT+VTS=5,1", 1.75),
         ]
 
     async def test_dial_success(self, service, at_transport):
@@ -891,9 +891,68 @@ class TestCallSession:
         service.active_call = session
 
         with pytest.raises(RuntimeError, match="active call"):
-            await session.send_dtmf("56", duration_ms=0)
+            await session.send_dtmf("56", duration_ms=300, inter_digit_delay_ms=0)
 
-        assert [command for command, _kwargs in service._at.commands] == ["AT+VTS=5"]
+        assert [command for command, _kwargs in service._at.commands] == ["AT+VTS=5,3"]
+
+    async def test_send_dtmf_uses_separate_inter_digit_delay(self, monkeypatch):
+        class FakeAT:
+            def __init__(self):
+                self.commands = []
+
+            async def execute(self, command, **kwargs):
+                self.commands.append((command, kwargs))
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeService:
+            def __init__(self):
+                self.state = CallState.ACTIVE
+                self.active_call = None
+                self._at = FakeAT()
+                self._command_timeout = 2.0
+
+        sleeps = []
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+        service = FakeService()
+        session = CallSession(number="+1234", direction="outbound", service=service)
+        service.active_call = session
+
+        await session.send_dtmf("56", duration_ms=300, inter_digit_delay_ms=50)
+
+        assert [command for command, _kwargs in service._at.commands] == [
+            "AT+VTS=5,3",
+            "AT+VTS=6,3",
+        ]
+        assert sleeps == [0.05]
+
+    async def test_send_dtmf_rejects_invalid_duration_before_modem_write(self):
+        class FakeAT:
+            def __init__(self):
+                self.commands = []
+
+            async def execute(self, command, **kwargs):
+                self.commands.append((command, kwargs))
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeService:
+            def __init__(self):
+                self.state = CallState.ACTIVE
+                self.active_call = None
+                self._at = FakeAT()
+
+        service = FakeService()
+        session = CallSession(number="+1234", direction="outbound", service=service)
+        service.active_call = session
+
+        with pytest.raises(ValueError, match="DTMF duration"):
+            await session.send_dtmf("5", duration_ms=250)
+
+        assert service._at.commands == []
 
     async def test_wait_for_end(self, service):
         session = CallSession(number="+1234", direction="outbound", service=service)
