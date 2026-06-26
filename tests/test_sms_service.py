@@ -137,8 +137,37 @@ async def test_delivery_report_read_and_delete_use_configured_command_timeout(
     ]
 
 
-# -- Sending --
+async def test_send_uses_configured_prompt_and_submit_timeouts(executor, bus, store):
+    """Outbound SMS prompt and submit phases use explicit send timeout knobs."""
+    calls = []
 
+    async def record_execute(command, expect=("OK",), timeout=5.0):
+        calls.append(("execute", command, tuple(expect), timeout))
+        return ATResponse(success=True, lines=["> "])
+
+    async def record_send_data(data, expect=("OK",), timeout=30.0):
+        calls.append(("send_data", data, tuple(expect), timeout))
+        return ATResponse(success=True, lines=["+CMGS: 17", "OK"])
+
+    executor.execute = record_execute
+    executor.send_data = record_send_data
+    service = SMSService(
+        executor,
+        bus,
+        store,
+        sms_prompt_timeout=1.25,
+        sms_submit_timeout=8.5,
+    )
+
+    await service.send("5551234", "Hello")
+
+    assert calls == [
+        ("execute", 'AT+CMGS="5551234"', (">",), 1.25),
+        ("send_data", b"Hello\x1a", ("+CMGS:", "OK"), 8.5),
+    ]
+
+
+# -- Sending --
 async def test_send_success(sms_service, transport, bus):
     """Successful SMS send."""
     sent_events = []

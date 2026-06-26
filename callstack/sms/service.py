@@ -89,11 +89,15 @@ class SMSService:
         bus: EventBus,
         store: Optional[SMSStore] = None,
         command_timeout: float = 5.0,
+        sms_prompt_timeout: float = 10.0,
+        sms_submit_timeout: float = 30.0,
     ):
         self._at = executor
         self._bus = bus
         self._store = store or SMSStore()
         self._command_timeout = command_timeout
+        self._sms_prompt_timeout = sms_prompt_timeout
+        self._sms_submit_timeout = sms_submit_timeout
         self._initialized = False
         self._pending_cmt_header: Optional[str] = None
 
@@ -141,7 +145,7 @@ class SMSService:
 
         # Initiate SMS send - wait for ">" prompt
         resp = await self._at.execute(
-            ATCommand.send_sms(to), expect=[">"], timeout=10
+            ATCommand.send_sms(to), expect=[">"], timeout=self._sms_prompt_timeout
         )
         if not resp.success:
             raise SMSSendError(f"Failed to initiate SMS to {to}: {resp.lines}")
@@ -150,7 +154,7 @@ class SMSService:
         resp = await self._at.send_data(
             bytes(payload),
             expect=["+CMGS:", "OK"],
-            timeout=30,
+            timeout=self._sms_submit_timeout,
         )
         if not resp.success:
             raise SMSSendError(f"Failed to send SMS to {to}: {resp.lines}")

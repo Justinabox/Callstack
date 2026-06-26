@@ -59,6 +59,8 @@ class MockModem(Modem):
             self.bus,
             SMSStore(),
             command_timeout=self.config.command_timeout,
+            sms_prompt_timeout=self.config.sms_prompt_timeout,
+            sms_submit_timeout=self.config.sms_submit_timeout,
         )
         self.network = NetworkService(
             self._executor, self.bus, command_timeout=self.config.command_timeout
@@ -149,6 +151,14 @@ class TestModemInit:
             ("AT+CVHU=0", 1.25),
             ("AT+COLP=1", 1.25),
         ]
+
+    async def test_sms_service_receives_configured_send_timeouts(self):
+        modem = MockModem(
+            ModemConfig(sms_prompt_timeout=1.5, sms_submit_timeout=12.0)
+        )
+
+        assert modem.sms._sms_prompt_timeout == 1.5
+        assert modem.sms._sms_submit_timeout == 12.0
 
     async def test_close_is_idempotent(self):
         modem = MockModem()

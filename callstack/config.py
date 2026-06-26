@@ -7,6 +7,11 @@ class ConfigError(ValueError):
     """Raised when redacted deployment/CLI configuration is invalid."""
 
 
+def _validate_positive_finite(name: str, value: float) -> None:
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a positive finite number, got {value}")
+
+
 @dataclass
 class ModemConfig:
     at_port: str = "/dev/ttyUSB2"
@@ -19,12 +24,14 @@ class ModemConfig:
     sms_db_path: Optional[str] = None
     sim_pin: Optional[str] = None
     log_level: str = "INFO"
+    sms_prompt_timeout: float = 10.0
+    sms_submit_timeout: float = 30.0
 
     def __post_init__(self) -> None:
-        if self.command_timeout <= 0:
-            raise ValueError(f"command_timeout must be positive, got {self.command_timeout}")
-        if self.reconnect_interval <= 0:
-            raise ValueError(f"reconnect_interval must be positive, got {self.reconnect_interval}")
+        _validate_positive_finite("command_timeout", self.command_timeout)
+        _validate_positive_finite("sms_prompt_timeout", self.sms_prompt_timeout)
+        _validate_positive_finite("sms_submit_timeout", self.sms_submit_timeout)
+        _validate_positive_finite("reconnect_interval", self.reconnect_interval)
         if self.baudrate <= 0:
             raise ValueError(f"baudrate must be positive, got {self.baudrate}")
 
@@ -103,6 +110,14 @@ def load_modem_config_from_env(
     command_timeout = _parse_positive_float(env, _env_name(prefix, "COMMAND_TIMEOUT"))
     if command_timeout is not None:
         kwargs["command_timeout"] = command_timeout
+
+    sms_prompt_timeout = _parse_positive_float(env, _env_name(prefix, "SMS_PROMPT_TIMEOUT"))
+    if sms_prompt_timeout is not None:
+        kwargs["sms_prompt_timeout"] = sms_prompt_timeout
+
+    sms_submit_timeout = _parse_positive_float(env, _env_name(prefix, "SMS_SUBMIT_TIMEOUT"))
+    if sms_submit_timeout is not None:
+        kwargs["sms_submit_timeout"] = sms_submit_timeout
 
     reconnect_interval = _parse_positive_float(env, _env_name(prefix, "RECONNECT_INTERVAL"))
     if reconnect_interval is not None:
