@@ -38,9 +38,38 @@ def test_parse_lte_registration_home():
     assert result == (0, 1)
 
 
+def test_parse_registration_one_field_home():
+    result = ATResponseParser.parse_registration("+CREG: 1")
+    assert result == (0, 1)
+
+
+def test_parse_packet_registration_one_field_roaming():
+    result = ATResponseParser.parse_registration("+CGREG: 5")
+    assert result == (0, 5)
+
+
+def test_parse_lte_registration_one_field_searching():
+    result = ATResponseParser.parse_registration("+CEREG: 2")
+    assert result == (0, 2)
+
+
+def test_parse_registration_rejects_malformed_trailing_fields():
+    assert ATResponseParser.parse_registration("+CREG: 1,foo") is None
+    assert ATResponseParser.parse_registration("+CGREG: 5,bar") is None
+    assert ATResponseParser.parse_registration("+CREG: 0,1x") is None
+    assert ATResponseParser.parse_registration("+CREG: 0,1,garbage") is None
+    assert ATResponseParser.parse_registration("+CREG: 0,1,2x") is None
+    assert ATResponseParser.parse_registration('+CEREG: 2,1,"zzzz"') is None
+
+
+def test_parse_registration_accepts_verbose_lte_fields():
+    result = ATResponseParser.parse_registration('+CEREG: 2,1,"ABCD","12345678",7')
+    assert result == (2, 1)
+
+
 def test_parse_clip():
-    result = ATResponseParser.parse_clip('+CLIP: "+15551234567",145,,,,0')
-    assert result == "+15551234567"
+    result = ATResponseParser.parse_clip('+CLIP: "+155****4567",145,,,,0')
+    assert result == "+155****4567"
 
 
 def test_parse_clip_no_number():

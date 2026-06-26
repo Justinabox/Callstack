@@ -3,6 +3,7 @@
 import asyncio
 import pytest
 
+from callstack.errors import ATTimeoutError
 from callstack.events.bus import EventBus
 from callstack.events.types import SignalQualityEvent
 from callstack.network import NetworkService, SignalInfo, RegistrationInfo
@@ -18,6 +19,27 @@ def _make_service():
     executor = ATCommandExecutor(transport, urc)
     service = NetworkService(executor, bus)
     return service, transport, bus
+
+
+def _feed_registration_responses(
+    transport,
+    creg: str | None = "+CREG: 0,0",
+    cgreg: str | None = "+CGREG: 0,0",
+    cereg: str | None = "+CEREG: 0,0",
+) -> None:
+    """Queue responses for the expected CREG/CGREG/CEREG query sequence."""
+    for line in (creg, cgreg, cereg):
+        if line is not None:
+            transport.feed(line)
+        transport.feed("OK")
+
+
+def _assert_registration_family_queries(transport) -> None:
+    assert transport.all_written == [
+        "AT+CREG?\r\n",
+        "AT+CGREG?\r\n",
+        "AT+CEREG?\r\n",
+    ]
 
 
 class TestSignalQuality:
@@ -77,7 +99,7 @@ class TestSignalQuality:
 class TestRegistration:
     async def test_uses_configured_command_timeout(self):
         class Capture:
-            lines = ["+CREG: 0,1"]
+            lines = ["+CGREG: 0,5"]
 
             def __enter__(self):
                 return self
@@ -101,68 +123,136 @@ class TestRegistration:
         info = await svc.registration()
 
         assert info.registered is True
-        assert executor.calls == [("AT+CREG?", 2.5)]
+        assert executor.calls == [
+            ("AT+CREG?", 2.5),
+            ("AT+CGREG?", 2.5),
+            ("AT+CEREG?", 2.5),
+        ]
 
     async def test_registered_home(self):
         svc, transport, _ = _make_service()
         await transport.open()
 
-        transport.feed("+CREG: 0,1", "OK")
+        _feed_registration_responses(transport, creg="+CREG: 0,1")
         info = await svc.registration()
 
         assert isinstance(info, RegistrationInfo)
         assert info.registered is True
         assert info.roaming is False
         assert "home" in info.description
+        _assert_registration_family_queries(transport)
 
     async def test_roaming(self):
         svc, transport, _ = _make_service()
         await transport.open()
 
-        transport.feed("+CREG: 0,5", "OK")
+        _feed_registration_responses(transport, creg="+CREG: 0,5")
         info = await svc.registration()
 
         assert info.registered is True
         assert info.roaming is True
+        _assert_registration_family_queries(transport)
 
     async def test_packet_registration_roaming(self):
         svc, transport, _ = _make_service()
         await transport.open()
 
-        transport.feed("+CGREG: 0,5", "OK")
+        _feed_registration_responses(
+            transport,
+            creg="+CREG: 0,0",
+            cgreg="+CGREG: 0,5",
+            cereg="+CEREG: 0,0",
+        )
         info = await svc.registration()
 
         assert info.registered is True
         assert info.roaming is True
+        _assert_registration_family_queries(transport)
 
     async def test_lte_registration_home(self):
         svc, transport, _ = _make_service()
         await transport.open()
 
-        transport.feed("+CEREG: 0,1", "OK")
+        _feed_registration_responses(
+            transport,
+            creg="+CREG: 0,0",
+            cgreg="+CGREG: 0,0",
+            cereg="+CEREG: 0,1",
+        )
         info = await svc.registration()
 
         assert info.registered is True
         assert info.roaming is False
+        _assert_registration_family_queries(transport)
 
     async def test_not_registered(self):
         svc, transport, _ = _make_service()
         await transport.open()
 
-        transport.feed("+CREG: 0,0", "OK")
+        _feed_registration_responses(
+            transport,
+            creg="+CREG: 0,0",
+            cgreg="+CGREG: 0,2",
+            cereg="+CEREG: 0,3",
+        )
         info = await svc.registration()
 
         assert info.registered is False
+        assert info.status == 0
+        assert info.mode == 0
 
     async def test_searching(self):
         svc, transport, _ = _make_service()
         await transport.open()
 
-        transport.feed("+CREG: 0,2", "OK")
+        _feed_registration_responses(transport, creg="+CREG: 0,2")
         info = await svc.registration()
 
         assert info.registered is False
         assert "searching" in info.description
+
+    async def test_falls_back_when_no_registration_status_parses(self):
+        svc, transport, _ = _make_service()
+        await transport.open()
+
+        _feed_registration_responses(transport, creg=None, cgreg=None, cereg=None)
+        info = await svc.registration()
+
+        assert info == RegistrationInfo(status=0, mode=0)
+        _assert_registration_family_queries(transport)
+
+    async def test_optional_registration_query_timeout_preserves_captured_status(self):
+        class Capture:
+            lines = ["+CREG: 0,1"]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        class TimeoutAfterCircuitExecutor:
+            def __init__(self):
+                self.calls = []
+
+            def capture_urcs(self, *prefixes):
+                return Capture()
+
+            async def execute(self, command, expect=("OK",), timeout=5.0):
+                self.calls.append((command, timeout))
+                if command == "AT+CGREG?":
+                    raise ATTimeoutError("timed out waiting for packet registration")
+
+        executor = TimeoutAfterCircuitExecutor()
+        svc = NetworkService(executor, EventBus(), command_timeout=2.5)
+
+        info = await svc.registration()
+
+        assert info == RegistrationInfo(status=1, mode=0)
+        assert executor.calls == [
+            ("AT+CREG?", 2.5),
+            ("AT+CGREG?", 2.5),
+        ]
 
 
 class TestOperator:
@@ -190,7 +280,7 @@ class TestWaitForRegistration:
         svc, transport, _ = _make_service()
         await transport.open()
 
-        transport.feed("+CREG: 0,1", "OK")
+        _feed_registration_responses(transport, creg="+CREG: 0,1")
         result = await svc.wait_for_registration(timeout=1.0)
 
         assert result is True
@@ -201,7 +291,7 @@ class TestWaitForRegistration:
 
         # Feed "not registered" responses repeatedly
         for _ in range(10):
-            transport.feed("+CREG: 0,0", "OK")
+            _feed_registration_responses(transport)
 
         result = await svc.wait_for_registration(timeout=0.2, poll_interval=0.05)
 
