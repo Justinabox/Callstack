@@ -43,6 +43,23 @@ def _normalize_control_line(line: str) -> str:
     return line.strip()
 
 
+def _is_final_result_line(line: str) -> bool:
+    """Return true for AT final result lines that are safe to log verbatim."""
+    return (
+        line in FINAL_OK
+        or line in FINAL_ERROR
+        or line in FINAL_DIAL_FAILURE
+        or any(line.startswith(e) for e in FINAL_ERROR_PREFIXES)
+    )
+
+
+def _response_line_for_log(command: str, raw_line: str) -> str:
+    """Return a privacy-safe representation of one modem response line."""
+    if command.startswith(("AT+CMGR", "AT+CMGL")) and not _is_final_result_line(raw_line):
+        return "<redacted SMS read response>"
+    return raw_line
+
+
 @dataclass
 class ATResponse:
     """Structured AT command response."""
@@ -350,7 +367,7 @@ class ATCommandExecutor:
             if not control_line and not self._command_preserves_urc_like_payload(command):
                 continue
 
-            logger.debug("RX: %s", raw_line)
+            logger.debug("RX: %s", _response_line_for_log(command, raw_line))
 
             # Echo suppression: skip if the line matches the command we sent.
             if control_line == command:
