@@ -118,7 +118,7 @@ async def test_success_result_code_requires_exact_line(executor, transport):
 async def test_sms_read_debug_log_does_not_expose_raw_cmgr_payload(executor, transport, caplog):
     """Debug logs for SMS reads must not expose raw report/SMS payloads."""
     raw_report = (
-        '+CMGR: "REC READ",6,"+15551234567",145,'
+        '+CMGR: "REC READ",6,"+155****4567",145,'
         '"24/12/25,14:30:00+04","24/12/25,14:30:05+04",0'
     )
 
@@ -128,9 +128,73 @@ async def test_sms_read_debug_log_does_not_expose_raw_cmgr_payload(executor, tra
 
     assert resp.success is True
     assert resp.data_lines == [raw_report]
-    assert "+15551234567" not in caplog.text
+    assert "+155****4567" not in caplog.text
     assert raw_report not in caplog.text
     assert "RX: <redacted SMS read response>" in caplog.text
+
+
+async def test_sensitive_cpin_command_is_redacted_from_debug_logs(executor, transport, caplog):
+    """SIM PIN commands must not expose credentials in TX or echoed RX logs."""
+    command = 'AT+CPIN="1234"'
+    transport.feed(command, "OK")
+
+    with caplog.at_level(logging.DEBUG, logger="callstack.executor"):
+        resp = await executor.execute(command)
+
+    assert resp.success is True
+    assert "1234" not in caplog.text
+    assert command not in caplog.text
+    assert "AT+CPIN=<redacted>" in caplog.text
+
+
+async def test_sensitive_cpin_command_is_redacted_from_timeout_error(transport, urc):
+    """SIM PIN commands must not expose credentials in timeout diagnostics."""
+    executor = ATCommandExecutor(transport, urc)
+    command = 'AT+CPIN="1234"'
+
+    with pytest.raises(ATTimeoutError) as exc_info:
+        await executor.execute(command, timeout=0.01)
+
+    message = str(exc_info.value)
+    assert "1234" not in message
+    assert command not in message
+    assert "AT+CPIN=<redacted>" in message
+
+
+async def test_delayed_sensitive_cpin_echo_is_redacted_in_idle_reader(executor, transport, caplog):
+    """Late SIM PIN command echoes must not leak after command timeout."""
+    command = 'AT+CPIN="1234"'
+
+    with caplog.at_level(logging.DEBUG, logger="callstack.executor"):
+        with pytest.raises(ATTimeoutError):
+            await executor.execute(command, timeout=0.01)
+        transport.feed(command)
+        await asyncio.sleep(0)
+
+    assert "1234" not in caplog.text
+    assert command not in caplog.text
+    assert "Ignoring non-URC idle line: AT+CPIN=<redacted>" in caplog.text
+
+
+async def test_delayed_sensitive_cpin_echo_does_not_leak_into_next_command(executor, transport, caplog):
+    """A stale SIM PIN echo must not leak while a later command is in flight."""
+    command = 'AT+CPIN="1234"'
+
+    async def feed_next_command_response():
+        await asyncio.sleep(0)
+        transport.feed(command, "+CSQ: 20,0", "OK")
+
+    with caplog.at_level(logging.DEBUG, logger="callstack.executor"):
+        with pytest.raises(ATTimeoutError):
+            await executor.execute(command, timeout=0.01)
+        feeder = asyncio.create_task(feed_next_command_response())
+        resp = await executor.execute("AT+CSQ", timeout=1.0)
+        await feeder
+
+    assert resp.lines == ["+CSQ: 20,0", "OK"]
+    assert "1234" not in caplog.text
+    assert command not in caplog.text
+    assert "AT+CPIN=<redacted>" in caplog.text
 
 
 async def test_error_response(executor, transport):

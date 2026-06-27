@@ -216,8 +216,8 @@ class Modem:
             ATCommand.CPIN_QUERY, expect=["OK"], timeout=self.config.command_timeout
         )
         if not resp.success:
-            logger.warning("Could not query SIM PIN status: %s", resp.lines)
-            return
+            logger.warning("SIM readiness check failed: AT+CPIN? returned an error")
+            raise SIMUnlockError("SIM readiness check failed: AT+CPIN? returned an error")
 
         status = None
         for line in resp.data_lines:
@@ -226,15 +226,17 @@ class Modem:
                 break
 
         if status is None:
-            logger.warning("Could not parse SIM PIN status from: %s", resp.lines)
-            return
-
-        logger.info("SIM status: %s", status)
+            logger.warning("SIM readiness check failed: could not parse AT+CPIN? response")
+            raise SIMUnlockError(
+                "SIM readiness check failed: could not parse AT+CPIN? response"
+            )
 
         if status == "READY":
+            logger.info("SIM status: READY")
             return
 
         if status == "SIM PIN":
+            logger.info("SIM status: SIM PIN")
             if not self.config.sim_pin:
                 raise SIMPINRequired("SIM is locked — set sim_pin in ModemConfig to unlock")
             pin_resp = await self._executor.execute(
@@ -245,11 +247,13 @@ class Modem:
             logger.info("SIM unlocked with PIN")
 
         elif status == "SIM PUK":
+            logger.info("SIM status: SIM PUK")
             raise SIMPUKRequired(
                 "SIM is PUK-locked — use modem.unlock_puk(puk, new_pin) to recover"
             )
         else:
-            logger.warning("Unhandled SIM status: %s", status)
+            logger.warning("SIM readiness check failed: unhandled SIM status")
+            raise SIMUnlockError("SIM readiness check failed: unhandled SIM status")
 
     def _reader_done_callback(self, task: asyncio.Task) -> None:
         """Handle executor reader task completion (usually a transport error)."""
