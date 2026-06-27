@@ -1,6 +1,7 @@
 """SMS persistence: in-memory store with optional SQLite backend."""
 
 import asyncio
+import json
 import logging
 from typing import Optional
 
@@ -18,9 +19,33 @@ CREATE TABLE IF NOT EXISTS messages (
     timestamp TEXT,
     status TEXT NOT NULL DEFAULT '',
     reference INTEGER NOT NULL DEFAULT 0,
-    storage_index INTEGER
+    storage_index INTEGER,
+    segment_references TEXT NOT NULL DEFAULT '[]'
 )
 """
+
+
+def _encode_segment_references(references: tuple[int, ...]) -> str:
+    """Serialize multipart modem references for SQLite storage."""
+    return json.dumps(list(references), separators=(",", ":"))
+
+
+def _decode_segment_references(raw: str | None) -> tuple[int, ...]:
+    """Deserialize multipart modem references from SQLite storage."""
+    if not raw:
+        return ()
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError:
+        return ()
+    if not isinstance(decoded, list):
+        return ()
+    references: list[int] = []
+    for item in decoded:
+        if isinstance(item, bool) or not isinstance(item, int):
+            return ()
+        references.append(item)
+    return tuple(references)
 
 
 class SMSStore:
@@ -43,6 +68,17 @@ class SMSStore:
         # resolve external SQLite ID collisions without dropping new messages.
         self._pending_saves: dict[int, tuple[SMS, bool]] = {}
 
+    async def _ensure_schema(self) -> None:
+        """Apply lightweight SQLite schema additions for existing stores."""
+        if self._db is None:
+            return
+        async with self._db.execute("PRAGMA table_info(messages)") as cursor:
+            columns = {row[1] async for row in cursor}
+        if "segment_references" not in columns:
+            await self._db.execute(
+                "ALTER TABLE messages ADD COLUMN segment_references TEXT NOT NULL DEFAULT '[]'"
+            )
+
     async def initialize(self) -> None:
         """Open SQLite connection if db_path was provided, and load existing messages."""
         if self._db_path is None:
@@ -62,6 +98,7 @@ class SMSStore:
             self._db = await aiosqlite.connect(self._db_path)
             try:
                 await self._db.execute(_CREATE_TABLE)
+                await self._ensure_schema()
                 await self._db.commit()
 
                 # Load existing messages from SQLite. Rebuild the in-memory
@@ -75,7 +112,7 @@ class SMSStore:
                 loaded_index_by_id: dict[int, int] = {}
                 next_id = 1
                 async with self._db.execute(
-                    "SELECT id, sender, recipient, body, timestamp, status, reference, storage_index "
+                    "SELECT id, sender, recipient, body, timestamp, status, reference, storage_index, segment_references "
                     "FROM messages ORDER BY id"
                 ) as cursor:
                     async for row in cursor:
@@ -89,6 +126,7 @@ class SMSStore:
                             status=row[5],
                             reference=row[6],
                             storage_index=row[7],
+                            segment_references=_decode_segment_references(row[8]),
                         )
                         loaded_messages.append(sms)
                         if row[0] is not None:
@@ -117,20 +155,22 @@ class SMSStore:
                     if sms.id in loaded_ids:
                         await self._db.execute(
                             "UPDATE messages SET sender=?, recipient=?, body=?, timestamp=?, "
-                            "status=?, reference=?, storage_index=? WHERE id=?",
+                            "status=?, reference=?, storage_index=?, segment_references=? WHERE id=?",
                             (
                                 sms.sender, sms.recipient, sms.body, ts_iso,
-                                sms.status, sms.reference, sms.storage_index, sms.id,
+                                sms.status, sms.reference, sms.storage_index,
+                                _encode_segment_references(sms.segment_references), sms.id,
                             ),
                         )
                         loaded_messages[loaded_index_by_id[sms.id]] = sms
                     else:
                         await self._db.execute(
-                            "INSERT INTO messages (id, sender, recipient, body, timestamp, status, reference, storage_index) "
-                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                            "INSERT INTO messages (id, sender, recipient, body, timestamp, status, reference, storage_index, segment_references) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                             (
                                 sms.id, sms.sender, sms.recipient, sms.body, ts_iso,
                                 sms.status, sms.reference, sms.storage_index,
+                                _encode_segment_references(sms.segment_references),
                             ),
                         )
                         loaded_messages.append(sms)
@@ -183,19 +223,21 @@ class SMSStore:
                 if existing_index is not None:
                     await self._db.execute(
                         "UPDATE messages SET sender=?, recipient=?, body=?, timestamp=?, "
-                        "status=?, reference=?, storage_index=? WHERE id=?",
+                        "status=?, reference=?, storage_index=?, segment_references=? WHERE id=?",
                         (
                             sms.sender, sms.recipient, sms.body, ts_iso,
-                            sms.status, sms.reference, sms.storage_index, sms.id,
+                            sms.status, sms.reference, sms.storage_index,
+                            _encode_segment_references(sms.segment_references), sms.id,
                         ),
                     )
                 else:
                     await self._db.execute(
-                        "INSERT INTO messages (id, sender, recipient, body, timestamp, status, reference, storage_index) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        "INSERT INTO messages (id, sender, recipient, body, timestamp, status, reference, storage_index, segment_references) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             sms.id, sms.sender, sms.recipient, sms.body, ts_iso,
                             sms.status, sms.reference, sms.storage_index,
+                            _encode_segment_references(sms.segment_references),
                         ),
                     )
                 await self._db.commit()

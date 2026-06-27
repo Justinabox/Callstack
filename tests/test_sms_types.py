@@ -10,6 +10,16 @@ def test_sms_defaults():
     assert sms.body == ""
     assert sms.id is None
     assert sms.storage_index is None
+    assert sms.segment_references == ()
+
+
+def test_sms_positional_id_and_storage_index_compatibility():
+    sms = SMS("sender", "recipient", "body", None, "sent", 7, 99, 3)
+
+    assert sms.reference == 7
+    assert sms.id == 99
+    assert sms.storage_index == 3
+    assert sms.segment_references == ()
 
 
 def test_sms_is_incoming():
