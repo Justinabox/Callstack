@@ -280,6 +280,23 @@ class CallSession:
     def is_active(self) -> bool:
         return self.service.state == CallState.ACTIVE and self.service.active_call is self
 
+    def _playback_cancel_event(
+        self, cancel: asyncio.Event | None
+    ) -> tuple[asyncio.Event, asyncio.Task[None]]:
+        """Return a cancel event that follows caller cancellation and session liveness."""
+        playback_cancel = asyncio.Event()
+
+        async def watch_liveness() -> None:
+            while not playback_cancel.is_set():
+                if (cancel and cancel.is_set()) or self._ended.is_set() or not self.is_active:
+                    playback_cancel.set()
+                    return
+                await asyncio.sleep(0.01)
+
+        if (cancel and cancel.is_set()) or self._ended.is_set() or not self.is_active:
+            playback_cancel.set()
+        return playback_cancel, asyncio.create_task(watch_liveness())
+
     async def hangup(self) -> None:
         """End this call."""
         await self.service.hangup()
@@ -287,15 +304,39 @@ class CallSession:
 
     async def play(self, audio_path: str, cancel: asyncio.Event | None = None) -> None:
         """Play a WAV recording to the caller."""
-        await self.service._audio.play_file(audio_path, cancel)
+        if not self.is_active:
+            raise RuntimeError("Cannot play audio without an active call")
+        playback_cancel, cancel_task = self._playback_cancel_event(cancel)
+        try:
+            await self.service._audio.play_file(audio_path, playback_cancel)
+        finally:
+            cancel_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await cancel_task
 
     async def play_sequence(self, paths: list[str], cancel: asyncio.Event | None = None) -> None:
         """Play multiple WAV files back-to-back."""
-        await self.service._audio.play_sequence(paths, cancel)
+        if not self.is_active:
+            raise RuntimeError("Cannot play audio without an active call")
+        playback_cancel, cancel_task = self._playback_cancel_event(cancel)
+        try:
+            await self.service._audio.play_sequence(paths, playback_cancel)
+        finally:
+            cancel_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await cancel_task
 
     async def play_loop(self, audio_path: str, cancel: asyncio.Event | None = None) -> None:
         """Loop a WAV file (e.g. hold music) until cancelled."""
-        await self.service._audio.play_loop(audio_path, cancel)
+        if not self.is_active:
+            raise RuntimeError("Cannot play audio without an active call")
+        playback_cancel, cancel_task = self._playback_cancel_event(cancel)
+        try:
+            await self.service._audio.play_loop(audio_path, playback_cancel)
+        finally:
+            cancel_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await cancel_task
 
     async def record(
         self,
