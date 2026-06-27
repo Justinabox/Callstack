@@ -61,8 +61,16 @@ class APIKeyAuth:
         if not self.enabled:
             return await handler(request)
 
+        now = time.monotonic()
+        self._prune_request_log(now)
+
+        auth_failure_bucket = self._auth_failure_bucket(request)
+        if self._bucket_exhausted(auth_failure_bucket):
+            return self._rate_limit_response()
+
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
+            self._record_rate_attempt(auth_failure_bucket, now)
             return web.json_response(
                 {"error": "Missing or invalid Authorization header. Use 'Bearer <api_key>'."},
                 status=401,
@@ -70,24 +78,39 @@ class APIKeyAuth:
 
         key = auth_header[7:]
         if not self._is_valid_key(key):
+            self._record_rate_attempt(auth_failure_bucket, now)
             return web.json_response({"error": "Invalid API key."}, status=403)
 
-        # Rate limiting
-        now = time.monotonic()
-        log = self._request_log[key]
-        # Prune old entries
-        cutoff = now - self._rate_window
-        self._request_log[key] = [t for t in log if t > cutoff]
-        log = self._request_log[key]
-
-        if len(log) >= self._rate_limit:
-            return web.json_response(
-                {"error": "Rate limit exceeded.", "retry_after": self._rate_window},
-                status=429,
-            )
-        log.append(now)
+        if self._bucket_exhausted(key):
+            return self._rate_limit_response()
+        self._record_rate_attempt(key, now)
 
         return await handler(request)
+
+    def _prune_request_log(self, now: float) -> None:
+        cutoff = now - self._rate_window
+        for bucket, log in list(self._request_log.items()):
+            current_log = [t for t in log if t > cutoff]
+            if current_log:
+                self._request_log[bucket] = current_log
+            else:
+                del self._request_log[bucket]
+
+    def _bucket_exhausted(self, bucket: str) -> bool:
+        return len(self._request_log.get(bucket, [])) >= self._rate_limit
+
+    def _record_rate_attempt(self, bucket: str, now: float) -> None:
+        self._request_log[bucket].append(now)
+
+    def _auth_failure_bucket(self, request: web.Request) -> str:
+        peer = request.remote or "unknown"
+        return f"auth-failure:{peer}"
+
+    def _rate_limit_response(self) -> web.Response:
+        return web.json_response(
+            {"error": "Rate limit exceeded.", "retry_after": self._rate_window},
+            status=429,
+        )
 
     def _is_valid_key(self, candidate_key: str) -> bool:
         valid = False
