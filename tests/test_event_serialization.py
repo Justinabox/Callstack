@@ -1,7 +1,9 @@
 """PII-safe event serialization helpers for local monitoring/realtime surfaces."""
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from callstack.events.types import (
     CallerIDEvent,
@@ -27,6 +29,33 @@ def _assert_json_does_not_leak_private_values(payload, *private_values: str) -> 
     rendered = json.dumps(payload, sort_keys=True)
     for value in private_values:
         assert value not in rendered
+
+
+def test_default_event_timestamp_serializes_as_current_utc_instant():
+    before = datetime.now(timezone.utc)
+    event = IncomingSMSEvent(sender="+155****4567", body="secret")
+    after = datetime.now(timezone.utc)
+
+    assert event.timestamp.tzinfo is not None
+    event_instant = event.timestamp.astimezone(timezone.utc)
+    assert before - timedelta(seconds=1) <= event_instant <= after + timedelta(seconds=1)
+
+    payload = serialize_event(event)
+
+    serialized = datetime.fromisoformat(payload["timestamp"].removesuffix("Z")).replace(tzinfo=timezone.utc)
+    assert before - timedelta(seconds=1) <= serialized <= after + timedelta(seconds=1)
+    assert payload["timestamp"].endswith("Z")
+
+
+def test_naive_event_timestamp_is_rejected_instead_of_labeled_utc():
+    event = IncomingSMSEvent(
+        timestamp=datetime(2026, 6, 27, 12, 0, 0),
+        sender="+155****4567",
+        body="secret",
+    )
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        serialize_event(event)
 
 
 def test_incoming_sms_event_serializes_without_body_raw_or_full_sender():
