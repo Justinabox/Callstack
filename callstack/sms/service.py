@@ -160,13 +160,16 @@ class SMSService:
         if not resp.success:
             raise SMSSendError(f"Failed to send SMS to {to}: {resp.lines}")
 
-        # Extract reference number
-        reference = 0
+        # Extract the modem submit reference. A final OK confirms command
+        # framing, but delivery-report correlation requires an explicit +CMGS.
+        reference: int | None = None
         for line in resp.lines:
             ref = ATResponseParser.parse_cmgs(line)
             if ref is not None:
                 reference = ref
                 break
+        if reference is None:
+            raise SMSSendError("SMS submit response missing +CMGS reference")
 
         sms = SMS(
             recipient=to,

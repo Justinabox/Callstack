@@ -271,7 +271,45 @@ async def test_send_body_failure(sms_service, transport):
     transport.feed("> ")
     transport.feed("ERROR")
     with pytest.raises(SMSSendError):
-        await sms_service.send("+15551234", "Hello!")
+        await sms_service.send("5551234", "Hello!")
+
+
+async def test_send_requires_explicit_cmgs_reference(sms_service, transport, store, bus):
+    """A final OK without +CMGS must not be reported as a sent SMS."""
+    sent_events = []
+
+    async def on_sent(event):
+        sent_events.append(event)
+
+    bus.subscribe(SMSSentEvent, on_sent)
+    transport.feed("> ")
+    transport.feed("OK")
+
+    with pytest.raises(SMSSendError, match="CMGS"):
+        await sms_service.send("5551234", "Hello")
+
+    await asyncio.sleep(0.01)
+    assert await store.count() == 0
+    assert sent_events == []
+
+
+async def test_send_accepts_explicit_zero_cmgs_reference(sms_service, transport, bus):
+    """A modem-provided +CMGS: 0 is a real submit reference, not missing data."""
+    sent_events = []
+
+    async def on_sent(event):
+        sent_events.append(event)
+
+    bus.subscribe(SMSSentEvent, on_sent)
+    transport.feed("> ")
+    transport.feed("+CMGS: 0", "OK")
+
+    sms = await sms_service.send("5551234", "Hello")
+
+    await asyncio.sleep(0.01)
+    assert sms.reference == 0
+    assert len(sent_events) == 1
+    assert sent_events[0].reference == 0
 
 
 async def test_send_stores_message(sms_service, transport, store):
