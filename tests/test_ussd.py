@@ -164,6 +164,17 @@ class TestCUSDDispatch:
         assert "private balance" not in caplog.text
         assert "$100" not in caplog.text
 
+    async def test_cusd_debug_log_omits_response_payload(self, bus, urc, caplog):
+        private_response = '+CUSD: 0, "private balance is $100", bad'
+
+        with caplog.at_level(logging.DEBUG, logger="callstack.urc"):
+            await urc.dispatch(private_response)
+
+        assert "URC: +CUSD:<redacted>" in caplog.text
+        assert private_response not in caplog.text
+        assert "private balance" not in caplog.text
+        assert "$100" not in caplog.text
+
     async def test_cusd_terminated(self, bus, urc):
         async with bus.stream(USSDResponseEvent) as stream:
             await urc.dispatch('+CUSD: 2')
