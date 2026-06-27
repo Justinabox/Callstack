@@ -9,8 +9,9 @@ SMS, USSD, or call state.
 from __future__ import annotations
 
 import asyncio
+import glob
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import fields, replace
 from typing import Protocol
 
@@ -20,6 +21,7 @@ from callstack.transport.base import Transport
 from callstack.transport.serial import SerialTransport
 
 SAFE_PROBE_COMMANDS = ("AT", "ATI", "AT+GMI", "AT+GMM", "AT+GMR")
+DEFAULT_DISCOVERY_PATTERNS = ("/dev/ttyUSB*", "/dev/ttyACM*")
 _TERMINAL_RESPONSES = {"OK", "ERROR"}
 _IMEI_LINE_RE = re.compile(r"^(?:imei\s*[:=]?\s*)?\d{14,22}$", re.IGNORECASE)
 _SENSITIVE_IDENTIFIER_TERMS = (
@@ -44,11 +46,34 @@ class TransportOpener(Protocol):
     def __call__(self, port: str) -> Transport: ...
 
 
+PathGlobber = Callable[[str], Iterable[str]]
+
+
 def _default_transport_opener(baudrate: int) -> TransportOpener:
     def _open(port: str) -> Transport:
         return SerialTransport(port, baudrate=baudrate)
 
     return _open
+
+
+def _candidate_ports_from_patterns(
+    patterns: str | Sequence[str], *, path_glob: PathGlobber | None = None
+) -> tuple[str, ...]:
+    """Enumerate candidate serial paths through an injectable globber."""
+    globber = path_glob or glob.glob
+    raw_patterns = (patterns,) if isinstance(patterns, str) else patterns
+    seen: set[str] = set()
+    ports: list[str] = []
+    for pattern in raw_patterns:
+        cleaned = pattern.strip()
+        if not cleaned:
+            continue
+        for port in sorted(globber(cleaned)):
+            if port in seen:
+                continue
+            seen.add(port)
+            ports.append(port)
+    return tuple(ports)
 
 
 def _clean_line(line: bytes) -> str:
@@ -153,6 +178,18 @@ def _confidence(identity: ModemIdentity, capabilities: ModemCapabilities, attent
     return "no-response"
 
 
+_CONFIDENCE_RANK = {
+    "no-response": 0,
+    "attention-response": 1,
+    "identity-response": 2,
+    "profile-match": 3,
+}
+
+
+def _rank_confidence(confidence: str) -> int:
+    return _CONFIDENCE_RANK.get(confidence, 0)
+
+
 async def probe_modem_ports(
     candidate_ports: Sequence[str],
     *,
@@ -227,7 +264,9 @@ async def probe_modem_ports(
             confidence=confidence,
             notes=(),
         )
-        if best_report is None or report.confidence == "profile-match":
+        if best_report is None or _rank_confidence(report.confidence) > _rank_confidence(
+            best_report.confidence
+        ):
             best_report = report
 
     if best_report is not None:
@@ -244,3 +283,46 @@ async def probe_modem_ports(
             "No responsive modem AT port was found among the explicit candidate ports; verify the port list and permissions.",
         ),
     )
+
+
+async def discover_modems(
+    patterns: str | Sequence[str] = DEFAULT_DISCOVERY_PATTERNS,
+    *,
+    path_glob: PathGlobber | None = None,
+    transport_opener: TransportOpener | None = None,
+    baudrate: int = 115200,
+    command_timeout: float = 0.5,
+) -> list[ModemDiscoveryReport]:
+    """Opt-in multi-port discovery using only the safe probe allowlist.
+
+    The host is scanned only through caller-provided patterns (or the explicit
+    defaults used by ``callstack doctor --scan``). Candidate enumeration is
+    injectable so tests and callers can avoid touching real ``/dev`` paths.
+    """
+    candidate_ports = _candidate_ports_from_patterns(patterns, path_glob=path_glob)
+    if not candidate_ports:
+        return [
+            ModemDiscoveryReport(
+                at_port="",
+                audio_port=None,
+                identity=ModemIdentity(),
+                capabilities=ModemCapabilities(),
+                confidence="no-response",
+                notes=(
+                    "No candidate serial ports matched the opt-in discovery patterns; "
+                    "pass explicit --ports or adjust --patterns and check device permissions.",
+                ),
+            )
+        ]
+
+    report = await probe_modem_ports(
+        candidate_ports,
+        transport_opener=transport_opener,
+        baudrate=baudrate,
+        command_timeout=command_timeout,
+    )
+    scan_note = (
+        f"Scanned {len(candidate_ports)} candidate port(s) from opt-in discovery patterns; "
+        "audio port remains unknown unless configured explicitly."
+    )
+    return [replace(report, notes=(scan_note,) + report.notes)]

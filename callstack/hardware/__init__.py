@@ -6,7 +6,12 @@ from callstack.hardware.discovery import (
     ModemDiscoveryReport,
     ModemIdentity,
 )
-from callstack.hardware.probe import SAFE_PROBE_COMMANDS, probe_modem_ports
+from callstack.hardware.probe import (
+    DEFAULT_DISCOVERY_PATTERNS,
+    SAFE_PROBE_COMMANDS,
+    discover_modems,
+    probe_modem_ports,
+)
 from callstack.hardware.profiles import classify_capabilities, profile_notes
 
 __all__ = [
@@ -14,8 +19,10 @@ __all__ = [
     "ModemCapabilities",
     "ModemDiscoveryReport",
     "ModemIdentity",
+    "DEFAULT_DISCOVERY_PATTERNS",
     "SAFE_PROBE_COMMANDS",
     "classify_capabilities",
+    "discover_modems",
     "probe_modem_ports",
     "profile_notes",
 ]

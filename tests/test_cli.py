@@ -718,6 +718,72 @@ def test_doctor_passes_configured_baudrate_to_probe(monkeypatch, capsys):
     json.loads(capsys.readouterr().out)
 
 
+def test_doctor_help_includes_opt_in_scan_flags(capsys):
+    import callstack.cli as cli
+
+    code = cli.main(["doctor", "--help"])
+
+    assert code == 0
+    output = capsys.readouterr().out
+    assert "--scan" in output
+    assert "--patterns" in output
+
+
+def test_doctor_scan_uses_discovery_patterns_without_default_port_probe(monkeypatch, capsys):
+    import callstack.cli as cli
+
+    called = {}
+    report = ModemDiscoveryReport(at_port="/dev/ttyUSB1", confidence="profile-match")
+
+    async def fake_discover(patterns, **kwargs):
+        called["patterns"] = patterns
+        called.update(kwargs)
+        return [report]
+
+    async def forbidden_probe(*_args, **_kwargs):
+        raise AssertionError("--scan must use discover_modems, not explicit-port probe")
+
+    monkeypatch.setattr(cli, "discover_modems", fake_discover)
+    monkeypatch.setattr(cli, "probe_modem_ports", forbidden_probe)
+
+    code = cli.main([
+        "doctor",
+        "--scan",
+        "--patterns",
+        "/dev/ttyUSB*,/dev/ttyACM*",
+        "--baudrate",
+        "57600",
+        "--json",
+    ])
+
+    assert code == 0
+    assert called["patterns"] == ("/dev/ttyUSB*", "/dev/ttyACM*")
+    assert called["baudrate"] == 57600
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["at_port"] == "/dev/ttyUSB1"
+    assert payload["config_preview"] == {
+        "CALLSTACK_AT_PORT": "/dev/ttyUSB1",
+        "CALLSTACK_AUDIO_PORT": None,
+    }
+
+
+def test_doctor_scan_rejects_explicit_ports_before_any_probe(monkeypatch, capsys):
+    import callstack.cli as cli
+
+    async def forbidden_probe(*_args, **_kwargs):
+        raise AssertionError("conflicting flags must fail before probing")
+
+    monkeypatch.setattr(cli, "discover_modems", forbidden_probe)
+    monkeypatch.setattr(cli, "probe_modem_ports", forbidden_probe)
+
+    code = cli.main(["doctor", "--scan", "--ports", "/dev/known", "--json"])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "cannot combine --scan and --ports" in captured.err
+    assert "Traceback" not in captured.err
+
+
 def test_doctor_json_uses_probe_and_serializes_pii_safe_report(monkeypatch, capsys):
     import callstack.cli as cli
 
@@ -755,6 +821,10 @@ def test_doctor_json_uses_probe_and_serializes_pii_safe_report(monkeypatch, caps
         "capabilities": asdict(report.capabilities),
         "confidence": "profile-match",
         "notes": list(report.notes),
+        "config_preview": {
+            "CALLSTACK_AT_PORT": "/dev/fakeAT",
+            "CALLSTACK_AUDIO_PORT": None,
+        },
     }
 
 
@@ -786,6 +856,9 @@ def test_doctor_human_output_includes_safe_summary_capabilities_notes_and_safety
     assert "Model: EC25" in output
     assert "sms_text_mode: supported" in output
     assert "voice_calls: unknown" in output
+    assert "Config preview:" in output
+    assert "CALLSTACK_AT_PORT=/dev/fakeAT" in output
+    assert "CALLSTACK_AUDIO_PORT=unknown" in output
     assert "Quectel-like identity matched" in output
     assert "no SMS, USSD, call, SIM unlock, or storage commands were sent" in output
 

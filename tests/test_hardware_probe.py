@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 
-from callstack.hardware.probe import SAFE_PROBE_COMMANDS, probe_modem_ports
+from callstack.hardware.probe import SAFE_PROBE_COMMANDS, discover_modems, probe_modem_ports
 from callstack.transport.base import Transport
 
 
@@ -226,3 +226,116 @@ async def test_probe_returns_pii_safe_unknown_report_when_no_candidate_responds(
     assert report.identity.manufacturer == ""
     assert set(report.capabilities.__dict__.values()) == {"unknown"}
     assert any("no responsive modem" in note.lower() for note in report.notes)
+
+
+async def test_discover_modems_uses_injected_patterns_and_returns_safe_scan_report():
+    """Opt-in host scans enumerate candidates through an injectable globber."""
+    no_response = ScriptedTransport({"AT": ["AT"]})
+    good = ScriptedTransport(
+        {
+            "AT": ["OK"],
+            "ATI": ["Quectel", "EC25", "OK"],
+            "AT+GMI": ["Quectel", "OK"],
+            "AT+GMM": ["EC25", "OK"],
+            "AT+GMR": ["EC25EFAR06A08M4G", "OK"],
+        }
+    )
+    transports = {
+        "/dev/ttyUSB0": no_response,
+        "/dev/ttyUSB1": good,
+    }
+    glob_calls = []
+
+    def fake_glob(pattern: str) -> list[str]:
+        glob_calls.append(pattern)
+        if pattern == "/dev/ttyUSB*":
+            return ["/dev/ttyUSB1", "/dev/ttyUSB0"]
+        if pattern == "/dev/ttyACM*":
+            return ["/dev/ttyUSB1"]
+        raise AssertionError(f"unexpected pattern: {pattern}")
+
+    reports = await discover_modems(
+        patterns=("/dev/ttyUSB*", "/dev/ttyACM*"),
+        path_glob=fake_glob,
+        transport_opener=lambda port: transports[port],
+        command_timeout=0.001,
+    )
+
+    assert glob_calls == ["/dev/ttyUSB*", "/dev/ttyACM*"]
+    assert len(reports) == 1
+    report = reports[0]
+    assert report.at_port == "/dev/ttyUSB1"
+    assert report.audio_port is None
+    assert report.identity.manufacturer == "Quectel"
+    assert report.capabilities.ussd == "supported"
+    assert any("2 candidate" in note for note in report.notes)
+    assert no_response.closed is True
+    assert good.closed is True
+    assert tuple(good.writes) == SAFE_PROBE_COMMANDS
+
+
+async def test_discover_modems_reports_when_scan_patterns_match_no_ports():
+    reports = await discover_modems(
+        patterns=("/tmp/no-modems*",),
+        path_glob=lambda pattern: [],
+        command_timeout=0.001,
+    )
+
+    assert len(reports) == 1
+    report = reports[0]
+    assert report.at_port == ""
+    assert report.confidence == "no-response"
+    assert any("no candidate" in note.lower() for note in report.notes)
+
+
+async def test_probe_ranks_identity_response_above_attention_only_candidate():
+    attention_only = ScriptedTransport(
+        {
+            "AT": ["OK"],
+            "ATI": ["ERROR"],
+            "AT+GMI": ["ERROR"],
+            "AT+GMM": ["ERROR"],
+            "AT+GMR": ["ERROR"],
+        }
+    )
+    identity = ScriptedTransport(
+        {
+            "AT": ["OK"],
+            "ATI": ["MysteryVendor", "MysteryModel", "OK"],
+            "AT+GMI": ["MysteryVendor", "OK"],
+            "AT+GMM": ["MysteryModel", "OK"],
+            "AT+GMR": ["ERROR"],
+        }
+    )
+    transports = {
+        "/dev/attention": attention_only,
+        "/dev/identity": identity,
+    }
+
+    report = await probe_modem_ports(
+        ["/dev/attention", "/dev/identity"],
+        transport_opener=lambda port: transports[port],
+        command_timeout=0.001,
+    )
+
+    assert report.at_port == "/dev/identity"
+    assert report.confidence == "identity-response"
+
+
+async def test_discover_modems_accepts_single_pattern_string_as_one_glob():
+    good = ScriptedTransport({"AT": ["OK"]})
+    glob_calls = []
+
+    def fake_glob(pattern: str) -> list[str]:
+        glob_calls.append(pattern)
+        return ["/dev/ttyUSB0"]
+
+    reports = await discover_modems(
+        patterns="/dev/ttyUSB*",
+        path_glob=fake_glob,
+        transport_opener=lambda port: good,
+        command_timeout=0.001,
+    )
+
+    assert glob_calls == ["/dev/ttyUSB*"]
+    assert reports[0].at_port == "/dev/ttyUSB0"

@@ -30,7 +30,11 @@ from callstack.events.types import (
     USSDResponseEvent,
 )
 from callstack.hardware.discovery import ModemDiscoveryReport
-from callstack.hardware.probe import probe_modem_ports
+from callstack.hardware.probe import (
+    DEFAULT_DISCOVERY_PATTERNS,
+    discover_modems,
+    probe_modem_ports,
+)
 from callstack.modem import Modem
 
 
@@ -135,6 +139,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "Comma-separated candidate AT serial ports to probe; "
             "defaults to the configured --at-port and performs no automatic hardware scan"
         ),
+    )
+    doctor_parser.add_argument(
+        "--scan",
+        action="store_true",
+        help="Opt in to scanning serial device patterns instead of only the configured AT port",
+    )
+    doctor_parser.add_argument(
+        "--patterns",
+        default=",".join(DEFAULT_DISCOVERY_PATTERNS),
+        help="Comma-separated glob patterns used only with --scan",
     )
     doctor_parser.add_argument("--json", action="store_true", dest="as_json", help="Emit machine-readable JSON")
 
@@ -253,6 +267,10 @@ def _print_human_status(payload: dict[str, Any]) -> None:
 
 def _parse_ports(value: str) -> list[str]:
     return [port.strip() for port in value.split(",") if port.strip()]
+
+
+def _parse_patterns(value: str) -> tuple[str, ...]:
+    return tuple(pattern.strip() for pattern in value.split(",") if pattern.strip())
 
 
 def _parse_monitor_events(value: str) -> tuple[str, ...]:
@@ -381,6 +399,10 @@ def _doctor_payload(report: ModemDiscoveryReport) -> dict[str, Any]:
         "capabilities": asdict(report.capabilities),
         "confidence": report.confidence,
         "notes": list(report.notes),
+        "config_preview": {
+            "CALLSTACK_AT_PORT": report.at_port or None,
+            "CALLSTACK_AUDIO_PORT": report.audio_port,
+        },
     }
 
 
@@ -401,6 +423,9 @@ def _print_human_doctor(report: ModemDiscoveryReport) -> None:
     print("Capabilities:")
     for capability in fields(capabilities):
         print(f"  {capability.name}: {getattr(capabilities, capability.name)}")
+    print("Config preview:")
+    print(f"  CALLSTACK_AT_PORT={_unknown(report.at_port)}")
+    print(f"  CALLSTACK_AUDIO_PORT={_unknown(report.audio_port)}")
     print("Notes:")
     if report.notes:
         for note in report.notes:
@@ -442,8 +467,17 @@ async def _send(args: argparse.Namespace) -> int:
 
 async def _doctor(args: argparse.Namespace) -> int:
     config = _config_from_args(args)
-    ports = _parse_ports(args.ports) if args.ports else [config.at_port]
-    report = await probe_modem_ports(ports, baudrate=config.baudrate)
+    if args.scan and args.ports:
+        raise ConfigError("cannot combine --scan and --ports; use one discovery mode")
+    if args.scan:
+        reports = await discover_modems(
+            patterns=_parse_patterns(args.patterns),
+            baudrate=config.baudrate,
+        )
+        report = reports[0]
+    else:
+        ports = _parse_ports(args.ports) if args.ports else [config.at_port]
+        report = await probe_modem_ports(ports, baudrate=config.baudrate)
     if args.as_json:
         print(json.dumps(_doctor_payload(report)))
     else:
