@@ -45,6 +45,8 @@ pip install -e ".[sqlite]"
 
 ### Basic Usage
 
+SMS examples below use `5551234` as a dummy local test recipient; replace it only with a controlled test number when running against real hardware, and never publish real SIM or customer numbers in docs, logs, issues, or PRs.
+
 ```python
 import asyncio
 from callstack import Modem, ModemConfig
@@ -89,7 +91,7 @@ Endpoints:
 - `GET /healthz` — Return a public-safe readiness payload with modem connectivity, uptime, and SMS-store readiness
 - `GET /metrics` — Return Prometheus text metrics with aggregate counters/gauges only; labels and values intentionally avoid phone numbers, SMS bodies, USSD payloads, SIM identifiers, API keys, and raw modem identifiers
 
-If `create_app(..., api_keys=[...])` is configured, HTTP requests must include an `Authorization` bearer-token header (for example, `Authorization: Bearer ***`) and are rate-limited per key.
+If `create_app(..., api_keys=[...])` is configured, HTTP requests must include an `Authorization` header containing the configured bearer token, and requests are rate-limited per key. Do not expose the HTTP server beyond localhost without API keys or an equivalent trusted network boundary; deployment-safe auth defaults remain tracked separately in issue #4.
 
 ### CLI
 

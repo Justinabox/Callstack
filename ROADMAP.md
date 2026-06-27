@@ -68,7 +68,7 @@
 
 Prefer these small, reviewable slices before broad realtime/dashboard expansion:
 
-1. Auth and secret hygiene: redacted environment config (#58), privacy-safe default logging (#61), and deployment-safe auth defaults.
+1. Auth and secret hygiene: redacted environment config (#58), privacy-safe default logging (#61), and deployment-safe auth defaults (#4).
 2. SMS correctness: text-mode inbound body fidelity (#72), multipart reassembly/finality (#10), delivery-report edge cases, and continued recipient-validation regression coverage.
 3. Webhook safety: URL admission and dispatch hardening (#47), signed delivery with retry/backoff (#21), and bounded error logs.
 4. Operator DX: reconcile the shipped safe doctor command with its tracking issue (#57), then add PII-safe `callstack monitor` (#50), production-safe health/metrics deployment notes, and explicit modem discovery/autoconnect follow-ups (#11).
