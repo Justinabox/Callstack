@@ -304,6 +304,8 @@ class CallSession:
         stop_on_dtmf: bool = False,
     ) -> str:
         """Record caller audio to a WAV file."""
+        if not self.is_active:
+            raise RuntimeError("Cannot record without an active call")
         return await self.service._audio.record(
             output_path, max_duration, stop_on_dtmf
         )

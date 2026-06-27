@@ -5,14 +5,16 @@ import struct
 import tempfile
 import wave
 import os
+from typing import cast
 
 import pytest
 from callstack.transport.mock import MockTransport
 from callstack.events.bus import EventBus
-from callstack.events.types import DTMFEvent
+from callstack.events.types import DTMFEvent, CallState
 from callstack.voice.player import AudioPlayer
 from callstack.voice.audio import AudioPipeline
-from callstack.errors import AudioFormatError
+from callstack.voice.service import CallService, CallSession
+from callstack.errors import AudioFormatError, AudioPipelineError
 
 
 def _make_wav(path: str, rate: int = 8000, channels: int = 1,
@@ -159,6 +161,30 @@ class TestAudioPipeline:
             assert wf.getframerate() == 8000
             assert wf.getnchannels() == 1
             assert wf.getsampwidth() == 2
+
+    async def test_record_fails_closed_when_pipeline_is_not_running(
+        self, pipeline, tmp_path
+    ):
+        output = tmp_path / "inactive-recording.wav"
+
+        with pytest.raises(AudioPipelineError, match="Audio pipeline is not running"):
+            await pipeline.record(str(output), max_duration=0.1)
+
+        assert not output.exists()
+
+    async def test_session_record_propagates_inactive_audio_failure(
+        self, pipeline, tmp_path
+    ):
+        service = cast(CallService, type(
+            "Service",
+            (),
+            {"_audio": pipeline, "state": CallState.ACTIVE, "active_call": None},
+        )())
+        session = CallSession(number="5551234", direction="inbound", service=service)
+        setattr(service, "active_call", session)
+
+        with pytest.raises(AudioPipelineError, match="Audio pipeline is not running"):
+            await session.record(str(tmp_path / "session-recording.wav"), max_duration=0.1)
 
     async def test_record_stops_on_dtmf(self, pipeline, transport, bus, tmp_path):
         output = str(tmp_path / "recording.wav")
