@@ -4,7 +4,7 @@ import asyncio
 from typing import Any, cast
 
 from callstack.events.bus import EventBus
-from callstack.events.types import DTMFEvent
+from callstack.events.types import CallState, DTMFEvent
 from callstack.voice.service import CallSession
 
 
@@ -27,6 +27,8 @@ class _FakeAudio:
 
 class _FakeService:
     def __init__(self):
+        self.state = CallState.ACTIVE
+        self.active_call: CallSession | None = None
         self._bus = EventBus()
         self._audio = _FakeAudio()
 
@@ -34,6 +36,7 @@ class _FakeService:
 async def _make_running_play_and_collect(timeout: float = 0.02):
     service = _FakeService()
     session = CallSession(number="unknown", direction="inbound", service=cast(Any, service))
+    service.active_call = session
     task = asyncio.create_task(
         session.play_and_collect("menu.wav", timeout=timeout, interrupt=True)
     )

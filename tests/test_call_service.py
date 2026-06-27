@@ -864,6 +864,109 @@ class TestCallSession:
 
         assert service._audio.record_calls == []
 
+    @pytest.mark.parametrize(
+        ("method_name", "args"),
+        [
+            ("play", ("prompt.wav",)),
+            ("play_sequence", (["a.wav", "b.wav"],)),
+            ("play_loop", ("hold.wav",)),
+        ],
+    )
+    async def test_playback_rejects_stale_session_before_audio_write(
+        self, method_name, args
+    ):
+        class FakeAudio:
+            def __init__(self):
+                self.calls = []
+
+            async def play_file(self, path, cancel=None):
+                self.calls.append(("play_file", path, cancel))
+
+            async def play_sequence(self, paths, cancel=None):
+                self.calls.append(("play_sequence", paths, cancel))
+
+            async def play_loop(self, path, cancel=None):
+                self.calls.append(("play_loop", path, cancel))
+
+        class FakeService:
+            def __init__(self):
+                self.state = CallState.ACTIVE
+                self.active_call: object | None = None
+                self._audio = FakeAudio()
+
+        service = FakeService()
+        stale_session = CallSession(
+            number="5551234", direction="inbound", service=cast(CallService, service)
+        )
+        current_session = CallSession(
+            number="5555678", direction="inbound", service=cast(CallService, service)
+        )
+        service.active_call = current_session
+
+        with pytest.raises(RuntimeError, match="active call"):
+            await getattr(stale_session, method_name)(*args)
+
+        assert service._audio.calls == []
+
+    @pytest.mark.parametrize(
+        ("method_name", "args"),
+        [
+            ("play", ("prompt.wav",)),
+            ("play_sequence", (["a.wav", "b.wav"],)),
+            ("play_loop", ("hold.wav",)),
+        ],
+    )
+    async def test_playback_cancel_event_sets_when_session_becomes_stale(
+        self, method_name, args
+    ):
+        class FakeAudio:
+            def __init__(self):
+                self.started = asyncio.Event()
+                self.can_check_cancel = asyncio.Event()
+                self.cancel_seen = False
+                self.calls = []
+
+            async def _wait_for_cancel(self, name, cancel=None):
+                self.started.set()
+                await self.can_check_cancel.wait()
+                self.cancel_seen = cancel is not None and cancel.is_set()
+                if not self.cancel_seen:
+                    self.calls.append(name)
+
+            async def play_file(self, path, cancel=None):
+                await self._wait_for_cancel("play_file", cancel)
+
+            async def play_sequence(self, paths, cancel=None):
+                await self._wait_for_cancel("play_sequence", cancel)
+
+            async def play_loop(self, path, cancel=None):
+                await self._wait_for_cancel("play_loop", cancel)
+
+        class FakeService:
+            def __init__(self):
+                self.state = CallState.ACTIVE
+                self.active_call: object | None = None
+                self._audio = FakeAudio()
+
+        service = FakeService()
+        session = CallSession(
+            number="5551234", direction="inbound", service=cast(CallService, service)
+        )
+        replacement_session = CallSession(
+            number="5555678", direction="inbound", service=cast(CallService, service)
+        )
+        service.active_call = session
+
+        playback = asyncio.create_task(getattr(session, method_name)(*args))
+        await service._audio.started.wait()
+        service.active_call = replacement_session
+        await asyncio.sleep(0.03)
+        service._audio.can_check_cancel.set()
+        await asyncio.wait_for(playback, timeout=0.1)
+
+        assert service._audio.cancel_seen is True
+        assert service._audio.calls == []
+
     async def test_send_dtmf_rejects_inactive_session_before_modem_write(self):
         class FakeAT:
             def __init__(self):
