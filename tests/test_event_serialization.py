@@ -4,12 +4,16 @@ import json
 from datetime import datetime, timezone
 
 from callstack.events.types import (
+    CallerIDEvent,
     CallState,
     CallStateEvent,
+    DTMFEvent,
     IncomingSMSEvent,
     ModemDisconnectedEvent,
     ModemReconnectedEvent,
+    RingEvent,
     SMSDeliveryReportEvent,
+    SMSSentEvent,
     SignalQualityEvent,
     USSDResponseEvent,
 )
@@ -101,13 +105,52 @@ def test_delivery_report_event_replaces_unbounded_status_with_unknown():
     )
 
 
+def test_sms_sent_event_serializes_reference_and_masked_recipient():
+    event = SMSSentEvent(
+        timestamp=TS,
+        recipient="+155****4321",
+        reference=99,
+    )
+
+    payload = serialize_event(event)
+
+    assert payload == {
+        "type": "sms.sent",
+        "timestamp": "2026-06-27T12:00:00Z",
+        "data": {
+            "recipient": "+***4321",
+            "reference": 99,
+        },
+    }
+    _assert_json_does_not_leak_private_values(payload, "+155****4321")
+
+
 def test_call_and_modem_state_events_serialize_as_bounded_status_payloads():
     assert serialize_event(CallStateEvent(timestamp=TS, state=CallState.ACTIVE)) == {
         "type": "call.state",
         "timestamp": "2026-06-27T12:00:00Z",
         "data": {"state": "active"},
     }
-    assert serialize_event(ModemDisconnectedEvent(timestamp=TS, reason="USB EOF for +15551230000")) == {
+    assert serialize_event(RingEvent(timestamp=TS)) == {
+        "type": "call.ring",
+        "timestamp": "2026-06-27T12:00:00Z",
+        "data": {},
+    }
+    caller_payload = serialize_event(CallerIDEvent(timestamp=TS, number="+155****7890"))
+    assert caller_payload == {
+        "type": "call.caller_id",
+        "timestamp": "2026-06-27T12:00:00Z",
+        "data": {"number": "+***7890"},
+    }
+    _assert_json_does_not_leak_private_values(caller_payload, "+155****7890")
+    dtmf_payload = serialize_event(DTMFEvent(timestamp=TS, digit="#"))
+    assert dtmf_payload == {
+        "type": "call.dtmf",
+        "timestamp": "2026-06-27T12:00:00Z",
+        "data": {"digit": "[redacted]"},
+    }
+    _assert_json_does_not_leak_private_values(dtmf_payload, "#")
+    assert serialize_event(ModemDisconnectedEvent(timestamp=TS, reason="USB EOF for +155****0000")) == {
         "type": "modem.state",
         "timestamp": "2026-06-27T12:00:00Z",
         "data": {"connected": False},

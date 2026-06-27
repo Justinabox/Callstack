@@ -11,12 +11,16 @@ from datetime import timezone
 from typing import Any
 
 from callstack.events.types import (
+    CallerIDEvent,
     CallStateEvent,
+    DTMFEvent,
     Event,
     IncomingSMSEvent,
     ModemDisconnectedEvent,
     ModemReconnectedEvent,
+    RingEvent,
     SMSDeliveryReportEvent,
+    SMSSentEvent,
     SignalQualityEvent,
     USSDResponseEvent,
 )
@@ -66,8 +70,31 @@ def serialize_event(event: Event) -> EventEnvelope:
             },
         )
 
+    if isinstance(event, SMSSentEvent):
+        return _envelope(
+            event,
+            "sms.sent",
+            {
+                "recipient": redact_phone_number(event.recipient),
+                "reference": event.reference,
+            },
+        )
+
     if isinstance(event, CallStateEvent):
         return _envelope(event, "call.state", {"state": event.state.name.lower()})
+
+    if isinstance(event, RingEvent):
+        return _envelope(event, "call.ring", {})
+
+    if isinstance(event, CallerIDEvent):
+        return _envelope(
+            event,
+            "call.caller_id",
+            {"number": redact_phone_number(event.number)},
+        )
+
+    if isinstance(event, DTMFEvent):
+        return _envelope(event, "call.dtmf", {"digit": "[redacted]"})
 
     if isinstance(event, ModemDisconnectedEvent):
         return _envelope(event, "modem.state", {"connected": False})
