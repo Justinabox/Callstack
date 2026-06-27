@@ -379,6 +379,166 @@ async def test_receive_cmti_store_failure_does_not_delete_sim_slot(executor, tra
     assert [command.strip() for command in transport.all_written] == ["AT+CMGR=3"]
 
 
+async def test_receive_cmti_delete_failure_surfaces_cleanup_without_rolling_back(
+    sms_service, transport, bus, store, caplog
+):
+    """Failed SIM cleanup remains visible after local SMS acceptance."""
+    sender = "+155****9876"
+    body = "private code 123456"
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+    transport.feed(
+        f'+CMGR: "REC UNREAD","{sender}","","24/12/25,14:30:00+04"',
+        body,
+        "OK",
+    )
+    transport.feed("ERROR")  # AT+CMGD cleanup failed after save.
+
+    with caplog.at_level(logging.INFO, logger="callstack.sms"):
+        await sms_service._on_incoming(_RawSMSNotification(raw='+CMTI: "SM",3'))
+        await asyncio.sleep(0.01)
+
+    assert await store.count() == 1
+    assert len(received) == 1
+    assert received[0].sender == sender
+    assert received[0].body == body
+    assert [command.strip() for command in transport.all_written] == [
+        "AT+CMGR=3",
+        "AT+CMGD=3",
+    ]
+    assert "Failed to delete SIM SMS slot after local acceptance" in caplog.text
+    assert "storage=SM" in caplog.text
+    assert "index=3" in caplog.text
+    assert "Incoming SMS from" in caplog.text
+    assert sender not in caplog.text
+    assert body not in caplog.text
+
+
+async def test_receive_cmti_retry_for_uncleared_slot_does_not_duplicate_local_sms(
+    sms_service, transport, bus, store
+):
+    """A repeated CMTI for an accepted uncleared slot retries cleanup only."""
+    sender = "+155****9876"
+    body = "private code 123456"
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+    transport.feed(
+        f'+CMGR: "REC UNREAD","{sender}","","24/12/25,14:30:00+04"',
+        body,
+        "OK",
+    )
+    transport.feed("ERROR")  # Initial AT+CMGD cleanup failed after save.
+
+    await sms_service._on_incoming(_RawSMSNotification(raw='+CMTI: "SM",3'))
+    await asyncio.sleep(0.01)
+    assert await store.count() == 1
+    assert len(received) == 1
+
+    transport.feed(
+        f'+CMGR: "REC UNREAD","{sender}","","24/12/25,14:30:00+04"',
+        body,
+        "OK",
+    )
+    transport.feed("OK")  # Retry cleanup for the same already-accepted SMS.
+    await sms_service._on_incoming(_RawSMSNotification(raw='+CMTI: "SM",3'))
+    await asyncio.sleep(0.01)
+
+    assert await store.count() == 1
+    assert len(received) == 1
+    assert [command.strip() for command in transport.all_written] == [
+        "AT+CMGR=3",
+        "AT+CMGD=3",
+        "AT+CMGR=3",
+        "AT+CMGD=3",
+    ]
+
+
+async def test_receive_cmti_uncleared_slot_reuse_still_accepts_new_sms(
+    sms_service, transport, bus, store
+):
+    """Slot cleanup tracking must not drop a later SMS that reuses the same index."""
+    first_sender = "+155****9876"
+    second_sender = "+155****5432"
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+    transport.feed(
+        f'+CMGR: "REC UNREAD","{first_sender}","","24/12/25,14:30:00+04"',
+        "first private code",
+        "OK",
+    )
+    transport.feed("ERROR")
+    await sms_service._on_incoming(_RawSMSNotification(raw='+CMTI: "SM",3'))
+    await asyncio.sleep(0.01)
+
+    transport.feed(
+        f'+CMGR: "REC UNREAD","{second_sender}","","24/12/25,14:35:00+04"',
+        "second private code",
+        "OK",
+    )
+    transport.feed("OK")
+    await sms_service._on_incoming(_RawSMSNotification(raw='+CMTI: "SM",3'))
+    await asyncio.sleep(0.01)
+
+    assert await store.count() == 2
+    assert [event.body for event in received] == [
+        "first private code",
+        "second private code",
+    ]
+    assert [command.strip() for command in transport.all_written] == [
+        "AT+CMGR=3",
+        "AT+CMGD=3",
+        "AT+CMGR=3",
+        "AT+CMGD=3",
+    ]
+
+
+async def test_receive_cmti_delete_exception_surfaces_cleanup_without_private_echo(
+    sms_service, transport, bus, store, caplog, monkeypatch
+):
+    """Delete transport failures are cleanup failures, not SMS receive rollbacks."""
+    sender = "+155****9876"
+    body = "private code 123456"
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    async def fail_delete(index):
+        raise TimeoutError(f"timed out deleting {sender} {body}")
+
+    bus.subscribe(IncomingSMSEvent, track)
+    monkeypatch.setattr(sms_service, "delete_message", fail_delete)
+    transport.feed(
+        f'+CMGR: "REC UNREAD","{sender}","","24/12/25,14:30:00+04"',
+        body,
+        "OK",
+    )
+
+    with caplog.at_level(logging.INFO, logger="callstack.sms"):
+        await sms_service._on_incoming(_RawSMSNotification(raw='+CMTI: "SM",3'))
+        await asyncio.sleep(0.01)
+
+    assert await store.count() == 1
+    assert len(received) == 1
+    assert "Failed to delete SIM SMS slot after local acceptance" in caplog.text
+    assert "TimeoutError" in caplog.text
+    assert "Incoming SMS from" in caplog.text
+    assert sender not in caplog.text
+    assert body not in caplog.text
+
+
 async def test_receive_cmti_info_log_redacts_sender_number(sms_service, transport, bus, caplog):
     """Stored incoming SMS logs must not expose the raw sender number."""
     sender = "+155****2468"
