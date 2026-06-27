@@ -428,9 +428,12 @@ def _parse_cmgr_status_report(line: str) -> Optional[tuple[int, str, str]]:
     except ValueError:
         return None
 
-    if status_code == 0:
+    # TP-ST status grouping per 3GPP TS 23.040 section 9.2.3.15:
+    # 0x00..0x1f completed, 0x20..0x3f temporary error/SC still trying,
+    # and 0x40+ final failure or reserved ranges.
+    if 0 <= status_code <= 0x1F:
         status = "delivered"
-    elif 1 <= status_code <= 31:
+    elif 0x20 <= status_code <= 0x3F:
         status = "pending"
     else:
         status = "failed"
