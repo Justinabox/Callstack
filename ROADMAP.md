@@ -59,8 +59,8 @@
 ## Phase 4 — Developer Experience (v0.5)
 
 ### CLI Tool
-- Shipped: `callstack send`, `callstack status`, safe `callstack doctor`, and PII-safe `callstack monitor`.
-- Planned: packaged `callstack serve`, active modem scan/config preview, richer config/env loading, and deployment-friendly examples.
+- Shipped: `callstack send`, `callstack status`, safe `callstack doctor`, PII-safe `callstack monitor`, and packaged `callstack serve` for HTTP server mode.
+- Planned: active modem scan/config preview, richer config/env loading, systemd-style deployment examples, and production-safe health/metrics scrape guidance.
 
 ---
 
@@ -72,7 +72,7 @@ Prefer these small, reviewable slices before broad realtime/dashboard expansion:
 2. SMS correctness: text-mode inbound body fidelity (#72), multipart receive/send finality (#10/#100), delivery-report cleanup (#148), and continued recipient-validation regression coverage.
 3. Modem safety: SIM-readiness fail-closed behavior (#142) and conservative active modem scan/config preview (#11) before unattended deployments.
 4. Webhook safety: URL admission and dispatch hardening (#47), signed delivery with retry/backoff (#21), and bounded error logs.
-5. Operator DX: keep shipped `callstack doctor` and `callstack monitor` docs aligned with code, then add packaged `callstack serve` (#140) and production-safe health/metrics deployment notes.
+5. Operator DX: keep shipped `callstack doctor`, `callstack monitor`, and `callstack serve` docs aligned with code, then add active scan/config preview and production-safe health/metrics deployment notes.
 6. Realtime and PBX: WebSocket event streaming (#31), scheduled SMS (#49), pre-answer routing (#40), voicemail helpers (#41), and IVR/DTMF hardening once SMS/security foundations stay green.
 
 ### Plugin/Middleware System
@@ -111,7 +111,7 @@ Prefer these small, reviewable slices before broad realtime/dashboard expansion:
 | P0 | Multi-Part SMS Reassembly | Medium | High | UDH parser done; service integration next |
 | P0 | SMS/security hardening | Small-Medium | High | Continue recipient validation, text-mode fidelity, auth, redaction, and webhook safety |
 | P1 | WebSocket Feed | Medium | High | Planned after SMS/security foundations |
-| P1 | PII-safe CLI monitor | Low-Medium | Medium | ✅ Shipped; next CLI DX is packaged serve/config helpers |
+| P1 | PII-safe CLI monitor + serve DX | Low-Medium | Medium | ✅ Shipped; next CLI DX is active scan/config preview and deployment examples |
 | P1 | Modem Auto-Detection | Medium | High | Safe explicit-port doctor shipped; active scanning/assignment planned |
 | P2 | Voicemail System | Medium | High | Planned |
 | P2 | GPS/GNSS | Medium | High | Planned |
