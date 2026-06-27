@@ -514,15 +514,16 @@ class CallSession:
             )
         if not self.is_active:
             raise RuntimeError("Cannot send DTMF without an active call")
-        for index, digit in enumerate(digits):
+        commands = [ATCommand.send_dtmf(digit, duration_ms=duration_ms) for digit in digits]
+        for index, command in enumerate(commands):
             if not self.is_active:
                 raise RuntimeError("Cannot send DTMF without an active call")
             await self.service._at.execute(
-                ATCommand.send_dtmf(digit, duration_ms=duration_ms),
+                command,
                 expect=["OK"],
                 timeout=getattr(self.service, "_command_timeout", 5.0),
             )
-            if index < len(digits) - 1 and inter_digit_delay_ms:
+            if index < len(commands) - 1 and inter_digit_delay_ms:
                 await asyncio.sleep(inter_digit_delay_ms / 1000.0)
 
     async def wait_for_end(self, timeout: float | None = None) -> bool:
