@@ -1,10 +1,15 @@
 """Tests for the installable Callstack CLI."""
 
+import asyncio
 import json
 from dataclasses import asdict
 
+import pytest
+
 from callstack.config import ModemConfig
 from callstack.errors import SMSSendError
+from callstack.events.bus import EventBus
+from callstack.events.types import IncomingSMSEvent, USSDResponseEvent
 from callstack.hardware.discovery import ModemDiscoveryReport, ModemIdentity
 from callstack.hardware.profiles import classify_capabilities
 from callstack.network import RegistrationInfo, SignalInfo
@@ -62,6 +67,173 @@ def _install_fake_modem(monkeypatch):
     FakeModem.instances.clear()
     monkeypatch.setattr(cli, "Modem", FakeModem)
     return cli
+
+
+class MonitorFakeModem(FakeModem):
+    events_to_emit = []
+
+    def __init__(self, config: ModemConfig):
+        super().__init__(config)
+        self.bus = EventBus()
+
+    async def __aenter__(self):
+        await super().__aenter__()
+        asyncio.create_task(self._emit_events_after_subscribe())
+        return self
+
+    async def _emit_events_after_subscribe(self):
+        await asyncio.sleep(0)
+        for event in self.events_to_emit:
+            await self.bus.emit(event)
+
+
+def _install_monitor_fake_modem(monkeypatch, events):
+    import callstack.cli as cli
+
+    class ConfiguredMonitorFakeModem(MonitorFakeModem):
+        events_to_emit = events
+
+    FakeModem.instances.clear()
+    monkeypatch.setattr(cli, "Modem", ConfiguredMonitorFakeModem)
+    return cli
+
+
+def test_help_includes_monitor_command(capsys):
+    import callstack.cli as cli
+
+    code = cli.main(["--help"])
+
+    assert code == 0
+    output = capsys.readouterr().out
+    assert "monitor" in output
+
+
+def test_monitor_help_includes_filter_json_once_and_config_flags(capsys):
+    import callstack.cli as cli
+
+    code = cli.main(["monitor", "--help"])
+
+    assert code == 0
+    output = capsys.readouterr().out
+    assert "--json" in output
+    assert "--events" in output
+    assert "--once" in output
+    assert "--at-port" in output
+
+
+def test_monitor_rejects_unknown_event_filter(capsys):
+    import callstack.cli as cli
+
+    code = cli.main(["monitor", "--events", "sms.received,private.raw", "--once", "1"])
+
+    captured = capsys.readouterr()
+    assert code != 0
+    assert "private.raw" in captured.err
+    assert "sms.received" in captured.err
+
+
+def test_monitor_rejects_empty_event_filter_component(capsys):
+    import callstack.cli as cli
+
+    with pytest.raises(SystemExit):
+        cli._build_parser().parse_args(
+            ["monitor", "--events", "sms.received,,ussd.response", "--once", "1"]
+        )
+
+    captured = capsys.readouterr()
+    assert "empty" in captured.err
+    assert "--events" in captured.err
+
+
+def test_monitor_queue_size_is_bounded():
+    import callstack.cli as cli
+
+    assert cli._MONITOR_QUEUE_MAXSIZE <= 100
+
+
+def test_monitor_overflow_notice_does_not_satisfy_once_limit(monkeypatch, capsys):
+    import callstack.cli as cli
+
+    monkeypatch.setattr(cli, "_MONITOR_QUEUE_MAXSIZE", 2)
+    events = [
+        IncomingSMSEvent(sender="+155****4567", body=f"secret {index}", raw="raw secret")
+        for index in range(4)
+    ]
+    _install_monitor_fake_modem(monkeypatch, events)
+
+    code = cli.main(["monitor", "--events", "sms.received", "--json", "--once", "1"])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    lines = [json.loads(line) for line in captured.out.strip().splitlines()]
+    assert [line["type"] for line in lines] == ["monitor.overflow", "sms.received"]
+    assert all("secret" not in line for line in captured.out.splitlines())
+
+
+def test_monitor_overflow_finite_once_keeps_enough_real_events(monkeypatch, capsys):
+    import callstack.cli as cli
+
+    monkeypatch.setattr(cli, "_MONITOR_QUEUE_MAXSIZE", 2)
+    events = [
+        IncomingSMSEvent(sender="+155****4567", body=f"secret {index}", raw="raw secret")
+        for index in range(4)
+    ]
+    _install_monitor_fake_modem(monkeypatch, events)
+    args = cli._build_parser().parse_args(
+        ["monitor", "--events", "sms.received", "--json", "--once", "2"]
+    )
+
+    async def run_with_timeout():
+        return await asyncio.wait_for(cli._run(args), timeout=0.2)
+
+    assert asyncio.run(run_with_timeout()) == 0
+    output = capsys.readouterr().out
+    lines = [json.loads(line) for line in output.strip().splitlines()]
+    assert [line["type"] for line in lines] == ["sms.received", "sms.received"]
+    assert "secret" not in output
+    assert "raw secret" not in output
+
+
+def test_monitor_json_outputs_selected_sanitized_event_and_cleans_up(monkeypatch, capsys):
+    secret_body = "secret passcode 1234"
+    raw_private = "+CMT: private raw line"
+    events = [
+        IncomingSMSEvent(sender="+15551234567", body=secret_body, raw=raw_private),
+        USSDResponseEvent(status=0, message="private balance is $100", encoding=15),
+    ]
+    cli = _install_monitor_fake_modem(monkeypatch, events)
+
+    code = cli.main(["monitor", "--events", "sms.received", "--json", "--once", "1"])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    lines = captured.out.strip().splitlines()
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert payload["type"] == "sms.received"
+    assert payload["data"]["body"] == "[redacted]"
+    assert payload["data"]["body_length"] == len(secret_body)
+    assert secret_body not in captured.out
+    assert raw_private not in captured.out
+    modem = FakeModem.instances[0]
+    assert modem.closed is True
+    assert all(not handlers for handlers in modem.bus._subscribers.values())
+
+
+def test_monitor_human_outputs_sanitized_line(monkeypatch, capsys):
+    secret_message = "private account balance and phone details"
+    cli = _install_monitor_fake_modem(
+        monkeypatch,
+        [USSDResponseEvent(status=0, message=secret_message, encoding=15)],
+    )
+
+    code = cli.main(["monitor", "--events", "ussd.response", "--once", "1"])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "ussd response" in captured.out
+    assert "message_length=" in captured.out
+    assert secret_message not in captured.out
 
 
 def test_status_json_outputs_network_snapshot_and_maps_config_flags(monkeypatch, capsys):
