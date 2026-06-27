@@ -321,6 +321,82 @@ async def test_sqlite_clear_removes_pending_saves_before_initialize(tmp_path):
         await store.close()
 
 
+async def test_sqlite_clear_before_first_initialize_deletes_existing_rows(tmp_path):
+    pytest.importorskip("aiosqlite")
+    db_path = str(tmp_path / "sms.db")
+    existing = SMSStore(db_path=db_path)
+    try:
+        await existing.initialize()
+        await existing.save(SMS(body="persisted by previous store"))
+    finally:
+        await existing.close()
+
+    store = SMSStore(db_path=db_path)
+    try:
+        await store.clear()
+
+        assert store._db is None
+        await store.initialize()
+        assert await store.count() == 0
+        assert await store.list() == []
+    finally:
+        await store.close()
+
+
+async def test_sqlite_clear_while_open_remains_durable(tmp_path):
+    pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await store.initialize()
+        await store.save(SMS(body="persisted while open"))
+
+        await store.clear()
+        await store.close()
+        await store.initialize()
+
+        assert await store.count() == 0
+        assert await store.list() == []
+    finally:
+        await store.close()
+
+
+async def test_sqlite_clear_after_close_deletes_persisted_rows(tmp_path):
+    pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await store.initialize()
+        await store.save(SMS(body="persisted before close"))
+        await store.close()
+
+        await store.clear()
+
+        assert store._db is None
+        assert await store.count() == 0
+        await store.initialize()
+        assert await store.count() == 0
+        assert await store.list() == []
+    finally:
+        await store.close()
+
+
+async def test_sqlite_clear_after_close_discards_pending_saves(tmp_path):
+    pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await store.initialize()
+        await store.save(SMS(body="persisted before close"))
+        await store.close()
+        await store.save(SMS(body="queued while closed"))
+
+        await store.clear()
+        await store.initialize()
+
+        assert await store.count() == 0
+        assert await store.list() == []
+    finally:
+        await store.close()
+
+
 async def test_sqlite_initialize_serializes_concurrent_calls(tmp_path, monkeypatch):
     aiosqlite = pytest.importorskip("aiosqlite")
     original_connect = aiosqlite.connect

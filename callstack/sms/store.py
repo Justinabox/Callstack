@@ -1,6 +1,7 @@
 """SMS persistence: in-memory store with optional SQLite backend."""
 
 import asyncio
+import importlib
 import logging
 from typing import Optional
 
@@ -264,3 +265,17 @@ class SMSStore:
             if self._db is not None:
                 await self._db.execute("DELETE FROM messages")
                 await self._db.commit()
+            elif self._db_path is not None:
+                try:
+                    aiosqlite = importlib.import_module("aiosqlite")
+                except ImportError:
+                    logger.warning("aiosqlite not installed; SMS persistence disabled")
+                    return
+
+                db = await aiosqlite.connect(self._db_path)
+                try:
+                    await db.execute(_CREATE_TABLE)
+                    await db.execute("DELETE FROM messages")
+                    await db.commit()
+                finally:
+                    await db.close()
