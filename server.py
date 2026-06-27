@@ -17,6 +17,7 @@ from callstack import Modem, ModemConfig, CallSession, IncomingSMSEvent
 from callstack.errors import ATTimeoutError, SMSSendError, TransportError
 from callstack.events.types import SMSDeliveryReportEvent
 from callstack.metrics import CallstackMetrics
+from callstack.privacy import redact_url_for_log
 from callstack.protocol.commands import ATCommand
 
 logger = logging.getLogger("server")
@@ -253,7 +254,11 @@ async def notify_webhooks(sender: str, body: str) -> None:
             try:
                 await session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=5))
             except Exception as exc:
-                logger.warning("Webhook POST to %s failed: %s", url, exc)
+                logger.warning(
+                    "Webhook POST to %s failed: %s",
+                    redact_url_for_log(url),
+                    type(exc).__name__,
+                )
 
 
 async def main() -> None:

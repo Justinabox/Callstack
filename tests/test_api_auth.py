@@ -1,5 +1,6 @@
 """Tests for API key authentication middleware."""
 
+import logging
 import time
 from types import SimpleNamespace
 from typing import cast
@@ -152,6 +153,69 @@ class TestRateLimiting:
         assert resp.status == 429
         data = await resp.json()
         assert "Rate limit" in data["error"]
+
+
+class TestServerPrivacyLogging:
+    async def test_webhook_failure_log_redacts_url_and_exception_details(self, monkeypatch, caplog):
+        raw_url = "https://hooks.example.test/tenant/secret-token?api_key=super-secret&phone=15551234567"
+        webhook_urls_before = list(server.webhook_urls)
+        server.webhook_urls[:] = [raw_url]
+
+        class FakeClientSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def post(self, url, **_kwargs):
+                assert url == raw_url
+                raise RuntimeError("delivery failed for api_key=super-secret phone=15551234567")
+
+        monkeypatch.setattr(server.aiohttp, "ClientSession", FakeClientSession)
+
+        try:
+            with caplog.at_level(logging.WARNING, logger="server"):
+                await server.notify_webhooks("+15551234567", "private sms body secret")
+        finally:
+            server.webhook_urls[:] = webhook_urls_before
+
+        assert "Webhook POST" in caplog.text
+        assert raw_url not in caplog.text
+        assert "super-secret" not in caplog.text
+        assert "15551234567" not in caplog.text
+        assert "private sms body secret" not in caplog.text
+        assert "RuntimeError" in caplog.text
+
+    async def test_webhook_failure_log_handles_malformed_port_without_leaking(self, monkeypatch, caplog):
+        raw_url = "https://hooks.example.test:notaport/tenant?api_key=super-secret"
+        webhook_urls_before = list(server.webhook_urls)
+        server.webhook_urls[:] = [raw_url]
+
+        class FakeClientSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            async def post(self, url, **_kwargs):
+                assert url == raw_url
+                raise RuntimeError("delivery failed for api_key=super-secret")
+
+        monkeypatch.setattr(server.aiohttp, "ClientSession", FakeClientSession)
+
+        try:
+            with caplog.at_level(logging.WARNING, logger="server"):
+                await server.notify_webhooks("+15551234567", "private sms body secret")
+        finally:
+            server.webhook_urls[:] = webhook_urls_before
+
+        assert "Webhook POST" in caplog.text
+        assert raw_url not in caplog.text
+        assert "notaport" not in caplog.text
+        assert "super-secret" not in caplog.text
+        assert "private sms body secret" not in caplog.text
 
 
 class TestUSSDEndpointValidation:
