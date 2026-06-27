@@ -244,6 +244,62 @@ class TestAudioPipeline:
         recorded = await pipeline.record(output, max_duration=0.05)
         assert recorded == output
 
+    async def test_record_fails_closed_when_transport_returns_eof(
+        self, pipeline, transport, tmp_path
+    ):
+        output = tmp_path / "eof-recording.wav"
+        pipeline._running = True
+        transport.feed_raw(b"")
+
+        with pytest.raises(AudioPipelineError, match="Audio transport ended during recording"):
+            await pipeline.record(str(output), max_duration=0.1)
+
+        assert not output.exists()
+
+    async def test_record_eof_closes_audio_transport(
+        self, pipeline, transport, tmp_path
+    ):
+        output = tmp_path / "eof-transport-close.wav"
+        pipeline._running = True
+        transport._open = True
+        transport.feed_raw(b"")
+
+        with pytest.raises(AudioPipelineError, match="Audio transport ended during recording"):
+            await pipeline.record(str(output), max_duration=0.1)
+
+        assert not pipeline.running
+        assert not transport._open
+
+    async def test_record_eof_preserves_existing_output_file(
+        self, pipeline, transport, tmp_path
+    ):
+        output = tmp_path / "existing-recording.wav"
+        original = b"existing recording should survive eof"
+        output.write_bytes(original)
+        pipeline._running = True
+        transport.feed_raw(b"")
+
+        with pytest.raises(AudioPipelineError, match="Audio transport ended during recording"):
+            await pipeline.record(str(output), max_duration=0.1)
+
+        assert output.read_bytes() == original
+
+    async def test_session_record_propagates_audio_eof_failure(
+        self, pipeline, transport, tmp_path
+    ):
+        pipeline._running = True
+        transport.feed_raw(b"")
+        service = cast(CallService, type(
+            "Service",
+            (),
+            {"_audio": pipeline, "state": CallState.ACTIVE, "active_call": None},
+        )())
+        session = CallSession(number="5551234", direction="inbound", service=service)
+        setattr(service, "active_call", session)
+
+        with pytest.raises(AudioPipelineError, match="Audio transport ended during recording"):
+            await session.record(str(tmp_path / "session-eof-recording.wav"), max_duration=0.1)
+
     async def test_double_start_is_safe(self, pipeline, transport):
         transport._open = False
         await pipeline.start()
