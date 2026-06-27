@@ -102,6 +102,9 @@ class SMSService:
         self._initialized = False
         self._pending_cmt_header: Optional[str] = None
         self._accepted_uncleared_cmti_slots: dict[tuple[str, int], tuple[str, str, str]] = {}
+        self._accepted_uncleared_delivery_report_slots: dict[
+            tuple[str, int], tuple[int, str, str]
+        ] = {}
 
         # Wire raw SMS URC notifications from URC dispatcher
         bus.subscribe(_RawSMSNotification, self._on_incoming)
@@ -273,6 +276,41 @@ class SMSService:
             logger.warning("%s: storage=%s index=%d", warning, storage, index)
         return deleted
 
+    @staticmethod
+    def _delivery_report_fingerprint(
+        reference: int, recipient: str, status: str
+    ) -> tuple[int, str, str]:
+        """Identify a parsed delivery report well enough to avoid duplicate retry emits."""
+        return reference, recipient, status
+
+    async def _delete_delivery_report_slot(
+        self, storage: str, index: int, *, retry: bool = False
+    ) -> bool:
+        """Attempt delivery-report cleanup without logging report recipient or payload."""
+        warning = (
+            "Failed to delete previously accepted delivery report slot"
+            if retry
+            else "Failed to delete delivery report slot after local acceptance"
+        )
+        try:
+            resp = await self._at.execute(
+                ATCommand.delete_sms(index),
+                expect=["OK"],
+                timeout=self._command_timeout,
+            )
+        except Exception as exc:
+            logger.warning(
+                "%s: storage=%s index=%d error=%s",
+                warning,
+                storage,
+                index,
+                type(exc).__name__,
+            )
+            return False
+        if not resp.success:
+            logger.warning("%s: storage=%s index=%d", warning, storage, index)
+        return resp.success
+
     # -- Delivery Reports --
 
     async def _on_delivery_report(self, event: _RawDeliveryReport) -> None:
@@ -303,11 +341,21 @@ class SMSService:
             )
             return
 
-        await self._at.execute(
-            ATCommand.delete_sms(event.index),
-            expect=["OK"],
-            timeout=self._command_timeout,
-        )
+        slot_key = (event.storage, event.index)
+        fingerprint = self._delivery_report_fingerprint(reference, recipient, status)
+        if self._accepted_uncleared_delivery_report_slots.get(slot_key) == fingerprint:
+            deleted = await self._delete_delivery_report_slot(
+                event.storage, event.index, retry=True
+            )
+            if deleted:
+                self._accepted_uncleared_delivery_report_slots.pop(slot_key, None)
+            return
+
+        deleted = await self._delete_delivery_report_slot(event.storage, event.index)
+        if deleted:
+            self._accepted_uncleared_delivery_report_slots.pop(slot_key, None)
+        else:
+            self._accepted_uncleared_delivery_report_slots[slot_key] = fingerprint
 
         await self._bus.emit(SMSDeliveryReportEvent(
             reference=reference,
