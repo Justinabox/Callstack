@@ -15,7 +15,7 @@ from callstack.events.types import (
     DTMFEvent,
     RingEvent,
 )
-from callstack.errors import DialError, AnswerError, ATTimeoutError
+from callstack.errors import DialError, AnswerError, ATTimeoutError, ATCommandError
 from callstack.protocol.urc import URCDispatcher
 from callstack.protocol.executor import ATCommandExecutor, ATResponse
 from callstack.voice.audio import AudioPipeline
@@ -593,6 +593,64 @@ class TestCallService:
 
         assert service.state == CallState.IDLE
         assert service.active_call is None
+
+    async def test_service_hangup_signals_active_session_waiters(self, service, bus, at_transport):
+        await bus.emit(RingEvent())
+        await asyncio.sleep(0.01)
+
+        async def answer_respond():
+            await asyncio.sleep(0.01)
+            at_transport.feed("OK")
+            await asyncio.sleep(0.01)
+            at_transport.feed("OK")  # CPCMREG on
+        asyncio.create_task(answer_respond())
+        session = await service.answer()
+
+        async def hangup_respond():
+            await asyncio.sleep(0.01)
+            at_transport.feed("OK")
+            await asyncio.sleep(0.01)
+            at_transport.feed("OK")  # CPCMREG off
+        asyncio.create_task(hangup_respond())
+
+        await service.hangup()
+
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
+        assert await session.wait_for_end(timeout=0.01) is True
+
+    async def test_failed_service_hangup_response_keeps_session_active(self, bus):
+        class FailingHangupAT:
+            async def execute(self, command, **kwargs):
+                if command == "ATH":
+                    return ATResponse(success=False, lines=["ERROR"])
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeAudio:
+            running = False
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+
+        service = CallService(
+            cast(ATCommandExecutor, FailingHangupAT()),
+            cast(AudioPipeline, FakeAudio()),
+            bus,
+        )
+        await service._fsm.transition(CallState.DIALING)
+        await service._fsm.transition(CallState.ACTIVE)
+        session = CallSession(number="5551234", direction="outbound", service=service)
+        service._active_call = session
+
+        with pytest.raises(ATCommandError):
+            await service.hangup()
+
+        assert service.state == CallState.ACTIVE
+        assert service.active_call is session
+        assert await session.wait_for_end(timeout=0.01) is False
 
     async def test_remote_hangup_via_urc(self, service, bus, at_transport):
         """When remote party hangs up, VOICE CALL: END URC triggers cleanup."""
