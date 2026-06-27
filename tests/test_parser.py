@@ -67,6 +67,30 @@ def test_parse_registration_accepts_verbose_lte_fields():
     assert result == (2, 1)
 
 
+def test_parse_registration_accepts_verbose_lte_empty_optional_fields():
+    assert ATResponseParser.parse_registration('+CEREG: 2,1,"ABCD","12345678",7,,') == (2, 1)
+    assert (
+        ATResponseParser.parse_registration(
+            '+CEREG: 2,1,"ABCD","12345678",7,,,"00000001","00000110"'
+        )
+        == (2, 1)
+    )
+
+
+def test_parse_registration_accepts_verbose_packet_empty_optional_fields():
+    result = ATResponseParser.parse_registration('+CGREG: 2,5,"ABCD","12345678",7,,')
+    assert result == (2, 5)
+
+
+def test_parse_registration_rejects_malformed_leading_fields_before_verbose_tail():
+    assert ATResponseParser.parse_registration('+CEREG: 2,foo,"ABCD","12345678",7,,') is None
+
+
+def test_parse_registration_rejects_empty_only_verbose_tail():
+    assert ATResponseParser.parse_registration("+CREG: 0,1,") is None
+    assert ATResponseParser.parse_registration("+CREG: 0,1,,,") is None
+
+
 def test_parse_clip():
     result = ATResponseParser.parse_clip('+CLIP: "+155****4567",145,,,,0')
     assert result == "+155****4567"

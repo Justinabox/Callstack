@@ -185,6 +185,42 @@ class TestRegistration:
         assert info.roaming is False
         _assert_registration_family_queries(transport)
 
+    async def test_lte_registration_verbose_empty_optional_fields(self):
+        svc, transport, _ = _make_service()
+        await transport.open()
+
+        _feed_registration_responses(
+            transport,
+            creg="+CREG: 0,0",
+            cgreg="+CGREG: 0,0",
+            cereg='+CEREG: 2,1,"ABCD","12345678",7,,,"00000001","00000110"',
+        )
+        info = await svc.registration()
+
+        assert info.registered is True
+        assert info.roaming is False
+        assert info.status == 1
+        assert info.mode == 2
+        _assert_registration_family_queries(transport)
+
+    async def test_packet_registration_verbose_empty_optional_fields(self):
+        svc, transport, _ = _make_service()
+        await transport.open()
+
+        _feed_registration_responses(
+            transport,
+            creg="+CREG: 0,0",
+            cgreg='+CGREG: 2,5,"ABCD","12345678",7,,',
+            cereg="+CEREG: 0,0",
+        )
+        info = await svc.registration()
+
+        assert info.registered is True
+        assert info.roaming is True
+        assert info.status == 5
+        assert info.mode == 2
+        _assert_registration_family_queries(transport)
+
     async def test_not_registered(self):
         svc, transport, _ = _make_service()
         await transport.open()
