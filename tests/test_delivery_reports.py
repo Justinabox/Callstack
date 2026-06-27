@@ -73,12 +73,17 @@ class TestDeliveryReportService:
     @pytest.mark.parametrize(
         ("status_code", "expected_status"),
         [
-            (1, "pending"),
-            (31, "pending"),
-            (32, "failed"),
+            (1, "delivered"),
+            (2, "delivered"),
+            (31, "delivered"),
+            (32, "pending"),
+            (33, "pending"),
+            (63, "pending"),
+            (64, "failed"),
+            (96, "failed"),
         ],
     )
-    async def test_text_mode_report_maps_pending_and_failure_status_ranges(
+    async def test_text_mode_report_maps_tp_st_status_ranges(
         self, bus, urc, status_code, expected_status
     ):
         transport = MockTransport()
