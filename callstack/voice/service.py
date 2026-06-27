@@ -14,7 +14,7 @@ from callstack.events.types import (
     DTMFEvent,
     RingEvent,
 )
-from callstack.errors import DialError, AnswerError
+from callstack.errors import DialError, AnswerError, ATCommandError
 from callstack.privacy import redact_phone_number
 from callstack.protocol.executor import ATCommandExecutor
 from callstack.protocol.commands import ATCommand
@@ -126,11 +126,13 @@ class CallService:
     async def hangup(self) -> None:
         """End the current call."""
         logger.info("Hanging up")
-        await self._at.execute(
+        resp = await self._at.execute(
             ATCommand.HANGUP,
             expect=["OK", "VOICE CALL: END"],
             timeout=self._command_timeout,
         )
+        if not resp.success:
+            raise ATCommandError(ATCommand.HANGUP, resp.lines)
 
         if self._fsm.state not in (CallState.ENDED, CallState.IDLE):
             await self._fsm.transition(CallState.ENDED)
@@ -229,6 +231,8 @@ class CallService:
         async with self._audio_enable_lock:
             if self._audio.running or self._audio_bridge_registered:
                 await self._disable_audio()
+        if self._active_call:
+            self._active_call._ended.set()
         self._active_call = None
         self._pending_caller = None
         await self._reset_to_idle()
