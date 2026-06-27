@@ -56,6 +56,10 @@ class AudioFormatError(CallstackError):
     """WAV file does not match the required modem audio format."""
 
 
+class AudioPipelineError(CallstackError):
+    """Audio pipeline is unavailable for the requested operation."""
+
+
 class SIMError(CallstackError):
     """Base for SIM card errors."""
 

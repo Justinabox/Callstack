@@ -7,6 +7,7 @@ import logging
 from callstack.transport.base import Transport
 from callstack.events.bus import EventBus
 from callstack.events.types import DTMFEvent
+from callstack.errors import AudioPipelineError
 from callstack.voice.player import AudioPlayer
 
 logger = logging.getLogger("callstack.voice.audio")
@@ -73,6 +74,11 @@ class AudioPipeline:
         Returns the output path when recording finishes (on timeout,
         DTMF interrupt, or pipeline stop).
         """
+        if not self._running:
+            raise AudioPipelineError(
+                "Audio pipeline is not running; start audio before recording"
+            )
+
         stop = asyncio.Event()
 
         if stop_on_dtmf:

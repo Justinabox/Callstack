@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import wave
+from typing import cast
 import pytest
 
 from callstack.transport.mock import MockTransport
@@ -833,6 +834,35 @@ class TestCallSession:
         output = str(tmp_path / "rec.wav")
         result = await session.record(output, max_duration=0.1)
         assert result == output
+
+    async def test_record_rejects_stale_session_before_audio_read(self, tmp_path):
+        class FakeAudio:
+            def __init__(self):
+                self.record_calls = []
+
+            async def record(self, output_path, max_duration=60.0, stop_on_dtmf=False):
+                self.record_calls.append((output_path, max_duration, stop_on_dtmf))
+                return output_path
+
+        class FakeService:
+            def __init__(self):
+                self.state = CallState.ACTIVE
+                self.active_call: object | None = None
+                self._audio = FakeAudio()
+
+        service = FakeService()
+        stale_session = CallSession(
+            number="5551234", direction="inbound", service=cast(CallService, service)
+        )
+        current_session = CallSession(
+            number="5555678", direction="inbound", service=cast(CallService, service)
+        )
+        service.active_call = current_session
+
+        with pytest.raises(RuntimeError, match="active call"):
+            await stale_session.record(str(tmp_path / "stale-recording.wav"), max_duration=0.1)
+
+        assert service._audio.record_calls == []
 
     async def test_send_dtmf_rejects_inactive_session_before_modem_write(self):
         class FakeAT:
