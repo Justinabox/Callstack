@@ -21,6 +21,14 @@ from callstack.protocol.parser import ATResponseParser
 logger = logging.getLogger("callstack.urc")
 
 
+def _redact_urc_for_log(line: str) -> str:
+    stripped = line.lstrip()
+    leading = line[: len(line) - len(stripped)]
+    if stripped.upper().startswith("+CUSD:"):
+        return f"{leading}+CUSD: <redacted>"
+    return line
+
+
 class URCDispatcher:
     """Routes unsolicited result codes to typed events on the EventBus."""
 
@@ -68,7 +76,7 @@ class URCDispatcher:
             self._dispatch_to_capture_hooks(line)
             await self._dispatch_event(line, followup)
         except Exception as exc:
-            logger.exception("Error dispatching URC '%s': %s", line, exc)
+            logger.exception("Error dispatching URC '%s': %s", _redact_urc_for_log(line), exc)
 
     def _dispatch_to_capture_hooks(self, line: str) -> None:
         """Check capture hooks and collect matching lines."""
@@ -78,7 +86,7 @@ class URCDispatcher:
 
     async def _dispatch_event(self, line: str, followup: str) -> None:
         """Route a URC line to the appropriate typed event."""
-        logger.debug("URC: %s", line)
+        logger.debug("URC: %s", _redact_urc_for_log(line))
 
         if line == "RING":
             await self._bus.emit(RingEvent())
@@ -127,7 +135,7 @@ class URCDispatcher:
                     status=status, message=message, encoding=encoding
                 ))
             else:
-                logger.warning("Could not parse USSD response: %s", line)
+                logger.warning("Could not parse USSD response: %s", _redact_urc_for_log(line))
 
         elif line.startswith(("+CREG:", "+CGREG:", "+CEREG:")):
             family = line.split(":", 1)[0]
