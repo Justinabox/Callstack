@@ -56,6 +56,8 @@ class SerialTransport(Transport):
         while True:
             byte = await self._reader.read(1)
             if not byte:
+                if not buf:
+                    raise TransportError("Serial port closed (EOF)")
                 break
             buf += byte
             if byte == b"\n":

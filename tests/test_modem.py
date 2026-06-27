@@ -323,6 +323,34 @@ class TestModemURCReader:
             assert len(disconnected) >= 1
             assert "USB disconnected" in disconnected[0].reason
 
+    async def test_empty_transport_read_emits_disconnected(self):
+        """EOF-like empty lines must reach the modem disconnect callback."""
+        modem = MockModem(ModemConfig(auto_reconnect=False))
+        _feed_init_responses(modem._at_transport)
+
+        disconnected = []
+        modem.bus.subscribe(ModemDisconnectedEvent, lambda e: disconnected.append(e))
+
+        async with modem:
+            reads = 0
+
+            async def eof_readline():
+                nonlocal reads
+                reads += 1
+                await asyncio.sleep(0)
+                return b""
+
+            modem._at_transport.readline = eof_readline
+
+            for _ in range(20):
+                if disconnected:
+                    break
+                await asyncio.sleep(0.01)
+
+            assert len(disconnected) == 1
+            assert "closed" in disconnected[0].reason or "EOF" in disconnected[0].reason
+            assert reads == 1
+
 
 class TestModemAutoReconnect:
     async def test_reconnect_on_transport_error(self):
