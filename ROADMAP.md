@@ -13,7 +13,7 @@
 - ✅ Signal-quality polish: BER values now have human-readable descriptions.
 - ✅ Multipart SMS groundwork: concatenated-message UDH metadata parser for 8-bit and 16-bit references.
 - ✅ HTTP observability: `/healthz` and PII-safe Prometheus `/metrics` expose aggregate readiness and runtime counters.
-- ✅ CLI groundwork: `callstack status`, `callstack send`, and safe `callstack doctor` support local Pi operations and hardware bring-up.
+- ✅ CLI groundwork: `callstack status`, `callstack send`, safe `callstack doctor`, and PII-safe `callstack monitor` support local Pi operations, hardware bring-up, and sanitized event tailing.
 - ✅ Conservative modem profile helpers classify known modem identities without mutating hardware state.
 
 ---
@@ -29,8 +29,8 @@
 - Keep API-key authentication, bounded labels/payloads, and no raw SMS bodies, phone numbers, USSD text, SIM identifiers, or modem serials in broadcast metadata unless an explicit authenticated consumer requests them.
 
 ### Observability Follow-Ups
-- `/healthz` and `/metrics` are shipped; next observability work should focus on auth defaults, deployment config, and documenting production-safe scrape patterns.
-- Add PII-safe local event tailing through `callstack monitor`.
+- `/healthz`, `/metrics`, and PII-safe local event tailing through `callstack monitor` are shipped.
+- Next observability work should focus on deployment-safe auth defaults, production scrape guidance, and keeping realtime surfaces PII-bounded before WebSocket/dashboard expansion.
 
 ### Modem Auto-Detection
 - Safe explicit-port `callstack doctor` probing is shipped.
@@ -59,8 +59,8 @@
 ## Phase 4 — Developer Experience (v0.5)
 
 ### CLI Tool
-- Shipped: `callstack send`, `callstack status`, and safe `callstack doctor`.
-- Planned: PII-safe `callstack monitor`, richer config/env loading, and deployment-friendly examples.
+- Shipped: `callstack send`, `callstack status`, safe `callstack doctor`, and PII-safe `callstack monitor`.
+- Planned: packaged `callstack serve`, active modem scan/config preview, richer config/env loading, and deployment-friendly examples.
 
 ---
 
@@ -68,11 +68,12 @@
 
 Prefer these small, reviewable slices before broad realtime/dashboard expansion:
 
-1. Auth and secret hygiene: redacted environment config (#58), privacy-safe default logging (#61), and deployment-safe auth defaults (#4).
-2. SMS correctness: text-mode inbound body fidelity (#72), multipart reassembly/finality (#10), delivery-report edge cases, and continued recipient-validation regression coverage.
-3. Webhook safety: URL admission and dispatch hardening (#47), signed delivery with retry/backoff (#21), and bounded error logs.
-4. Operator DX: reconcile the shipped safe doctor command with its tracking issue (#57), then add PII-safe `callstack monitor` (#50), production-safe health/metrics deployment notes, and explicit modem discovery/autoconnect follow-ups (#11).
-5. Realtime and PBX: WebSocket event streaming (#31), scheduled SMS (#49), pre-answer routing (#40), voicemail helpers (#41), and IVR/DTMF hardening once SMS/security foundations stay green.
+1. Auth and secret hygiene: deployment-safe auth defaults (#4), invalid-key rate limiting (#120), redacted environment config (#58), and privacy-safe default logging (#61).
+2. SMS correctness: text-mode inbound body fidelity (#72), multipart receive/send finality (#10/#100), delivery-report cleanup (#148), and continued recipient-validation regression coverage.
+3. Modem safety: SIM-readiness fail-closed behavior (#142) and conservative active modem scan/config preview (#11) before unattended deployments.
+4. Webhook safety: URL admission and dispatch hardening (#47), signed delivery with retry/backoff (#21), and bounded error logs.
+5. Operator DX: keep shipped `callstack doctor` and `callstack monitor` docs aligned with code, then add packaged `callstack serve` (#140) and production-safe health/metrics deployment notes.
+6. Realtime and PBX: WebSocket event streaming (#31), scheduled SMS (#49), pre-answer routing (#40), voicemail helpers (#41), and IVR/DTMF hardening once SMS/security foundations stay green.
 
 ### Plugin/Middleware System
 - Hook into event pipeline: auto-reply, spam filtering, message transforms.
@@ -110,7 +111,7 @@ Prefer these small, reviewable slices before broad realtime/dashboard expansion:
 | P0 | Multi-Part SMS Reassembly | Medium | High | UDH parser done; service integration next |
 | P0 | SMS/security hardening | Small-Medium | High | Continue recipient validation, text-mode fidelity, auth, redaction, and webhook safety |
 | P1 | WebSocket Feed | Medium | High | Planned after SMS/security foundations |
-| P1 | PII-safe CLI monitor | Low-Medium | Medium | Planned; status/send/doctor are shipped |
+| P1 | PII-safe CLI monitor | Low-Medium | Medium | ✅ Shipped; next CLI DX is packaged serve/config helpers |
 | P1 | Modem Auto-Detection | Medium | High | Safe explicit-port doctor shipped; active scanning/assignment planned |
 | P2 | Voicemail System | Medium | High | Planned |
 | P2 | GPS/GNSS | Medium | High | Planned |

@@ -19,7 +19,7 @@ Callstack provides a high-level Python API for managing GSM/LTE modem connection
 | **USSD** | ✅ Ready | `AT+CUSD` balance checks/carrier menus via service + HTTP endpoint |
 | **Raw AT Commands** | ✅ Ready | Direct modem control via `Modem.execute()` |
 | **HTTP Server** | ✅ Ready | API-key auth, rate limiting, SMS/USSD/delivery-report endpoints, `/healthz`, and PII-safe `/metrics` |
-| **CLI** | ✅ Partial | `callstack status`, `callstack send`, and safe `callstack doctor`; PII-safe live monitoring is planned |
+| **CLI** | ✅ Partial | `callstack status`, `callstack send`, safe `callstack doctor`, and PII-safe `callstack monitor`; packaged `callstack serve` is planned |
 | **Auto-reconnect** | ✅ Ready | Handles USB disconnect/reconnect gracefully; active multi-port auto-detection is planned |
 
 ---
@@ -101,15 +101,17 @@ The package exposes a `callstack` command for local Raspberry Pi workflows:
 callstack status --json
 callstack send --to 5551234 --body "Hello from Callstack"
 callstack doctor --ports /dev/ttyUSB2,/dev/ttyUSB3 --json
+callstack monitor --events sms.received,sms.delivery_report --json
 ```
 
 - `callstack status` connects to the configured modem and prints registration, operator, and signal details.
 - `callstack send` sends one SMS through the configured modem and prints only the modem reference.
 - `callstack doctor` is the safest first hardware bring-up command. It probes only explicit candidate ports with non-mutating identity/attention commands and avoids SMS, USSD, call, SIM unlock, storage, IMEI, IMSI, ICCID, or SIM-number commands.
+- `callstack monitor` tails selected typed events as sanitized human text or one JSON object per event. It uses PII-safe event serializers by default and reports queue overflow without printing phone numbers, SMS bodies, USSD payloads, webhook URLs, SIM identifiers, API keys, modem serials, or raw AT lines.
+
+Planned CLI follow-ups include a packaged `callstack serve` HTTP-server entrypoint, active modem scan/config preview, and richer environment/config helpers for server and CLI deployments.
 
 Voice-call DTMF sends use `AT+VTS`; `CallSession.send_dtmf(..., duration_ms=...)` encodes non-zero tone durations in 100 ms increments (for example, `300` ms becomes an `AT+VTS` duration of `3`). Use `inter_digit_delay_ms` separately when a modem or remote IVR needs spacing between tones.
-
-Planned CLI follow-ups include a PII-safe `callstack monitor` live event tail and environment/config loading helpers for server and CLI deployments.
 
 ---
 
