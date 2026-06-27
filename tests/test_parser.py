@@ -8,6 +8,11 @@ def test_parse_signal_quality():
     assert result == (20, 0)
 
 
+def test_parse_signal_quality_accepts_optional_comma_whitespace():
+    result = ATResponseParser.parse_signal_quality("+CSQ: 20, 0")
+    assert result == (20, 0)
+
+
 def test_parse_signal_quality_no_signal():
     result = ATResponseParser.parse_signal_quality("+CSQ: 99,99")
     assert result == (99, 99)
@@ -20,6 +25,11 @@ def test_parse_signal_quality_invalid():
 
 def test_parse_registration():
     result = ATResponseParser.parse_registration("+CREG: 0,1")
+    assert result == (0, 1)
+
+
+def test_parse_registration_accepts_optional_comma_whitespace():
+    result = ATResponseParser.parse_registration("+CREG: 0, 1")
     assert result == (0, 1)
 
 
@@ -67,6 +77,17 @@ def test_parse_registration_accepts_verbose_lte_fields():
     assert result == (2, 1)
 
 
+def test_parse_registration_accepts_spaced_verbose_fields():
+    assert (
+        ATResponseParser.parse_registration('+CGREG: 2, 5, "ABCD", "12345678", 7')
+        == (2, 5)
+    )
+    assert (
+        ATResponseParser.parse_registration('+CEREG: 2, 1, "ABCD", "12345678", 7, ,')
+        == (2, 1)
+    )
+
+
 def test_parse_registration_accepts_verbose_lte_empty_optional_fields():
     assert ATResponseParser.parse_registration('+CEREG: 2,1,"ABCD","12345678",7,,') == (2, 1)
     assert (
@@ -108,6 +129,11 @@ def test_parse_cmgs():
 
 def test_parse_cmti():
     result = ATResponseParser.parse_cmti('+CMTI: "SM",3')
+    assert result == ("SM", 3)
+
+
+def test_parse_cmti_accepts_optional_comma_whitespace():
+    result = ATResponseParser.parse_cmti('+CMTI: "SM", 3')
     assert result == ("SM", 3)
 
 

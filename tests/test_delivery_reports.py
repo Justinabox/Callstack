@@ -32,6 +32,10 @@ class TestCDSIParser:
         result = ATResponseParser.parse_cdsi('+CDSI: "SM",5')
         assert result == ("SM", 5)
 
+    def test_parse_cdsi_accepts_optional_comma_whitespace(self):
+        result = ATResponseParser.parse_cdsi('+CDSI: "SM", 5')
+        assert result == ("SM", 5)
+
     def test_parse_cdsi_me_storage(self):
         result = ATResponseParser.parse_cdsi('+CDSI: "ME",12')
         assert result == ("ME", 12)
@@ -47,6 +51,13 @@ class TestCDSIDispatch:
             await urc.dispatch('+CDSI: "SM",5')
             event = await stream.next(timeout=1.0)
             assert isinstance(event, _RawDeliveryReport)
+            assert event.storage == "SM"
+            assert event.index == 5
+
+    async def test_cdsi_dispatch_accepts_optional_comma_whitespace(self, bus, urc):
+        async with bus.stream(_RawDeliveryReport) as stream:
+            await urc.dispatch('+CDSI: "SM", 5')
+            event = await stream.next(timeout=1.0)
             assert event.storage == "SM"
             assert event.index == 5
 

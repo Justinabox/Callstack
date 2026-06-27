@@ -127,7 +127,7 @@ class URCDispatcher:
                     status=status, message=message, encoding=encoding
                 ))
             else:
-                logger.warning("Could not parse USSD response: %s", line)
+                logger.warning("Could not parse USSD response")
 
         elif line.startswith(("+CREG:", "+CGREG:", "+CEREG:")):
             family = line.split(":", 1)[0]
