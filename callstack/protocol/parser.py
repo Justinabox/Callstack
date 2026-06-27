@@ -20,12 +20,15 @@ class ATResponseParser:
     _PREFIX_RE = re.compile(r"^\+([A-Z]+):\s*(.*)$")
 
     # Signal quality: +CSQ: rssi,ber
-    _CSQ_RE = re.compile(r"^\+CSQ:\s*(\d+),(\d+)$")
+    _CSQ_RE = re.compile(r"^\+CSQ:\s*(\d+)\s*,\s*(\d+)$")
 
     # Registration: +CREG/+CGREG/+CEREG: n,stat[,verbose...] or one-field URC stat
     _CREG_RE = re.compile(
         r'^\+C(?:G|E)?REG:\s*'
-        r'(?:(\d+),(\d+)(?:(?=,.*(?:"[0-9A-Fa-f]+"|\d+))(?:,(?:"[0-9A-Fa-f]+"|\d+)?)+)?|(\d+))$'
+        r'(?:(\d+)\s*,\s*(\d+)'
+        r'(?:(?=\s*,.*(?:"[0-9A-Fa-f]+"|\d+))'
+        r'(?:\s*,\s*(?:"[0-9A-Fa-f]+"|\d+)?)+)?'
+        r'|(\d+))$'
     )
 
     # Caller ID: +CLIP: "number",type
@@ -35,7 +38,7 @@ class ATResponseParser:
     _CMGS_RE = re.compile(r"^\+CMGS:\s*(\d+)")
 
     # SMS notification: +CMTI: "storage",index
-    _CMTI_RE = re.compile(r'^\+CMTI:\s*"([^"]*)",(\d+)')
+    _CMTI_RE = re.compile(r'^\+CMTI:\s*"([^"]*)"\s*,\s*(\d+)\s*$')
 
     # SMS header: +CMT: "sender","","timestamp"
     _CMT_RE = re.compile(r'^\+CMT:\s*"([^"]*)"')
@@ -94,10 +97,10 @@ class ATResponseParser:
     _CPIN_RE = re.compile(r"^\+CPIN:\s*(.+)$")
 
     # USSD response: +CUSD: status,"message",encoding
-    _CUSD_RE = re.compile(r'^\+CUSD:\s*(\d+)(?:,"([^"]*)"(?:,(\d+))?)?')
+    _CUSD_RE = re.compile(r'^\+CUSD:\s*(\d+)(?:\s*,\s*"([^"]*)"(?:\s*,\s*(\d+))?)?\s*$')
 
     # Delivery report: +CDSI: "storage",index
-    _CDSI_RE = re.compile(r'^\+CDSI:\s*"([^"]*)",(\d+)')
+    _CDSI_RE = re.compile(r'^\+CDSI:\s*"([^"]*)"\s*,\s*(\d+)\s*$')
 
     @staticmethod
     def parse_cpin(line: str) -> Optional[str]:

@@ -1,6 +1,7 @@
 """Tests for USSD service."""
 
 import asyncio
+import logging
 from typing import cast
 
 import pytest
@@ -96,6 +97,14 @@ class TestCUSDParser:
         result = ATResponseParser.parse_cusd('+CUSD: 0,"Your balance is $5.00",15')
         assert result == (0, "Your balance is $5.00", 15)
 
+    def test_parse_cusd_accepts_optional_comma_whitespace(self):
+        result = ATResponseParser.parse_cusd('+CUSD: 0, "Balance: 12", 15')
+        assert result == (0, "Balance: 12", 15)
+
+    def test_parse_cusd_rejects_unparsed_suffix(self):
+        result = ATResponseParser.parse_cusd('+CUSD: 0, "Balance: 12", bad')
+        assert result is None
+
     def test_parse_cusd_further_action(self):
         result = ATResponseParser.parse_cusd('+CUSD: 1,"Select option: 1-Balance 2-Plans",15')
         assert result == (1, "Select option: 1-Balance 2-Plans", 15)
@@ -132,6 +141,39 @@ class TestCUSDDispatch:
             assert event.status == 0
             assert event.message == "Your balance is $5.00"
             assert event.encoding == 15
+
+    async def test_cusd_dispatch_accepts_optional_comma_whitespace(self, bus, urc):
+        async with bus.stream(USSDResponseEvent) as stream:
+            await urc.dispatch('+CUSD: 0, "Balance: 12", 15')
+            event = await stream.next(timeout=1.0)
+            assert event.status == 0
+            assert event.message == "Balance: 12"
+            assert event.encoding == 15
+
+    async def test_cusd_parse_failure_log_omits_response_payload(self, bus, urc, caplog):
+        private_response = '+CUSD: 0, "private balance is $100", bad'
+
+        with caplog.at_level(logging.WARNING, logger="callstack.urc"):
+            async with bus.stream(USSDResponseEvent) as stream:
+                await urc.dispatch(private_response)
+                event = await stream.next(timeout=0.05)
+
+        assert event is None
+        assert "Could not parse USSD response" in caplog.text
+        assert private_response not in caplog.text
+        assert "private balance" not in caplog.text
+        assert "$100" not in caplog.text
+
+    async def test_cusd_debug_log_omits_response_payload(self, bus, urc, caplog):
+        private_response = '+CUSD: 0, "private balance is $100", bad'
+
+        with caplog.at_level(logging.DEBUG, logger="callstack.urc"):
+            await urc.dispatch(private_response)
+
+        assert "URC: +CUSD:<redacted>" in caplog.text
+        assert private_response not in caplog.text
+        assert "private balance" not in caplog.text
+        assert "$100" not in caplog.text
 
     async def test_cusd_terminated(self, bus, urc):
         async with bus.stream(USSDResponseEvent) as stream:

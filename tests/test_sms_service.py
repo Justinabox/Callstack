@@ -362,6 +362,32 @@ async def test_receive_cmti(sms_service, transport, bus, store):
     ]
 
 
+async def test_receive_cmti_accepts_optional_comma_whitespace(sms_service, transport, bus):
+    """Spaced +CMTI notifications still fetch and emit the stored SMS."""
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+    transport.feed(
+        '+CMGR: "REC UNREAD","+155****9876","","24/12/25,14:30:00+04"',
+        "Hello there!",
+        "OK",
+    )
+    transport.feed("OK")
+
+    await sms_service._on_incoming(_RawSMSNotification(raw='+CMTI: "SM", 3'))
+    await asyncio.sleep(0.01)
+
+    assert len(received) == 1
+    assert received[0].body == "Hello there!"
+    assert [command.strip() for command in transport.all_written] == [
+        "AT+CMGR=3",
+        "AT+CMGD=3",
+    ]
+
+
 async def test_receive_cmti_store_failure_does_not_delete_sim_slot(executor, transport, bus):
     """If durable store save fails, the SIM slot remains for retry/recovery."""
     service = SMSService(executor, bus, FailingSMSStore())

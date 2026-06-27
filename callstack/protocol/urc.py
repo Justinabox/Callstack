@@ -78,7 +78,7 @@ class URCDispatcher:
 
     async def _dispatch_event(self, line: str, followup: str) -> None:
         """Route a URC line to the appropriate typed event."""
-        logger.debug("URC: %s", line)
+        logger.debug("URC: %s", self._log_safe_urc(line))
 
         if line == "RING":
             await self._bus.emit(RingEvent())
@@ -127,7 +127,7 @@ class URCDispatcher:
                     status=status, message=message, encoding=encoding
                 ))
             else:
-                logger.warning("Could not parse USSD response: %s", line)
+                logger.warning("Could not parse USSD response")
 
         elif line.startswith(("+CREG:", "+CGREG:", "+CEREG:")):
             family = line.split(":", 1)[0]
@@ -140,6 +140,13 @@ class URCDispatcher:
 
         else:
             logger.warning("Unhandled URC: %s", line)
+
+    @staticmethod
+    def _log_safe_urc(line: str) -> str:
+        """Return a URC summary safe for diagnostic logs."""
+        if line.startswith("+CUSD:"):
+            return "+CUSD:<redacted>"
+        return line
 
     @staticmethod
     def _parse_dtmf_digit(payload: str) -> str:
