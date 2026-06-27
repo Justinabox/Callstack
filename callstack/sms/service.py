@@ -101,6 +101,7 @@ class SMSService:
         self._sms_submit_timeout = sms_submit_timeout
         self._initialized = False
         self._pending_cmt_header: Optional[str] = None
+        self._accepted_uncleared_cmti_slots: dict[tuple[str, int], tuple[str, str, str]] = {}
 
         # Wire raw SMS URC notifications from URC dispatcher
         bus.subscribe(_RawSMSNotification, self._on_incoming)
@@ -199,12 +200,29 @@ class SMSService:
             if parsed:
                 storage, index = parsed
                 logger.debug("CMTI notification: storage=%s, index=%d", storage, index)
+                slot_key = (storage, index)
                 sms = await self.read_message(index)
                 if sms:
+                    fingerprint = self._cmti_sms_fingerprint(sms)
+                    already_accepted = (
+                        self._accepted_uncleared_cmti_slots.get(slot_key) == fingerprint
+                    )
+                    if already_accepted:
+                        deleted = await self._delete_accepted_cmti_slot(
+                            storage, index, retry=True
+                        )
+                        if deleted:
+                            self._accepted_uncleared_cmti_slots.pop(slot_key, None)
+                        return
+
                     sms.status = "unread"
                     await self._store.save(sms)
-                    # Delete from SIM storage after durable/local acceptance to prevent +SMS FULL
-                    await self.delete_message(index)
+                    # Delete from SIM storage after durable/local acceptance to prevent +SMS FULL.
+                    deleted = await self._delete_accepted_cmti_slot(storage, index)
+                    if not deleted:
+                        self._accepted_uncleared_cmti_slots[slot_key] = fingerprint
+                    else:
+                        self._accepted_uncleared_cmti_slots.pop(slot_key, None)
                     await self._bus.emit(
                         IncomingSMSEvent(sender=sms.sender, body=sms.body)
                     )
@@ -224,6 +242,36 @@ class SMSService:
                 IncomingSMSEvent(sender=sender, body=event.body)
             )
             logger.info("Incoming SMS from %s (direct)", redact_phone_number(sender))
+
+    @staticmethod
+    def _cmti_sms_fingerprint(sms: SMS) -> tuple[str, str, str]:
+        """Identify a CMTI-read SMS well enough to avoid duplicate retry emits."""
+        timestamp = sms.timestamp.isoformat() if sms.timestamp else ""
+        return sms.sender, sms.body, timestamp
+
+    async def _delete_accepted_cmti_slot(
+        self, storage: str, index: int, *, retry: bool = False
+    ) -> bool:
+        """Attempt cleanup for an already accepted CMTI slot without exposing SMS data."""
+        warning = (
+            "Failed to delete previously accepted SIM SMS slot"
+            if retry
+            else "Failed to delete SIM SMS slot after local acceptance"
+        )
+        try:
+            deleted = await self.delete_message(index)
+        except Exception as exc:
+            logger.warning(
+                "%s: storage=%s index=%d error=%s",
+                warning,
+                storage,
+                index,
+                type(exc).__name__,
+            )
+            return False
+        if not deleted:
+            logger.warning("%s: storage=%s index=%d", warning, storage, index)
+        return deleted
 
     # -- Delivery Reports --
 
