@@ -32,15 +32,17 @@ _DELIVERY_STATUSES = frozenset({"delivered", "failed", "pending"})
 
 def _timestamp_for_event(event: Event) -> str:
     timestamp = event.timestamp
-    if timestamp.tzinfo is not None:
-        timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        raise ValueError("event timestamp must be timezone-aware")
+    timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
     return f"{timestamp.isoformat()}Z"
 
 
 def _human_time_for_event(event: Event) -> str:
     timestamp = event.timestamp
-    if timestamp.tzinfo is not None:
-        timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        raise ValueError("event timestamp must be timezone-aware")
+    timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
     return timestamp.strftime("%H:%M:%S")
 
 
