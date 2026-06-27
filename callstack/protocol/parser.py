@@ -24,7 +24,8 @@ class ATResponseParser:
 
     # Registration: +CREG/+CGREG/+CEREG: n,stat[,verbose...] or one-field URC stat
     _CREG_RE = re.compile(
-        r'^\+C(?:G|E)?REG:\s*(?:(\d+),(\d+)(?:,(?:"[0-9A-Fa-f]+"|\d+))*|(\d+))$'
+        r'^\+C(?:G|E)?REG:\s*'
+        r'(?:(\d+),(\d+)(?:(?=,.*(?:"[0-9A-Fa-f]+"|\d+))(?:,(?:"[0-9A-Fa-f]+"|\d+)?)+)?|(\d+))$'
     )
 
     # Caller ID: +CLIP: "number",type
