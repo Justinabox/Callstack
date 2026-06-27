@@ -16,6 +16,7 @@ from callstack.errors import SMSSendError
 from callstack.protocol.executor import ATCommandExecutor, ATResponse
 from callstack.protocol.urc import URCDispatcher
 from callstack.transport.mock import MockTransport
+from callstack.sms.pdu import PDUEncoder
 from callstack.sms.service import SMSService
 from callstack.sms.store import SMSStore
 from callstack.sms.types import SMS
@@ -271,7 +272,83 @@ async def test_send_body_failure(sms_service, transport):
     transport.feed("> ")
     transport.feed("ERROR")
     with pytest.raises(SMSSendError):
-        await sms_service.send("+15551234", "Hello!")
+        await sms_service.send("5551234", "Hello!")
+
+
+async def test_send_long_gsm7_body_uses_multipart_pdu_mode(executor, bus, store):
+    """Long GSM 03.38 messages are sent as multipart PDU segments."""
+    calls = []
+
+    async def record_execute(command, expect=("OK",), timeout=5.0):
+        calls.append(("execute", command, tuple(expect), timeout))
+        if command.startswith("AT+CMGS="):
+            return ATResponse(success=True, lines=["> "])
+        return ATResponse(success=True, lines=["OK"])
+
+    refs = iter((101, 102))
+
+    async def record_send_data(data, expect=("OK",), timeout=30.0):
+        calls.append(("send_data", data, tuple(expect), timeout))
+        return ATResponse(success=True, lines=[f"+CMGS: {next(refs)}", "OK"])
+
+    executor.execute = record_execute
+    executor.send_data = record_send_data
+    service = SMSService(
+        executor,
+        bus,
+        store,
+        command_timeout=1.75,
+        sms_prompt_timeout=2.5,
+        sms_submit_timeout=8.5,
+    )
+
+    sms = await service.send("5550100", "A" * 161)
+
+    execute_calls = [call for call in calls if call[0] == "execute"]
+    send_data_calls = [call for call in calls if call[0] == "send_data"]
+    assert execute_calls[0] == ("execute", "AT+CMGF=0", ("OK",), 1.75)
+    assert execute_calls[-1] == ("execute", "AT+CMGF=1", ("OK",), 1.75)
+    expected_segments = PDUEncoder.build_multipart_submit_pdus("5550100", "A" * 161)
+    assert [call[1] for call in execute_calls[1:-1]] == [
+        f"AT+CMGS={segment.tpdu_length}" for segment in expected_segments
+    ]
+    assert all(call[3] == 2.5 for call in execute_calls[1:-1])
+    assert len(send_data_calls) == 2
+    assert all(call[1].endswith(b"\x1a") for call in send_data_calls)
+    assert all(call[2] == ("+CMGS:", "OK") for call in send_data_calls)
+    assert all(call[3] == 8.5 for call in send_data_calls)
+    assert sms.reference == 101
+    assert sms.segment_references == (101, 102)
+    assert await store.count() == 1
+
+
+async def test_send_multipart_restores_text_mode_on_segment_failure(executor, bus, store):
+    """PDU mode sends restore text mode even if a later segment fails."""
+    calls = []
+
+    async def record_execute(command, expect=("OK",), timeout=5.0):
+        calls.append(("execute", command, tuple(expect), timeout))
+        if command.startswith("AT+CMGS="):
+            return ATResponse(success=True, lines=["> "])
+        return ATResponse(success=True, lines=["OK"])
+
+    async def record_send_data(data, expect=("OK",), timeout=30.0):
+        calls.append(("send_data", data, tuple(expect), timeout))
+        if len([call for call in calls if call[0] == "send_data"]) == 2:
+            return ATResponse(success=False, lines=["ERROR"])
+        return ATResponse(success=True, lines=["+CMGS: 201", "OK"])
+
+    executor.execute = record_execute
+    executor.send_data = record_send_data
+    service = SMSService(executor, bus, store)
+
+    with pytest.raises(SMSSendError, match="multipart SMS segment 2/2") as excinfo:
+        await service.send("5550100", "A" * 161)
+
+    assert "5550100" not in str(excinfo.value)
+    assert "AAAA" not in str(excinfo.value)
+    assert calls[-1] == ("execute", "AT+CMGF=1", ("OK",), 5.0)
+    assert await store.count() == 0
 
 
 async def test_send_stores_message(sms_service, transport, store):

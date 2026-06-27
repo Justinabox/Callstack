@@ -133,6 +133,27 @@ async def test_sqlite_close_then_initialize_reloads_without_duplicate_rows(tmp_p
         await store.close()
 
 
+async def test_sqlite_preserves_segment_references_after_reopen(tmp_path):
+    pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await store.initialize()
+        saved = await store.save(
+            SMS(body="long", status="sent", reference=101, segment_references=(101, 102))
+        )
+        assert saved.id is not None
+        await store.close()
+
+        await store.initialize()
+
+        reloaded = await store.get(saved.id)
+        assert reloaded is not None
+        assert reloaded.reference == 101
+        assert reloaded.segment_references == (101, 102)
+    finally:
+        await store.close()
+
+
 async def test_sqlite_initialize_preserves_save_before_first_initialize(tmp_path):
     pytest.importorskip("aiosqlite")
     store = SMSStore(db_path=str(tmp_path / "sms.db"))

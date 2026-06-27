@@ -24,6 +24,7 @@ class SMS:
     reference: int = 0
     id: Optional[int] = None
     storage_index: Optional[int] = None
+    segment_references: tuple[int, ...] = field(default_factory=tuple)
 
     @property
     def is_incoming(self) -> bool:

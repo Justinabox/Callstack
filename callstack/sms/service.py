@@ -20,7 +20,7 @@ from callstack.protocol.commands import ATCommand
 from callstack.protocol.executor import ATCommandExecutor
 from callstack.protocol.parser import ATResponseParser
 from callstack.privacy import redact_phone_number
-from callstack.sms.pdu import GSM7_BASIC
+from callstack.sms.pdu import GSM7_BASIC, PDUEncoder
 from callstack.sms.store import SMSStore
 from callstack.sms.types import SMS, SMSStatus
 
@@ -77,6 +77,25 @@ class _FilteredStream:
                     return event
 
 
+def _encode_gsm_text_mode_payload(body: str) -> bytearray:
+    """Encode an SMS body as strict GSM 03.38 text-mode bytes.
+
+    The returned payload excludes the final Ctrl-Z terminator.
+    """
+    payload = bytearray()
+    for char in body:
+        if char in _GSM_TEXT_EXTENDED:
+            payload.extend((0x1B, _GSM_TEXT_EXTENDED[char]))
+        elif char in _GSM_TEXT_BASIC:
+            payload.append(_GSM_TEXT_BASIC[char])
+        else:
+            raise SMSSendError(
+                "SMS body cannot be encoded with GSM 03.38 text mode; "
+                "UCS2/PDU sending is not implemented yet"
+            )
+    return payload
+
+
 class SMSService:
     """Full SMS capabilities: send, receive, subscribe, manage.
 
@@ -131,17 +150,10 @@ class SMSService:
         Returns SMS with reference number on success.
         Raises SMSSendError on failure.
         """
-        payload = bytearray()
-        for char in body:
-            if char in _GSM_TEXT_EXTENDED:
-                payload.extend((0x1B, _GSM_TEXT_EXTENDED[char]))
-            elif char in _GSM_TEXT_BASIC:
-                payload.append(_GSM_TEXT_BASIC[char])
-            else:
-                raise SMSSendError(
-                    "SMS body cannot be encoded with GSM 03.38 text mode; "
-                    "UCS2/PDU sending is not implemented yet"
-                )
+        payload = _encode_gsm_text_mode_payload(body)
+        if len(payload) > 160:
+            return await self._send_multipart_pdu(to, body)
+
         payload.append(0x1A)
 
         # Initiate SMS send - wait for ">" prompt
@@ -173,6 +185,74 @@ class SMSService:
             body=body,
             status="sent",
             reference=reference,
+            timestamp=datetime.now(),
+        )
+        await self._store.save(sms)
+        await self._bus.emit(SMSSentEvent(recipient=to, reference=reference))
+        logger.info("SMS sent to %s (ref: %d)", redact_phone_number(to), reference)
+        return sms
+
+    async def _send_multipart_pdu(self, to: str, body: str) -> SMS:
+        """Send a long GSM 03.38 body as concatenated PDU-mode segments."""
+        segments = PDUEncoder.build_multipart_submit_pdus(to, body)
+        segment_references: list[int] = []
+
+        try:
+            resp = await self._at.execute(
+                ATCommand.SMS_PDU_MODE,
+                expect=["OK"],
+                timeout=self._command_timeout,
+            )
+            if not resp.success:
+                raise SMSSendError("Failed to switch modem to PDU mode for multipart SMS")
+
+            for segment in segments:
+                segment_label = f"multipart SMS segment {segment.sequence}/{segment.total_parts}"
+                resp = await self._at.execute(
+                    f"AT+CMGS={segment.tpdu_length}",
+                    expect=[">"],
+                    timeout=self._sms_prompt_timeout,
+                )
+                if not resp.success:
+                    raise SMSSendError(f"Failed to initiate {segment_label}")
+
+                resp = await self._at.send_data(
+                    segment.pdu.encode("ascii") + b"\x1a",
+                    expect=["+CMGS:", "OK"],
+                    timeout=self._sms_submit_timeout,
+                )
+                if not resp.success:
+                    raise SMSSendError(f"Failed to send {segment_label}")
+
+                reference = 0
+                for line in resp.lines:
+                    parsed_reference = ATResponseParser.parse_cmgs(line)
+                    if parsed_reference is not None:
+                        reference = parsed_reference
+                        break
+                segment_references.append(reference)
+        finally:
+            try:
+                restore_resp = await self._at.execute(
+                    ATCommand.SMS_TEXT_MODE,
+                    expect=["OK"],
+                    timeout=self._command_timeout,
+                )
+                if not restore_resp.success:
+                    logger.warning("Failed to restore SMS text mode after multipart send")
+            except Exception:
+                logger.warning(
+                    "Failed to restore SMS text mode after multipart send",
+                    exc_info=True,
+                )
+
+        reference = segment_references[0] if segment_references else 0
+        sms = SMS(
+            recipient=to,
+            body=body,
+            status="sent",
+            reference=reference,
+            segment_references=tuple(segment_references),
             timestamp=datetime.now(),
         )
         await self._store.save(sms)
