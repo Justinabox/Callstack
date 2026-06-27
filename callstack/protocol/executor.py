@@ -38,6 +38,18 @@ def _decode_transport_line(raw: bytes) -> str:
     return raw.decode("ascii", errors="replace").rstrip("\r\n")
 
 
+def _redact_command_for_log(command: str) -> str:
+    """Redact private payloads embedded in sensitive AT command/log lines."""
+    stripped = command.lstrip()
+    leading = command[: len(command) - len(stripped)]
+    upper = stripped.upper()
+    if upper.startswith("AT+CUSD="):
+        return f"{leading}AT+CUSD=<redacted>"
+    if upper.startswith("+CUSD:"):
+        return f"{leading}+CUSD: <redacted>"
+    return command
+
+
 def _normalize_control_line(line: str) -> str:
     """Normalize AT control/header lines while keeping payload handling separate."""
     return line.strip()
@@ -214,7 +226,7 @@ class ATCommandExecutor:
                 self._drain_queue()
                 self._command_in_flight = True
             try:
-                logger.debug("TX: %s", command)
+                logger.debug("TX: %s", _redact_command_for_log(command))
                 await self._transport.write(f"{command}\r\n".encode())
                 return await self._collect_response(command, expect, timeout)
             finally:
@@ -335,22 +347,24 @@ class ATCommandExecutor:
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
+                safe_command = _redact_command_for_log(command)
                 raise ATTimeoutError(
-                    f"Timeout after {timeout}s waiting for {expect} (command: {command})"
+                    f"Timeout after {timeout}s waiting for {expect} (command: {safe_command})"
                 )
 
             try:
                 raw_line = await self._next_line(remaining)
             except asyncio.TimeoutError:
+                safe_command = _redact_command_for_log(command)
                 raise ATTimeoutError(
-                    f"Timeout after {timeout}s waiting for {expect} (command: {command})"
+                    f"Timeout after {timeout}s waiting for {expect} (command: {safe_command})"
                 )
 
             control_line = _normalize_control_line(raw_line)
             if not control_line and not self._command_preserves_urc_like_payload(command):
                 continue
 
-            logger.debug("RX: %s", raw_line)
+            logger.debug("RX: %s", _redact_command_for_log(raw_line))
 
             # Echo suppression: skip if the line matches the command we sent.
             if control_line == command:

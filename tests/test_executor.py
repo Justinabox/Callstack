@@ -1,6 +1,7 @@
 """Tests for the AT command executor."""
 
 import asyncio
+import logging
 import pytest
 from callstack.events.bus import EventBus
 from callstack.events.types import CallState, CallStateEvent, RingEvent, DTMFEvent
@@ -50,6 +51,75 @@ async def test_signal_quality(executor, transport):
     assert resp.success is True
     assert "+CSQ: 20,0" in resp.lines
     assert "OK" in resp.lines
+
+
+async def test_ussd_command_debug_log_redacts_submitted_code(executor, transport, caplog):
+    """USSD short codes can be private and must not be written to logs."""
+    private_code = "*123*9999#"
+    caplog.set_level(logging.DEBUG, logger="callstack.executor")
+    transport.feed("OK")
+
+    resp = await executor.execute(f'AT+CUSD=1,"{private_code}",15')
+
+    assert resp.success is True
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert private_code not in log_text
+    assert "TX: AT+CUSD=<redacted>" in log_text
+
+
+async def test_ussd_echo_debug_log_redacts_submitted_code(executor, transport, caplog):
+    """Echoed USSD commands must be redacted before RX debug logging."""
+    private_code = "*123*9999#"
+    caplog.set_level(logging.DEBUG, logger="callstack.executor")
+    transport.feed(f'AT+CUSD=1,"{private_code}",15', "OK")
+
+    resp = await executor.execute(f'AT+CUSD=1,"{private_code}",15')
+
+    assert resp.success is True
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert private_code not in log_text
+    assert "RX: AT+CUSD=<redacted>" in log_text
+
+
+async def test_malformed_ussd_command_debug_log_is_redacted(executor, transport, caplog):
+    """Direct malformed CUSD commands are still sensitive at executor logs."""
+    private_code = "*123*9999#"
+    caplog.set_level(logging.DEBUG, logger="callstack.executor")
+    transport.feed("OK")
+
+    resp = await executor.execute(f'AT+CUSD=1,"{private_code}')
+
+    assert resp.success is True
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert private_code not in log_text
+    assert "TX: AT+CUSD=<redacted>" in log_text
+
+
+async def test_lowercase_ussd_command_debug_log_is_redacted(executor, transport, caplog):
+    """Direct executor CUSD privacy redaction is case-insensitive."""
+    private_code = "*123*9999#"
+    caplog.set_level(logging.DEBUG, logger="callstack.executor")
+    transport.feed("OK")
+
+    resp = await executor.execute(f'at+cusd=1,"{private_code}",15')
+
+    assert resp.success is True
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert private_code not in log_text
+    assert "TX: AT+CUSD=<redacted>" in log_text
+
+
+async def test_ussd_direct_timeout_error_redacts_submitted_code(transport, urc):
+    """Direct executor timeouts redact USSD code values from exception text."""
+    private_code = "*123*9999#"
+    executor = ATCommandExecutor(transport, urc)
+
+    with pytest.raises(ATTimeoutError) as exc_info:
+        await executor.execute(f'AT+CUSD=1,"{private_code}",15', timeout=0.01)
+
+    message = str(exc_info.value)
+    assert private_code not in message
+    assert "AT+CUSD=<redacted>" in message
 
 
 async def test_data_lines(executor, transport):

@@ -5,12 +5,15 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Awaitable, Callable, Optional
 
+from callstack.errors import ATTimeoutError
 from callstack.events.bus import EventBus
 from callstack.events.types import USSDResponseEvent
 from callstack.protocol.commands import ATCommand
 from callstack.protocol.executor import ATCommandExecutor
 
 logger = logging.getLogger("callstack.ussd")
+_USSD_REQUIRES_RESET_ATTR = "_callstack_ussd_requires_reset"
+_USSD_SEND_LOCK_ATTR = "_callstack_ussd_send_lock"
 
 
 class USSDService:
@@ -37,6 +40,21 @@ class USSDService:
         self._at = executor
         self._bus = bus
         self._command_timeout = command_timeout
+        shared_lock = getattr(bus, _USSD_SEND_LOCK_ATTR, None)
+        if shared_lock is None:
+            shared_lock = asyncio.Lock()
+            setattr(bus, _USSD_SEND_LOCK_ATTR, shared_lock)
+        self._send_lock = shared_lock
+        self._requires_cancel_after_timeout = False
+
+    def _requires_session_reset(self) -> bool:
+        return self._requires_cancel_after_timeout or bool(
+            getattr(self._bus, _USSD_REQUIRES_RESET_ATTR, False)
+        )
+
+    def _mark_session_requires_reset(self) -> None:
+        self._requires_cancel_after_timeout = True
+        setattr(self._bus, _USSD_REQUIRES_RESET_ATTR, True)
 
     async def send(self, code: str, timeout: float = 15.0) -> USSDResponseEvent:
         """Send a USSD command and wait for the response.
@@ -48,28 +66,42 @@ class USSDService:
         Returns:
             USSDResponseEvent with status, message, and encoding.
         """
-        response_future: asyncio.Future[USSDResponseEvent] = asyncio.get_running_loop().create_future()
+        async with self._send_lock:
+            if self._requires_session_reset():
+                raise RuntimeError(
+                    "Previous USSD request did not complete; reset the modem session before sending another request"
+                )
 
-        async def capture(event: USSDResponseEvent) -> None:
-            if not response_future.done():
-                response_future.set_result(event)
+            response_future: asyncio.Future[USSDResponseEvent] = asyncio.get_running_loop().create_future()
 
-        self._bus.subscribe(USSDResponseEvent, capture)
-        try:
-            resp = await self._at.execute(
-                ATCommand.ussd_send(code), expect=["OK"], timeout=self._command_timeout
-            )
-            if not resp.success:
-                raise RuntimeError(f"USSD command failed: {resp.lines}")
+            async def capture(event: USSDResponseEvent) -> None:
+                if not response_future.done():
+                    response_future.set_result(event)
 
-            return await asyncio.wait_for(response_future, timeout=timeout)
-        except asyncio.TimeoutError:
-            raise TimeoutError(f"No USSD response within {timeout}s")
-        finally:
-            self._bus.unsubscribe(USSDResponseEvent, capture)
+            self._bus.subscribe(USSDResponseEvent, capture)
+            try:
+                resp = await self._at.execute(
+                    ATCommand.ussd_send(code), expect=["OK"], timeout=self._command_timeout
+                )
+                if not resp.success:
+                    raise RuntimeError(f"USSD command failed: {resp.lines}")
+
+                return await asyncio.wait_for(response_future, timeout=timeout)
+            except ATTimeoutError:
+                self._mark_session_requires_reset()
+                raise ATTimeoutError("USSD command timed out") from None
+            except asyncio.TimeoutError:
+                self._mark_session_requires_reset()
+                raise TimeoutError(f"No USSD response within {timeout}s")
+            except asyncio.CancelledError:
+                self._mark_session_requires_reset()
+                raise
+            finally:
+                self._bus.unsubscribe(USSDResponseEvent, capture)
 
     async def cancel(self) -> None:
         """Cancel an ongoing USSD session."""
+        self._mark_session_requires_reset()
         await self._at.execute(
             ATCommand.USSD_CANCEL, expect=["OK"], timeout=self._command_timeout
         )
