@@ -19,6 +19,8 @@ def test_default_config():
     assert cfg.audio_port == "/dev/ttyUSB4"
     assert cfg.baudrate == 115200
     assert cfg.command_timeout == 5.0
+    assert cfg.sms_prompt_timeout == 10.0
+    assert cfg.sms_submit_timeout == 30.0
     assert cfg.auto_reconnect is True
     assert cfg.sms_db_path is None
 
@@ -29,12 +31,46 @@ def test_custom_config():
     assert cfg.baudrate == 9600
 
 
+def test_positional_constructor_preserves_existing_field_order():
+    cfg = ModemConfig(
+        "/dev/at",
+        "/dev/audio",
+        9600,
+        2.0,
+        False,
+        7.0,
+        "ME",
+        "/tmp/sms.sqlite3",
+        "1234",
+        "DEBUG",
+    )
+
+    assert cfg.command_timeout == 2.0
+    assert cfg.sms_prompt_timeout == 10.0
+    assert cfg.sms_submit_timeout == 30.0
+    assert cfg.auto_reconnect is False
+    assert cfg.reconnect_interval == 7.0
+    assert cfg.sms_storage == "ME"
+    assert cfg.sms_db_path == "/tmp/sms.sqlite3"
+    assert cfg.sim_pin == "1234"
+    assert cfg.log_level == "DEBUG"
+
+
+@pytest.mark.parametrize("field", ["sms_prompt_timeout", "sms_submit_timeout"])
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf")])
+def test_modem_config_rejects_non_finite_sms_send_timeouts(field, bad_value):
+    with pytest.raises(ValueError, match=field):
+        ModemConfig(**{field: bad_value})
+
+
 def test_load_modem_config_from_env_maps_documented_values_and_secret_indirection():
     cfg = load_modem_config_from_env({
         "CALLSTACK_AT_PORT": "/dev/envAT",
         "CALLSTACK_AUDIO_PORT": "/dev/envAudio",
         "CALLSTACK_BAUDRATE": "9600",
         "CALLSTACK_COMMAND_TIMEOUT": "2.5",
+        "CALLSTACK_SMS_PROMPT_TIMEOUT": "4.5",
+        "CALLSTACK_SMS_SUBMIT_TIMEOUT": "45.0",
         "CALLSTACK_AUTO_RECONNECT": "false",
         "CALLSTACK_RECONNECT_INTERVAL": "7.25",
         "CALLSTACK_SMS_STORAGE": "ME",
@@ -48,6 +84,8 @@ def test_load_modem_config_from_env_maps_documented_values_and_secret_indirectio
     assert cfg.audio_port == "/dev/envAudio"
     assert cfg.baudrate == 9600
     assert cfg.command_timeout == 2.5
+    assert cfg.sms_prompt_timeout == 4.5
+    assert cfg.sms_submit_timeout == 45.0
     assert cfg.auto_reconnect is False
     assert cfg.reconnect_interval == 7.25
     assert cfg.sms_storage == "ME"
