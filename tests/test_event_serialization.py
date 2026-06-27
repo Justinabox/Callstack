@@ -17,7 +17,7 @@ from callstack.events.types import (
     SignalQualityEvent,
     USSDResponseEvent,
 )
-from callstack.events.serialize import serialize_event
+from callstack.events.serialize import format_event_human, serialize_event
 
 
 TS = datetime(2026, 6, 27, 12, 0, 0, tzinfo=timezone.utc)
@@ -168,7 +168,7 @@ def test_signal_quality_and_ussd_events_serialize_without_ussd_text():
         USSDResponseEvent(
             timestamp=TS,
             status=0,
-            message="Balance for +15551234567 is $12.34",
+            message="Balance for +155****4567 is $12.34",
             encoding=15,
         )
     )
@@ -191,6 +191,74 @@ def test_signal_quality_and_ussd_events_serialize_without_ussd_text():
     _assert_json_does_not_leak_private_values(
         ussd_payload,
         "Balance",
-        "+15551234567",
+        "+155****4567",
         "$12.34",
     )
+
+
+def test_incoming_sms_event_formats_as_human_line_without_body_or_full_sender():
+    event = IncomingSMSEvent(
+        timestamp=TS,
+        sender="+155****4567",
+        body="secret MFA code 123456",
+        raw='+CMT: "+155****4567"\r\nsecret MFA code 123456',
+    )
+
+    line = format_event_human(event)
+
+    assert line == "[12:00:00] sms received from +***4567 body_length=22"
+    assert "secret MFA" not in line
+    assert "+155****4567" not in line
+    assert "+CMT" not in line
+
+
+def test_sms_sent_event_formats_as_human_line_without_full_recipient():
+    line = format_event_human(
+        SMSSentEvent(
+            timestamp=TS,
+            recipient="+155****4321",
+            reference=99,
+        )
+    )
+
+    assert line == "[12:00:00] sms sent ref=99 recipient=+***4321"
+    assert "+155****4321" not in line
+
+
+def test_delivery_report_and_ussd_events_format_as_human_lines_without_private_content():
+    report_line = format_event_human(
+        SMSDeliveryReportEvent(
+            timestamp=TS,
+            reference=42,
+            recipient="+155****6543",
+            status="failed for +155****0000 raw +CMS ERROR: 500",
+        )
+    )
+    ussd_line = format_event_human(
+        USSDResponseEvent(
+            timestamp=TS,
+            status=0,
+            message="Balance for +155****4567 is $12.34",
+            encoding=15,
+        )
+    )
+
+    assert report_line == "[12:00:00] sms delivery report ref=42 recipient=+***6543 status=unknown"
+    assert ussd_line == "[12:00:00] ussd response status=0 encoding=15 message_length=34"
+    combined = f"{report_line}\n{ussd_line}"
+    for private_value in ("+155****6543", "+155****0000", "+CMS ERROR", "Balance", "+155****4567", "$12.34"):
+        assert private_value not in combined
+
+
+def test_call_modem_and_signal_events_format_as_bounded_human_lines():
+    assert format_event_human(CallStateEvent(timestamp=TS, state=CallState.ACTIVE)) == "[12:00:00] call state active"
+    assert format_event_human(RingEvent(timestamp=TS)) == "[12:00:00] call ring"
+    caller_line = format_event_human(CallerIDEvent(timestamp=TS, number="+155****7890"))
+    assert caller_line == "[12:00:00] caller id +***7890"
+    assert "+155****7890" not in caller_line
+    dtmf_line = format_event_human(DTMFEvent(timestamp=TS, digit="#"))
+    assert dtmf_line == "[12:00:00] dtmf [redacted]"
+    assert "#" not in dtmf_line
+    assert format_event_human(ModemDisconnectedEvent(timestamp=TS, reason="USB EOF for +155****0000")) == "[12:00:00] modem disconnected"
+    assert format_event_human(ModemReconnectedEvent(timestamp=TS)) == "[12:00:00] modem connected"
+    assert format_event_human(SignalQualityEvent(timestamp=TS, rssi=18, ber=2)) == "[12:00:00] signal quality rssi=18 ber=2"

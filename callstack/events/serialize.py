@@ -37,6 +37,13 @@ def _timestamp_for_event(event: Event) -> str:
     return f"{timestamp.isoformat()}Z"
 
 
+def _human_time_for_event(event: Event) -> str:
+    timestamp = event.timestamp
+    if timestamp.tzinfo is not None:
+        timestamp = timestamp.astimezone(timezone.utc).replace(tzinfo=None)
+    return timestamp.strftime("%H:%M:%S")
+
+
 def _envelope(event: Event, event_type: str, data: dict[str, Any]) -> EventEnvelope:
     return {
         "type": event_type,
@@ -122,3 +129,42 @@ def serialize_event(event: Event) -> EventEnvelope:
         )
 
     raise ValueError(f"unsupported event type: {type(event).__name__}")
+
+
+def format_event_human(event: Event) -> str:
+    """Return a concise, privacy-preserving terminal line for a typed event."""
+
+    envelope = serialize_event(event)
+    timestamp = _human_time_for_event(event)
+    data = envelope["data"]
+    event_type = envelope["type"]
+
+    if event_type == "sms.received":
+        return f"[{timestamp}] sms received from {data['sender']} body_length={data['body_length']}"
+    if event_type == "sms.delivery_report":
+        return (
+            f"[{timestamp}] sms delivery report ref={data['reference']} "
+            f"recipient={data['recipient']} status={data['status']}"
+        )
+    if event_type == "sms.sent":
+        return f"[{timestamp}] sms sent ref={data['reference']} recipient={data['recipient']}"
+    if event_type == "call.state":
+        return f"[{timestamp}] call state {data['state']}"
+    if event_type == "call.ring":
+        return f"[{timestamp}] call ring"
+    if event_type == "call.caller_id":
+        return f"[{timestamp}] caller id {data['number']}"
+    if event_type == "call.dtmf":
+        return f"[{timestamp}] dtmf {data['digit']}"
+    if event_type == "modem.state":
+        state = "connected" if data["connected"] else "disconnected"
+        return f"[{timestamp}] modem {state}"
+    if event_type == "signal.quality":
+        return f"[{timestamp}] signal quality rssi={data['rssi']} ber={data['ber']}"
+    if event_type == "ussd.response":
+        return (
+            f"[{timestamp}] ussd response status={data['status']} "
+            f"encoding={data['encoding']} message_length={data['message_length']}"
+        )
+
+    raise ValueError(f"unsupported serialized event type: {event_type}")
