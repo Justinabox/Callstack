@@ -20,7 +20,6 @@ from callstack.protocol.executor import ATCommandExecutor
 from callstack.protocol.commands import ATCommand
 from callstack.voice.state import CallStateMachine
 from callstack.voice.audio import AudioPipeline
-from callstack.voice.dtmf import DTMFCollector
 
 logger = logging.getLogger("callstack.voice.service")
 
@@ -280,8 +279,70 @@ class CallSession:
     def is_active(self) -> bool:
         return self.service.state == CallState.ACTIVE and self.service.active_call is self
 
+    def _require_active_call(self, action: str) -> None:
+        if not self.is_active:
+            raise RuntimeError(f"Cannot {action} without an active call")
+
+    def _require_current_call(self, action: str) -> None:
+        if (
+            self.service.active_call is not self
+            or self.service.state in (CallState.IDLE, CallState.ENDED)
+        ):
+            raise RuntimeError(f"Cannot {action} without an active call")
+
+    async def _next_dtmf_event_while_active(
+        self, events, timeout: float | None
+    ) -> DTMFEvent | None:
+        now = asyncio.get_running_loop().time
+        deadline = None if timeout is None else now() + timeout
+        while True:
+            self._require_active_call("collect DTMF")
+            if deadline is None:
+                wait_timeout = 0.05
+            else:
+                remaining = deadline - now()
+                if remaining <= 0:
+                    return None
+                wait_timeout = min(remaining, 0.05)
+            event = await events.next(timeout=wait_timeout)
+            if event is None:
+                continue
+            self._require_active_call("collect DTMF")
+            if isinstance(event, DTMFEvent):
+                return event
+
+    async def _collect_dtmf_from_stream_while_active(
+        self,
+        events,
+        max_digits: int,
+        timeout: float,
+        terminator: str,
+        inter_digit_timeout: Optional[float] = None,
+    ) -> str:
+        digits: list[str] = []
+        now = asyncio.get_running_loop().time
+        overall_deadline = now() + timeout
+        deadline = overall_deadline
+
+        while len(digits) < max_digits:
+            remaining = deadline - now()
+            if remaining <= 0:
+                break
+            event = await self._next_dtmf_event_while_active(events, remaining)
+            if event is None:
+                break
+            digit = event.digit
+            if digit == terminator:
+                break
+            digits.append(digit)
+            if inter_digit_timeout is not None:
+                deadline = min(overall_deadline, now() + inter_digit_timeout)
+
+        return "".join(digits)
+
     async def hangup(self) -> None:
         """End this call."""
+        self._require_current_call("hang up")
         await self.service.hangup()
         self._ended.set()
 
@@ -325,10 +386,11 @@ class CallSession:
             terminator: Digit that ends collection early (excluded from result).
             inter_digit_timeout: Reset deadline after each digit (for variable-length input).
         """
-        collector = DTMFCollector(
-            self.service._bus, max_digits, timeout, terminator, inter_digit_timeout
-        )
-        return await collector.collect()
+        self._require_active_call("collect DTMF")
+        async with self.service._bus.stream(DTMFEvent) as events:
+            return await self._collect_dtmf_from_stream_while_active(
+                events, max_digits, timeout, terminator, inter_digit_timeout
+            )
 
     async def play_and_collect(
         self,
@@ -352,9 +414,7 @@ class CallSession:
         Returns:
             Collected digits as a string.
         """
-        collector = DTMFCollector(
-            self.service._bus, max_digits, timeout, terminator, inter_digit_timeout
-        )
+        self._require_active_call("play and collect DTMF")
 
         if interrupt:
             # Use a single stream context to avoid losing events between the
@@ -363,7 +423,9 @@ class CallSession:
             # arrives early and interrupts the prompt.
             async with self.service._bus.stream(DTMFEvent) as events:
                 play_task = asyncio.create_task(self.play(audio_path))
-                first_event_task = asyncio.create_task(events.next())
+                first_event_task = asyncio.create_task(
+                    self._next_dtmf_event_while_active(events, timeout=None)
+                )
 
                 def event_digit(event: object) -> str | None:
                     if isinstance(event, DTMFEvent) and event.digit != terminator:
@@ -374,8 +436,12 @@ class CallSession:
                     if not first:
                         return ""
                     if max_digits > 1:
-                        remaining = await collector.collect_from_stream(
-                            events, max_digits=max_digits - 1, timeout=timeout
+                        remaining = await self._collect_dtmf_from_stream_while_active(
+                            events,
+                            max_digits=max_digits - 1,
+                            timeout=timeout,
+                            terminator=terminator,
+                            inter_digit_timeout=inter_digit_timeout,
                         )
                         return first + remaining
                     return first
@@ -415,7 +481,11 @@ class CallSession:
                             await play_task
         else:
             await self.play(audio_path)
-            return await collector.collect()
+            self._require_active_call("play and collect DTMF")
+            async with self.service._bus.stream(DTMFEvent) as events:
+                return await self._collect_dtmf_from_stream_while_active(
+                    events, max_digits, timeout, terminator, inter_digit_timeout
+                )
 
     async def send_dtmf(
         self,
