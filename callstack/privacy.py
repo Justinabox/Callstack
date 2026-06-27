@@ -4,6 +4,15 @@ import re
 from urllib.parse import urlsplit
 
 _DIGIT_RE = re.compile(r"\d")
+_PHONE_LIKE_HOST_LABEL_RE = re.compile(r"\d{7,}")
+
+
+def _redact_phone_like_host_labels(hostname: str) -> str:
+    """Hide phone-like hostname labels before formatting webhook log URLs."""
+    return ".".join(
+        "[redacted]" if _PHONE_LIKE_HOST_LABEL_RE.search(label) else label
+        for label in hostname.split(".")
+    )
 
 
 def redact_phone_number(value: str | None) -> str:
@@ -53,7 +62,7 @@ def redact_url_for_log(value: str | None) -> str:
     if not hostname:
         return "redacted-url"
 
-    host = hostname
+    host = _redact_phone_like_host_labels(hostname)
     try:
         port = parsed.port
     except ValueError:

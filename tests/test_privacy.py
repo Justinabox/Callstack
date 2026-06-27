@@ -36,3 +36,12 @@ def test_redact_url_for_log_does_not_raise_on_malformed_ports():
     assert redacted == "https://hooks.example.test/[redacted]?query=redacted"
     assert "notaport" not in redacted
     assert "super-secret" not in redacted
+
+
+def test_redact_url_for_log_hides_phone_like_host_labels():
+    """Phone-like webhook hostname labels should not be visible in logs."""
+    redacted = redact_url_for_log("https://15551234567.hooks.example.test/path?api_key=super-secret")
+
+    assert redacted == "https://[redacted].hooks.example.test/[redacted]?query=redacted"
+    assert "15551234567" not in redacted
+    assert "super-secret" not in redacted
