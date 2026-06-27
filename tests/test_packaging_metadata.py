@@ -31,4 +31,13 @@ def test_readme_documents_server_extra_for_http_mode():
     readme = (ROOT / "README.md").read_text()
 
     assert 'pip install -e ".[server,sqlite]"' in readme
+    assert "callstack serve" in readme
     assert "python server.py" in readme
+
+
+def test_packaged_console_script_includes_server_helper_module():
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+
+    setuptools_config = pyproject["tool"]["setuptools"]
+
+    assert "server" in setuptools_config["py-modules"]
