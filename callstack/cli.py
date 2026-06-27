@@ -249,6 +249,11 @@ def _parse_once(value: str) -> int:
         raise argparse.ArgumentTypeError("--once must be a positive integer") from exc
     if count < 1:
         raise argparse.ArgumentTypeError("--once must be a positive integer")
+    if count > _MONITOR_QUEUE_MAXSIZE:
+        raise argparse.ArgumentTypeError(
+            f"--once must be no greater than the bounded monitor queue size "
+            f"({_MONITOR_QUEUE_MAXSIZE})"
+        )
     return count
 
 

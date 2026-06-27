@@ -194,6 +194,21 @@ def test_monitor_overflow_finite_once_keeps_enough_real_events(monkeypatch, caps
     assert "raw secret" not in output
 
 
+def test_monitor_rejects_once_greater_than_bounded_queue(monkeypatch, capsys):
+    import callstack.cli as cli
+
+    monkeypatch.setattr(cli, "_MONITOR_QUEUE_MAXSIZE", 2)
+
+    with pytest.raises(SystemExit):
+        cli._build_parser().parse_args(
+            ["monitor", "--events", "sms.received", "--json", "--once", "3"]
+        )
+
+    captured = capsys.readouterr()
+    assert "--once" in captured.err
+    assert "2" in captured.err
+
+
 def test_monitor_json_outputs_selected_sanitized_event_and_cleans_up(monkeypatch, capsys):
     secret_body = "secret passcode 1234"
     raw_private = "+CMT: private raw line"
