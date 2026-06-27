@@ -51,6 +51,13 @@ def sms_service(executor, bus, store):
     return SMSService(executor, bus, store)
 
 
+class FailingSMSStore(SMSStore):
+    """SMS store test double that fails before accepting a message."""
+
+    async def save(self, sms):
+        raise RuntimeError("simulated durable store failure")
+
+
 # -- Initialization --
 
 async def test_initialize(sms_service, transport):
@@ -349,6 +356,27 @@ async def test_receive_cmti(sms_service, transport, bus, store):
     enriched = [e for e in all_events if e.sender == "+155****9876" and not e.raw]
     assert len(enriched) == 1
     assert enriched[0].body == "Hello there!"
+    assert [command.strip() for command in transport.all_written] == [
+        "AT+CMGR=3",
+        "AT+CMGD=3",
+    ]
+
+
+async def test_receive_cmti_store_failure_does_not_delete_sim_slot(executor, transport, bus):
+    """If durable store save fails, the SIM slot remains for retry/recovery."""
+    service = SMSService(executor, bus, FailingSMSStore())
+    transport.feed(
+        '+CMGR: "REC UNREAD","+155****9876","","24/12/25,14:30:00+04"',
+        "Hello there!",
+        "OK",
+    )
+    # Keep the pre-fix delete path from timing out so RED proves the destructive command.
+    transport.feed("OK")
+
+    with pytest.raises(RuntimeError, match="simulated durable store failure"):
+        await service._on_incoming(_RawSMSNotification(raw='+CMTI: "SM",3'))
+
+    assert [command.strip() for command in transport.all_written] == ["AT+CMGR=3"]
 
 
 async def test_receive_cmti_info_log_redacts_sender_number(sms_service, transport, bus, caplog):
