@@ -50,7 +50,9 @@ class APIKeyAuth:
         rate_limit: int = 60,
         rate_window: int = 60,
     ):
-        self._keys: set[str] = set(api_keys) if api_keys else set()
+        self._keys: set[str] = set()
+        if api_keys:
+            self._keys = {self._validated_key(key) for key in api_keys}
         self._rate_limit = rate_limit
         self._rate_window = rate_window
         self._request_log: dict[str, list[float]] = defaultdict(list)
@@ -95,8 +97,14 @@ class APIKeyAuth:
             valid |= secrets.compare_digest(candidate_key, stored_key)
         return valid
 
+    @staticmethod
+    def _validated_key(key: str) -> str:
+        if not key.strip():
+            raise ValueError("API key must not be blank")
+        return key
+
     def add_key(self, key: str) -> None:
-        self._keys.add(key)
+        self._keys.add(self._validated_key(key))
         self.enabled = True
 
     def revoke_key(self, key: str) -> None:

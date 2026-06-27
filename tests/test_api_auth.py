@@ -79,6 +79,14 @@ class TestAPIKeyAuthEnabled:
         resp = await client.get("/test", headers={"Authorization": "Basic abc123"})
         assert resp.status == 401
 
+    def test_blank_configured_key_is_rejected(self):
+        with pytest.raises(ValueError, match="API key must not be blank"):
+            APIKeyAuth(api_keys=[""])
+
+    def test_whitespace_configured_key_is_rejected(self):
+        with pytest.raises(ValueError, match="API key must not be blank"):
+            APIKeyAuth(api_keys=["   \t"])
+
 
 class TestAPIKeyConstantTimeComparison:
     def test_helper_compares_candidate_against_each_stored_key_without_self_compare(self, monkeypatch):
@@ -126,6 +134,18 @@ class TestAPIKeyManagement:
         auth.add_key("new-key")
         assert auth.enabled is True
         assert "new-key" in auth._keys
+
+    def test_add_key_rejects_blank_key(self):
+        auth = APIKeyAuth()
+        with pytest.raises(ValueError, match="API key must not be blank"):
+            auth.add_key("")
+        assert auth.enabled is False
+
+    def test_add_key_rejects_whitespace_key(self):
+        auth = APIKeyAuth()
+        with pytest.raises(ValueError, match="API key must not be blank"):
+            auth.add_key("  \n")
+        assert auth.enabled is False
 
     def test_revoke_key(self):
         auth = APIKeyAuth(api_keys=["only-key"])
