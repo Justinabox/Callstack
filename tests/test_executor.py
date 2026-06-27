@@ -7,6 +7,7 @@ from callstack.events.types import CallState, CallStateEvent, RingEvent, DTMFEve
 from callstack.errors import ATTimeoutError, TransportError
 from callstack.protocol.executor import ATCommandExecutor, ATResponse
 from callstack.protocol.urc import URCDispatcher
+from callstack.transport.base import Transport
 from callstack.transport.mock import MockTransport
 
 
@@ -183,6 +184,67 @@ async def test_direct_read_transport_oserror_raises_transport_error(transport, u
     message = str(exc_info.value)
     assert "Transport error during command" in message
     assert "serial disconnected" in message
+
+
+class EOFTransport(Transport):
+    """Transport double that simulates a serial EOF/USB disconnect."""
+
+    def __init__(self):
+        self.reads = 0
+        self.writes: list[bytes] = []
+
+    async def open(self) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+    async def write(self, data: bytes) -> None:
+        self.writes.append(data)
+
+    async def read(self, size: int = -1) -> bytes:
+        return b""
+
+    async def readline(self) -> bytes:
+        self.reads += 1
+        await asyncio.sleep(0)
+        return b""
+
+    def in_waiting(self) -> int:
+        return 0
+
+
+async def test_reader_loop_treats_empty_read_as_transport_disconnect(bus):
+    """An EOF/empty read stops the reader instead of spinning as blank idle lines."""
+    transport = EOFTransport()
+    executor = ATCommandExecutor(transport, URCDispatcher(bus))
+
+    await executor.start_reader()
+
+    try:
+        for _ in range(20):
+            if not executor._reader_active:
+                break
+            await asyncio.sleep(0.01)
+
+        assert executor._reader_active is False
+        assert executor._reader_task is not None
+        with pytest.raises(TransportError, match="closed|EOF|empty"):
+            executor._reader_task.result()
+        assert transport.reads == 1
+    finally:
+        await executor.stop_reader()
+
+
+async def test_direct_command_empty_read_raises_transport_error(urc):
+    """Command-in-flight EOF is reported as a transport failure, not a timeout."""
+    transport = EOFTransport()
+    executor = ATCommandExecutor(transport, urc)
+
+    with pytest.raises(TransportError, match="Transport error during command"):
+        await executor.execute("AT", timeout=0.05)
+
+    assert transport.writes == [b"AT\r\n"]
 
 
 async def test_echo_suppression(executor, transport):

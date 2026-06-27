@@ -1,7 +1,12 @@
-"""Tests for the mock transport."""
+"""Tests for transport adapters."""
+
+import asyncio
 
 import pytest
+
+from callstack.errors import TransportError
 from callstack.transport.mock import MockTransport
+from callstack.transport.serial import SerialTransport
 
 
 @pytest.fixture
@@ -62,3 +67,14 @@ async def test_feed_raw(transport):
     transport.feed_raw(b"\x00\x01\x02")
     data = await transport.read(3)
     assert data == b"\x00\x01\x02"
+
+
+async def test_serial_readline_raises_transport_error_on_initial_eof():
+    """A serial EOF before any line bytes is a disconnect, not a blank modem line."""
+    reader = asyncio.StreamReader()
+    reader.feed_eof()
+    transport = SerialTransport("/dev/ttyUSB-test")
+    transport._reader = reader
+
+    with pytest.raises(TransportError, match="closed|EOF"):
+        await transport.readline()

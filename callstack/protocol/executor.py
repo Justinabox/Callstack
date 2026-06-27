@@ -128,6 +128,8 @@ class ATCommandExecutor:
             while not self._shutdown.is_set():
                 try:
                     raw = await self._transport.readline()
+                    if raw == b"":
+                        raise TransportError("Transport closed (EOF)")
                 except asyncio.CancelledError:
                     break
                 except (TransportError, OSError) as exc:
@@ -264,6 +266,8 @@ class ATCommandExecutor:
                 raw = await asyncio.wait_for(
                     self._transport.readline(), timeout=timeout
                 )
+                if raw == b"":
+                    raise TransportError("Transport closed (EOF)")
             except asyncio.TimeoutError:
                 raise
             except (TransportError, OSError) as exc:
