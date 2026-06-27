@@ -1,6 +1,7 @@
 """Tests for the AT command executor."""
 
 import asyncio
+import logging
 import pytest
 from callstack.events.bus import EventBus
 from callstack.events.types import CallState, CallStateEvent, RingEvent, DTMFEvent
@@ -112,6 +113,24 @@ async def test_success_result_code_requires_exact_line(executor, transport):
     assert resp.success is True
     assert resp.lines == ["SMS body says OK to proceed", "OK"]
     assert resp.data_lines == ["SMS body says OK to proceed"]
+
+
+async def test_sms_read_debug_log_does_not_expose_raw_cmgr_payload(executor, transport, caplog):
+    """Debug logs for SMS reads must not expose raw report/SMS payloads."""
+    raw_report = (
+        '+CMGR: "REC READ",6,"+15551234567",145,'
+        '"24/12/25,14:30:00+04","24/12/25,14:30:05+04",0'
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="callstack.executor"):
+        transport.feed(raw_report, "OK")
+        resp = await executor.execute("AT+CMGR=9")
+
+    assert resp.success is True
+    assert resp.data_lines == [raw_report]
+    assert "+15551234567" not in caplog.text
+    assert raw_report not in caplog.text
+    assert "RX: <redacted SMS read response>" in caplog.text
 
 
 async def test_error_response(executor, transport):

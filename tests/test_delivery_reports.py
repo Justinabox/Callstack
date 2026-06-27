@@ -69,6 +69,9 @@ class TestDeliveryReportService:
         assert event.reference == 6
         assert event.recipient == "+120****0123"
         assert event.status == "delivered"
+        written_commands = [command.strip() for command in transport.all_written]
+        assert "AT+CMGR=5" in written_commands
+        assert "AT+CMGD=5" in written_commands
 
     @pytest.mark.parametrize(
         ("status_code", "expected_status"),
@@ -103,7 +106,7 @@ class TestDeliveryReportService:
         assert event.recipient == "+120****0456"
         assert event.status == expected_status
 
-    async def test_malformed_report_does_not_emit_false_delivery_success(self, bus, urc):
+    async def test_malformed_report_does_not_emit_false_delivery_success_or_delete_slot(self, bus, urc):
         transport = MockTransport()
         service = SMSService(ATCommandExecutor(transport, urc), bus)
 
@@ -113,6 +116,9 @@ class TestDeliveryReportService:
             event = await stream.next(timeout=0.01)
 
         assert event is None
+        written_commands = [command.strip() for command in transport.all_written]
+        assert "AT+CMGR=7" in written_commands
+        assert "AT+CMGD=7" not in written_commands
 
     async def test_delivery_report_logs_status_without_recipient(self, bus, urc, caplog):
         transport = MockTransport()

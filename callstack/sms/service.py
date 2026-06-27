@@ -249,17 +249,17 @@ class SMSService:
                 if report is not None:
                     reference, recipient, status = report
 
-        await self._at.execute(
-            ATCommand.delete_sms(event.index),
-            expect=["OK"],
-            timeout=self._command_timeout,
-        )
-
         if not status:
             logger.warning(
                 "Could not parse delivery report at index %d", event.index
             )
             return
+
+        await self._at.execute(
+            ATCommand.delete_sms(event.index),
+            expect=["OK"],
+            timeout=self._command_timeout,
+        )
 
         await self._bus.emit(SMSDeliveryReportEvent(
             reference=reference,
