@@ -14,8 +14,9 @@ from callstack.events.types import (
     RingEvent,
     CallerIDEvent,
 )
-from callstack.errors import SIMPINRequired, TransportError
+from callstack.errors import SIMPINRequired, SIMPUKRequired, SIMUnlockError, TransportError
 from callstack.modem import Modem
+from callstack.protocol.commands import ATCommand
 from callstack.protocol.executor import ATResponse
 from callstack.transport.mock import MockTransport
 
@@ -150,6 +151,100 @@ class TestModemInit:
             ("AT+CLIP=1", 1.25),
             ("AT+CVHU=0", 1.25),
             ("AT+COLP=1", 1.25),
+        ]
+
+    async def test_initialization_fails_closed_when_sim_pin_query_errors(self):
+        modem = MockModem()
+        calls = []
+
+        async def record_execute(command, expect=("OK",), timeout=5.0):
+            calls.append(command)
+            if command == ATCommand.CPIN_QUERY:
+                return ATResponse(success=False, lines=["ERROR"])
+            return ATResponse(success=True, lines=["OK"])
+
+        modem._executor.execute = record_execute
+
+        with pytest.raises(SIMUnlockError, match="SIM readiness check failed"):
+            await modem._initialize_modem()
+
+        assert calls == [ATCommand.ECHO_OFF, ATCommand.CPIN_QUERY]
+
+    async def test_initialization_fails_closed_when_sim_pin_response_is_unparsable(self):
+        modem = MockModem()
+        calls = []
+
+        async def record_execute(command, expect=("OK",), timeout=5.0):
+            calls.append(command)
+            if command == ATCommand.CPIN_QUERY:
+                return ATResponse(success=True, lines=["NOT A CPIN STATUS", "OK"])
+            return ATResponse(success=True, lines=["OK"])
+
+        modem._executor.execute = record_execute
+
+        with pytest.raises(SIMUnlockError, match="SIM readiness check failed"):
+            await modem._initialize_modem()
+
+        assert calls == [ATCommand.ECHO_OFF, ATCommand.CPIN_QUERY]
+
+    async def test_initialization_fails_closed_when_sim_pin_status_is_unknown(self, caplog):
+        modem = MockModem()
+        calls = []
+        private_status = "PH-SIM PIN"
+        caplog.set_level("INFO", logger="callstack.modem")
+
+        async def record_execute(command, expect=("OK",), timeout=5.0):
+            calls.append(command)
+            if command == ATCommand.CPIN_QUERY:
+                return ATResponse(success=True, lines=[f"+CPIN: {private_status}", "OK"])
+            return ATResponse(success=True, lines=["OK"])
+
+        modem._executor.execute = record_execute
+
+        with pytest.raises(SIMUnlockError, match="SIM readiness check failed") as excinfo:
+            await modem._initialize_modem()
+
+        assert calls == [ATCommand.ECHO_OFF, ATCommand.CPIN_QUERY]
+        assert private_status not in str(excinfo.value)
+        assert private_status not in caplog.text
+
+    async def test_initialization_still_fails_closed_on_puk_locked_sim(self):
+        modem = MockModem()
+        calls = []
+
+        async def record_execute(command, expect=("OK",), timeout=5.0):
+            calls.append(command)
+            if command == ATCommand.CPIN_QUERY:
+                return ATResponse(success=True, lines=["+CPIN: SIM PUK", "OK"])
+            return ATResponse(success=True, lines=["OK"])
+
+        modem._executor.execute = record_execute
+
+        with pytest.raises(SIMPUKRequired, match="SIM is PUK-locked"):
+            await modem._initialize_modem()
+
+        assert calls == [ATCommand.ECHO_OFF, ATCommand.CPIN_QUERY]
+
+    async def test_initialization_with_configured_pin_unlocks_then_continues(self):
+        modem = MockModem(ModemConfig(sim_pin="1234"))
+        calls = []
+
+        async def record_execute(command, expect=("OK",), timeout=5.0):
+            calls.append(command)
+            if command == ATCommand.CPIN_QUERY:
+                return ATResponse(success=True, lines=["+CPIN: SIM PIN", "OK"])
+            return ATResponse(success=True, lines=["OK"])
+
+        modem._executor.execute = record_execute
+        await modem._initialize_modem()
+
+        assert calls == [
+            ATCommand.ECHO_OFF,
+            ATCommand.CPIN_QUERY,
+            'AT+CPIN="1234"',
+            ATCommand.CLIP_ENABLE,
+            ATCommand.CVHU,
+            ATCommand.COLP_ENABLE,
         ]
 
     async def test_sms_service_receives_configured_send_timeouts(self):

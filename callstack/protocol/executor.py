@@ -53,8 +53,26 @@ def _is_final_result_line(line: str) -> bool:
     )
 
 
+def _is_sensitive_command_line(line: str) -> bool:
+    """Return true when a line contains a credential-bearing AT command."""
+    return line.upper().startswith("AT+CPIN=")
+
+
+def _command_for_log(command: str) -> str:
+    """Return a privacy-safe command representation for logs/errors."""
+    if _is_sensitive_command_line(command):
+        return "AT+CPIN=<redacted>"
+    return command
+
+
 def _response_line_for_log(command: str, raw_line: str) -> str:
     """Return a privacy-safe representation of one modem response line."""
+    display_command = _command_for_log(command)
+    control_line = _normalize_control_line(raw_line)
+    if _is_sensitive_command_line(control_line):
+        return _command_for_log(control_line)
+    if display_command != command and control_line == command:
+        return display_command
     if command.startswith(("AT+CMGR", "AT+CMGL")) and not _is_final_result_line(raw_line):
         return "<redacted SMS read response>"
     return raw_line
@@ -191,7 +209,9 @@ class ATCommandExecutor:
                             pass
                     await self._urc.dispatch(control_line, followup)
                 else:
-                    logger.debug("Ignoring non-URC idle line: %s", control_line)
+                    logger.debug(
+                        "Ignoring non-URC idle line: %s", _command_for_log(control_line)
+                    )
         finally:
             self._command_in_flight = False
 
@@ -231,7 +251,7 @@ class ATCommandExecutor:
                 self._drain_queue()
                 self._command_in_flight = True
             try:
-                logger.debug("TX: %s", command)
+                logger.debug("TX: %s", _command_for_log(command))
                 await self._transport.write(f"{command}\r\n".encode())
                 return await self._collect_response(command, expect, timeout)
             finally:
@@ -348,19 +368,20 @@ class ATCommandExecutor:
         lines: list[str] = []
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
+        display_command = _command_for_log(command)
 
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise ATTimeoutError(
-                    f"Timeout after {timeout}s waiting for {expect} (command: {command})"
+                    f"Timeout after {timeout}s waiting for {expect} (command: {display_command})"
                 )
 
             try:
                 raw_line = await self._next_line(remaining)
             except asyncio.TimeoutError:
                 raise ATTimeoutError(
-                    f"Timeout after {timeout}s waiting for {expect} (command: {command})"
+                    f"Timeout after {timeout}s waiting for {expect} (command: {display_command})"
                 )
 
             control_line = _normalize_control_line(raw_line)
@@ -368,6 +389,11 @@ class ATCommandExecutor:
                 continue
 
             logger.debug("RX: %s", _response_line_for_log(command, raw_line))
+
+            # Drop stale or echoed credential-bearing commands before exposing
+            # response lines to callers or matching them against result codes.
+            if _is_sensitive_command_line(control_line):
+                continue
 
             # Echo suppression: skip if the line matches the command we sent.
             if control_line == command:
