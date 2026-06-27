@@ -2,6 +2,8 @@
 
 import asyncio
 import math
+import os
+import tempfile
 import wave
 import logging
 
@@ -89,8 +91,16 @@ class AudioPipeline:
                 stop.set()
             self._bus.subscribe(DTMFEvent, _on_dtmf)
 
+        output_path_str = os.fspath(output_path)
+        output_dir = os.path.dirname(os.path.abspath(output_path_str))
+        output_name = os.path.basename(output_path_str)
+        fd, recording_path = tempfile.mkstemp(
+            prefix=f".{output_name}.", suffix=".tmp", dir=output_dir
+        )
+        os.close(fd)
+        recording_succeeded = False
         try:
-            with wave.open(output_path, "wb") as wf:
+            with wave.open(recording_path, "wb") as wf:
                 wf.setnchannels(self.CHANNELS)
                 wf.setsampwidth(self.SAMPLE_WIDTH)
                 wf.setframerate(self.SAMPLE_RATE)
@@ -109,12 +119,32 @@ class AudioPipeline:
                             self._transport.read(self.CHUNK_BYTES),
                             timeout=min(0.1, remaining),
                         )
+                        if data == b"":
+                            was_running = self._running
+                            self._running = False
+                            if was_running:
+                                try:
+                                    await self._transport.close()
+                                except Exception:
+                                    logger.warning(
+                                        "Audio transport close failed after recording EOF"
+                                    )
+                            raise AudioPipelineError(
+                                "Audio transport ended during recording"
+                            )
                         wf.writeframes(data)
                     except asyncio.TimeoutError:
                         continue
 
+            os.replace(recording_path, output_path_str)
+            recording_succeeded = True
             logger.info("Recording complete: %s", output_path)
         finally:
+            if not recording_succeeded:
+                try:
+                    os.remove(recording_path)
+                except OSError:
+                    pass
             if stop_on_dtmf:
                 self._bus.unsubscribe(DTMFEvent, _on_dtmf)
 
