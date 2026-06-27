@@ -1,6 +1,7 @@
 """Tests for the SMS service."""
 
 import asyncio
+import logging
 from datetime import timedelta
 
 import pytest
@@ -164,6 +165,19 @@ async def test_send_success(sms_service, transport, bus):
     assert sent_events[0].reference == 42
 
 
+async def test_send_info_log_redacts_recipient_number(sms_service, transport, caplog):
+    """SMS send logs must not expose the raw destination number."""
+    recipient = "+15551234567"
+    transport.feed("> ")
+    transport.feed("+CMGS: 47", "OK")
+
+    with caplog.at_level(logging.INFO, logger="callstack.sms"):
+        await sms_service.send(recipient, "Hello!")
+
+    assert recipient not in caplog.text
+    assert "SMS sent to" in caplog.text
+
+
 async def test_send_gsm_charset_non_ascii_without_replacement(sms_service, transport):
     """GSM text-mode sends GSM 03.38 characters without ASCII replacement."""
     transport.feed("> ")
@@ -257,7 +271,7 @@ async def test_receive_cmti(sms_service, transport, bus, store):
 
     # When the service gets a CMTI notification, it will call AT+CMGR to fetch,
     # then AT+CMGD to delete the message from SIM storage
-    transport.feed('+CMGR: "REC UNREAD","+15559876","","24/12/25,14:30:00+04"', "Hello there!", "OK")
+    transport.feed('+CMGR: "REC UNREAD","+155****9876","","24/12/25,14:30:00+04"', "Hello there!", "OK")
     transport.feed("OK")  # Response for AT+CMGD (delete after read)
 
     # Simulate URC dispatch (now uses _RawSMSNotification)
@@ -265,9 +279,29 @@ async def test_receive_cmti(sms_service, transport, bus, store):
 
     await asyncio.sleep(0.05)
     # The re-emitted enriched event (empty raw, populated sender/body)
-    enriched = [e for e in all_events if e.sender == "+15559876" and not e.raw]
+    enriched = [e for e in all_events if e.sender == "+155****9876" and not e.raw]
     assert len(enriched) == 1
     assert enriched[0].body == "Hello there!"
+
+
+async def test_receive_cmti_info_log_redacts_sender_number(sms_service, transport, bus, caplog):
+    """Stored incoming SMS logs must not expose the raw sender number."""
+    sender = "+155****2468"
+    body = "stored private code 246810"
+    transport.feed(
+        f'+CMGR: "REC UNREAD","{sender}","","24/12/25,14:30:00+04"',
+        body,
+        "OK",
+    )
+    transport.feed("OK")
+
+    with caplog.at_level(logging.INFO, logger="callstack.sms"):
+        await bus.emit(_RawSMSNotification(raw='+CMTI: "SM",7'))
+        await asyncio.sleep(0.05)
+
+    assert sender not in caplog.text
+    assert body not in caplog.text
+    assert "Incoming SMS from" in caplog.text
 
 
 # -- Receiving via CMT --
@@ -290,6 +324,23 @@ async def test_receive_cmt(sms_service, bus, store):
     enriched = [e for e in all_events if e.body == "Direct message" and not e.raw]
     assert len(enriched) >= 1
     assert await store.count() == 1
+
+
+async def test_receive_cmt_info_log_redacts_sender_number(sms_service, bus, caplog):
+    """Direct incoming SMS logs must not expose the raw sender number."""
+    sender = "+15557654321"
+
+    with caplog.at_level(logging.INFO, logger="callstack.sms"):
+        await bus.emit(_RawSMSNotification(
+            sender=sender,
+            body="private one-time code 123456",
+            raw=f'+CMT: "{sender}","","24/12/25,14:30:00+04"',
+        ))
+        await asyncio.sleep(0.05)
+
+    assert sender not in caplog.text
+    assert "private one-time code" not in caplog.text
+    assert "Incoming SMS from" in caplog.text
 
 
 # -- Message Management --

@@ -19,6 +19,7 @@ from callstack.events.types import (
 from callstack.protocol.commands import ATCommand
 from callstack.protocol.executor import ATCommandExecutor
 from callstack.protocol.parser import ATResponseParser
+from callstack.privacy import redact_phone_number
 from callstack.sms.pdu import GSM7_BASIC
 from callstack.sms.store import SMSStore
 from callstack.sms.types import SMS, SMSStatus
@@ -172,7 +173,7 @@ class SMSService:
         )
         await self._store.save(sms)
         await self._bus.emit(SMSSentEvent(recipient=to, reference=reference))
-        logger.info("SMS sent to %s (ref: %d)", to, reference)
+        logger.info("SMS sent to %s (ref: %d)", redact_phone_number(to), reference)
         return sms
 
     # -- Receiving --
@@ -200,7 +201,7 @@ class SMSService:
                     await self._bus.emit(
                         IncomingSMSEvent(sender=sms.sender, body=sms.body)
                     )
-                    logger.info("Incoming SMS from %s (index %d)", sms.sender, index)
+                    logger.info("Incoming SMS from %s (index %d)", redact_phone_number(sms.sender), index)
 
         elif raw.startswith("+CMT:"):
             # Direct delivery mode: sender is in the header, body follows
@@ -215,7 +216,7 @@ class SMSService:
             await self._bus.emit(
                 IncomingSMSEvent(sender=sender, body=event.body)
             )
-            logger.info("Incoming SMS from %s (direct)", sender)
+            logger.info("Incoming SMS from %s (direct)", redact_phone_number(sender))
 
     # -- Delivery Reports --
 
