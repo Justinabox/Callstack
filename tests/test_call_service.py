@@ -12,6 +12,7 @@ from callstack.events.types import (
     CallState,
     CallStateEvent,
     CallerIDEvent,
+    DTMFEvent,
     RingEvent,
 )
 from callstack.errors import DialError, AnswerError, ATTimeoutError
@@ -28,6 +29,14 @@ def _make_wav(path: str, num_frames: int = 320) -> str:
         wf.setframerate(8000)
         wf.writeframes(b"\x00" * num_frames * 2)
     return path
+
+
+async def _wait_for_dtmf_stream(bus: EventBus) -> None:
+    async def wait_until_stream_opens() -> None:
+        while bus._queues[DTMFEvent] == []:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_until_stream_opens(), timeout=0.1)
 
 
 @pytest.fixture
@@ -863,6 +872,160 @@ class TestCallSession:
             await stale_session.record(str(tmp_path / "stale-recording.wav"), max_duration=0.1)
 
         assert service._audio.record_calls == []
+
+    async def test_hangup_rejects_stale_session_before_service_hangup(self):
+        class FakeService:
+            def __init__(self):
+                self.state = CallState.ACTIVE
+                self.active_call: object | None = None
+                self.hangup_calls = 0
+
+            async def hangup(self):
+                self.hangup_calls += 1
+
+        service = FakeService()
+        stale_session = CallSession(
+            number="5551234", direction="inbound", service=cast(CallService, service)
+        )
+        current_session = CallSession(
+            number="5555678", direction="inbound", service=cast(CallService, service)
+        )
+        service.active_call = current_session
+
+        with pytest.raises(RuntimeError, match="active call"):
+            await stale_session.hangup()
+
+        assert service.hangup_calls == 0
+        assert not stale_session._ended.is_set()
+
+    async def test_hangup_rejects_inactive_session_before_service_hangup(self):
+        class FakeService:
+            def __init__(self):
+                self.state = CallState.IDLE
+                self.active_call = None
+                self.hangup_calls = 0
+
+            async def hangup(self):
+                self.hangup_calls += 1
+
+        service = FakeService()
+        session = CallSession(
+            number="5551234", direction="inbound", service=cast(CallService, service)
+        )
+
+        with pytest.raises(RuntimeError, match="active call"):
+            await session.hangup()
+
+        assert service.hangup_calls == 0
+        assert not session._ended.is_set()
+
+    async def test_hangup_allows_current_dialing_session_to_cancel_call(self):
+        class FakeService:
+            def __init__(self):
+                self.state = CallState.DIALING
+                self.active_call: object | None = None
+                self.hangup_calls = 0
+
+            async def hangup(self):
+                self.hangup_calls += 1
+                self.state = CallState.IDLE
+                self.active_call = None
+
+        service = FakeService()
+        session = CallSession(
+            number="5551234", direction="outbound", service=cast(CallService, service)
+        )
+        service.active_call = session
+
+        await session.hangup()
+
+        assert service.hangup_calls == 1
+        assert session._ended.is_set()
+
+    async def test_collect_dtmf_rejects_stale_session_before_subscribing(self):
+        class FakeService:
+            def __init__(self):
+                self.state = CallState.ACTIVE
+                self.active_call: object | None = None
+                self._bus = EventBus()
+
+        service = FakeService()
+        stale_session = CallSession(
+            number="5551234", direction="inbound", service=cast(CallService, service)
+        )
+        current_session = CallSession(
+            number="5555678", direction="inbound", service=cast(CallService, service)
+        )
+        service.active_call = current_session
+
+        with pytest.raises(RuntimeError, match="active call"):
+            await stale_session.collect_dtmf(max_digits=4, timeout=0.01)
+
+        assert service._bus._queues[DTMFEvent] == []
+
+    async def test_collect_dtmf_aborts_if_session_becomes_stale_before_digit(self):
+        class FakeService:
+            def __init__(self):
+                self.state = CallState.ACTIVE
+                self.active_call: object | None = None
+                self._bus = EventBus()
+
+        service = FakeService()
+        session = CallSession(
+            number="5551234", direction="inbound", service=cast(CallService, service)
+        )
+        service.active_call = session
+        collect_task = asyncio.create_task(session.collect_dtmf(max_digits=1, timeout=0.5))
+        await _wait_for_dtmf_stream(service._bus)
+
+        service.active_call = CallSession(
+            number="5555678", direction="inbound", service=cast(CallService, service)
+        )
+        await service._bus.emit(DTMFEvent(digit="8"))
+
+        with pytest.raises(RuntimeError, match="active call"):
+            await collect_task
+
+    async def test_play_and_collect_aborts_if_session_becomes_stale_before_digit(self):
+        class FakeAudio:
+            def __init__(self):
+                self.started = asyncio.Event()
+                self.cancelled = False
+
+            async def play_file(self, path, cancel=None):
+                self.started.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    self.cancelled = True
+                    raise
+
+        class FakeService:
+            def __init__(self):
+                self.state = CallState.ACTIVE
+                self.active_call: object | None = None
+                self._bus = EventBus()
+                self._audio = FakeAudio()
+
+        service = FakeService()
+        session = CallSession(
+            number="5551234", direction="inbound", service=cast(CallService, service)
+        )
+        service.active_call = session
+        collect_task = asyncio.create_task(
+            session.play_and_collect("menu.wav", max_digits=1, timeout=0.5, interrupt=True)
+        )
+        await service._audio.started.wait()
+        await _wait_for_dtmf_stream(service._bus)
+
+        service.active_call = CallSession(
+            number="5555678", direction="inbound", service=cast(CallService, service)
+        )
+        await service._bus.emit(DTMFEvent(digit="7"))
+
+        with pytest.raises(RuntimeError, match="active call"):
+            await collect_task
+        assert service._audio.cancelled is True
 
     async def test_send_dtmf_rejects_inactive_session_before_modem_write(self):
         class FakeAT:
