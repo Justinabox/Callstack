@@ -5,6 +5,7 @@ construction for modems operating in PDU mode (AT+CMGF=0).
 """
 
 import re
+import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -40,6 +41,51 @@ _GSM7_ENCODE = {c: i for i, c in enumerate(GSM7_BASIC)}
 _GSM7_EXTENSION_DECODE = {code: char for char, code in GSM7_EXTENSION.items()}
 _SMS_RECIPIENT_RE = re.compile(r"\+?[0-9]{3,15}\Z")
 _ALPHANUMERIC_ORIGINATOR_CHARS = frozenset(chr(code) for code in range(0x20, 0x7F))
+_GSM7_16BIT_CONCAT_UDH_OCTETS = 7  # UDHL + IEI + IEDL + 16-bit ref + total + sequence
+_GSM7_16BIT_CONCAT_HEADER_SEPTETS = (_GSM7_16BIT_CONCAT_UDH_OCTETS * 8 + 6) // 7
+_GSM7_16BIT_CONCAT_PAYLOAD_SEPTETS = 160 - _GSM7_16BIT_CONCAT_HEADER_SEPTETS
+
+
+def _gsm7_septets(text: str, *, allow_fallback: bool = True) -> list[int]:
+    """Return unpacked GSM 03.38 septets for text."""
+    septets: list[int] = []
+    for char in text:
+        extension_code = GSM7_EXTENSION.get(char)
+        if extension_code is not None:
+            septets.extend((GSM7_ESCAPE, extension_code))
+            continue
+
+        code = _GSM7_ENCODE.get(char)
+        if code is None:
+            if not allow_fallback:
+                raise ValueError(
+                    "SMS body cannot be encoded with GSM 03.38; "
+                    "UCS2 multipart sending is not implemented yet"
+                )
+            code = _GSM7_ENCODE.get("?", 0x3F)
+        septets.append(code)
+    return septets
+
+
+def _pack_gsm7_septets(septets: list[int], *, bit_offset: int = 0) -> bytes:
+    """Pack unpacked 7-bit values into octets at the requested bit offset."""
+    total_bits = bit_offset + (len(septets) * 7)
+    packed = bytearray((total_bits + 7) // 8)
+    for index, septet in enumerate(septets):
+        current_bit = bit_offset + (index * 7)
+        for shift in range(7):
+            if septet & (1 << shift):
+                target_bit = current_bit + shift
+                packed[target_bit // 8] |= 1 << (target_bit % 8)
+    return bytes(packed)
+
+
+def _pack_gsm7_with_udh(udh: bytes, payload_septets: list[int]) -> tuple[bytes, int]:
+    """Pack UDH octets plus GSM 7-bit payload for SMS-SUBMIT user data."""
+    header_septets = (len(udh) * 8 + 6) // 7
+    payload = bytearray(_pack_gsm7_septets(payload_septets, bit_offset=header_septets * 7))
+    payload[:len(udh)] = udh
+    return bytes(payload), header_septets + len(payload_septets)
 
 
 def _validate_sms_recipient(recipient: str) -> str:
@@ -98,33 +144,12 @@ class PDUEncoder:
 
         Returns (packed_bytes, septet_count).
         """
-        septets = []
-        for char in text:
-            extension_code = GSM7_EXTENSION.get(char)
-            if extension_code is not None:
-                septets.extend((GSM7_ESCAPE, extension_code))
-                continue
-
-            code = _GSM7_ENCODE.get(char)
-            if code is None:
-                code = _GSM7_ENCODE.get("?", 0x3F)
-            septets.append(code)
+        septets = _gsm7_septets(text)
 
         # Pack 7-bit values into bytes
-        packed = bytearray()
-        bits = 0
-        byte_val = 0
-        for septet in septets:
-            byte_val |= (septet << bits)
-            bits += 7
-            while bits >= 8:
-                packed.append(byte_val & 0xFF)
-                byte_val >>= 8
-                bits -= 8
-        if bits > 0:
-            packed.append(byte_val & 0xFF)
+        packed = _pack_gsm7_septets(septets)
 
-        return bytes(packed), len(septets)
+        return packed, len(septets)
 
     @staticmethod
     def build_submit_pdu(recipient: str, body: str) -> tuple[str, int]:
@@ -169,6 +194,122 @@ class PDUEncoder:
         tpdu_len = len(tpdu) // 2
 
         return pdu, tpdu_len
+
+    @staticmethod
+    def build_multipart_submit_pdus(
+        recipient: str,
+        body: str,
+        *,
+        reference: Optional[int] = None,
+    ) -> list["MultipartSubmitPDU"]:
+        """Build GSM 7-bit concatenated SMS-SUBMIT PDUs with 16-bit UDH.
+
+        Returns segment records containing complete PDU hex strings and TPDU
+        lengths for use with AT+CMGS=<length>. This helper only supports GSM
+        03.38 text; UCS2 multipart sending is intentionally out of scope.
+        """
+        recipient = _validate_sms_recipient(recipient)
+        if reference is None:
+            reference = secrets.randbits(16)
+        if not 0 <= reference <= 0xFFFF:
+            raise ValueError("Multipart SMS reference must fit in 16 bits")
+
+        segment_inputs: list[tuple[str, list[int]]] = []
+        current_text: list[str] = []
+        current_septets: list[int] = []
+        for char in body:
+            char_septets = _gsm7_septets(char, allow_fallback=False)
+            if (
+                current_septets
+                and len(current_septets) + len(char_septets)
+                > _GSM7_16BIT_CONCAT_PAYLOAD_SEPTETS
+            ):
+                segment_inputs.append(("".join(current_text), current_septets))
+                current_text = []
+                current_septets = []
+            current_text.append(char)
+            current_septets.extend(char_septets)
+
+        if current_text or not segment_inputs:
+            segment_inputs.append(("".join(current_text), current_septets))
+
+        total_parts = len(segment_inputs)
+        if total_parts > 255:
+            raise ValueError("Multipart SMS can contain at most 255 segments")
+
+        segments: list[MultipartSubmitPDU] = []
+        for index, (segment_body, segment_septets) in enumerate(segment_inputs, start=1):
+            pdu, tpdu_length = PDUEncoder._build_submit_pdu_with_user_data(
+                recipient,
+                segment_septets,
+                reference=reference,
+                total_parts=total_parts,
+                sequence=index,
+            )
+            segments.append(
+                MultipartSubmitPDU(
+                    pdu=pdu,
+                    tpdu_length=tpdu_length,
+                    sequence=index,
+                    total_parts=total_parts,
+                    reference=reference,
+                    body=segment_body,
+                    payload_septets=len(segment_septets),
+                )
+            )
+        return segments
+
+    @staticmethod
+    def _build_submit_pdu_with_user_data(
+        recipient: str,
+        payload_septets: list[int],
+        *,
+        reference: int,
+        total_parts: int,
+        sequence: int,
+    ) -> tuple[str, int]:
+        """Build one UDHI SMS-SUBMIT PDU around already-split septets."""
+        sca = "00"
+        pdu_type = "71"  # SMS-SUBMIT, relative VP, UDHI set
+        mr = "00"
+
+        clean = recipient.lstrip("+")
+        da_len = f"{len(clean):02X}"
+        da_encoded, da_toa = PDUEncoder.encode_phone_number(recipient)
+        da = da_len + f"{da_toa:02X}" + da_encoded
+
+        pid = "00"
+        dcs = "00"
+        vp = "A7"
+        udh = bytes([
+            0x06,
+            0x08,
+            0x04,
+            (reference >> 8) & 0xFF,
+            reference & 0xFF,
+            total_parts,
+            sequence,
+        ])
+        user_data, user_data_length = _pack_gsm7_with_udh(udh, payload_septets)
+        udl = f"{user_data_length:02X}"
+        ud = user_data.hex().upper()
+
+        tpdu = pdu_type + mr + da + pid + dcs + vp + udl + ud
+        pdu = sca + tpdu
+        return pdu, len(tpdu) // 2
+
+
+@dataclass(frozen=True)
+class MultipartSubmitPDU:
+    """One SMS-SUBMIT segment for an outbound concatenated GSM 7-bit SMS."""
+
+    pdu: str
+    tpdu_length: int
+    sequence: int
+    total_parts: int
+    reference: int
+    body: str
+    payload_septets: int
 
 
 @dataclass(frozen=True)
