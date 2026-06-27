@@ -126,16 +126,110 @@ class TestDeliveryReportService:
 
         with caplog.at_level(logging.INFO, logger="callstack.sms"):
             transport.feed(
-                '+CMGR: "REC READ",8,"+15550001234",145,'
+                '+CMGR: "REC READ",8,"+155****1234",145,'
                 '"24/12/25,14:30:00+04","24/12/25,14:30:05+04",0',
                 "OK",
                 "OK",
             )
             await service._on_delivery_report(_RawDeliveryReport(storage="SM", index=8))
 
-        assert "+15550001234" not in caplog.text
+        assert "+155****1234" not in caplog.text
         assert "reference 8" in caplog.text
         assert "delivered" in caplog.text
+
+    async def test_cleanup_failure_warns_without_recipient_after_first_emit(
+        self, bus, urc, caplog
+    ):
+        transport = MockTransport()
+        service = SMSService(ATCommandExecutor(transport, urc), bus)
+
+        async with bus.stream(SMSDeliveryReportEvent) as stream:
+            with caplog.at_level(logging.WARNING, logger="callstack.sms"):
+                transport.feed(
+                    '+CMGR: "REC READ",9,"+155****9999",145,'
+                    '"24/12/25,14:30:00+04","24/12/25,14:30:05+04",0',
+                    "OK",
+                    "ERROR",
+                )
+                await service._on_delivery_report(_RawDeliveryReport(storage="SM", index=9))
+            event = await stream.next(timeout=1.0)
+
+        assert event is not None
+        assert event.reference == 9
+        assert event.status == "delivered"
+        assert "Failed to delete delivery report slot after local acceptance" in caplog.text
+        assert "storage=SM index=9" in caplog.text
+        assert "+155****9999" not in caplog.text
+
+    async def test_uncleared_delivery_report_retry_does_not_emit_duplicate_and_clears_marker(
+        self, bus, urc
+    ):
+        transport = MockTransport()
+        service = SMSService(ATCommandExecutor(transport, urc), bus)
+        first_report = (
+            '+CMGR: "REC READ",10,"+155****1010",145,'
+            '"24/12/25,14:30:00+04","24/12/25,14:30:05+04",0'
+        )
+        reused_slot_report = (
+            '+CMGR: "REC READ",11,"+155****1111",145,'
+            '"24/12/25,14:30:00+04","24/12/25,14:30:05+04",0'
+        )
+
+        async with bus.stream(SMSDeliveryReportEvent) as stream:
+            transport.feed(first_report, "OK", "ERROR")
+            await service._on_delivery_report(_RawDeliveryReport(storage="SM", index=10))
+            first_event = await stream.next(timeout=1.0)
+
+            transport.feed(first_report, "OK", "OK")
+            await service._on_delivery_report(_RawDeliveryReport(storage="SM", index=10))
+            duplicate_event = await stream.next(timeout=0.01)
+
+            transport.feed(reused_slot_report, "OK", "OK")
+            await service._on_delivery_report(_RawDeliveryReport(storage="SM", index=10))
+            reused_slot_event = await stream.next(timeout=1.0)
+
+        assert first_event is not None
+        assert first_event.reference == 10
+        assert duplicate_event is None
+        assert reused_slot_event is not None
+        assert reused_slot_event.reference == 11
+        written_commands = [command.strip() for command in transport.all_written]
+        assert written_commands.count("AT+CMGR=10") == 3
+        assert written_commands.count("AT+CMGD=10") == 3
+
+    async def test_successful_cleanup_of_different_report_clears_stale_marker(
+        self, bus, urc
+    ):
+        transport = MockTransport()
+        service = SMSService(ATCommandExecutor(transport, urc), bus)
+        stale_report = (
+            '+CMGR: "REC READ",12,"+155****1212",145,'
+            '"24/12/25,14:30:00+04","24/12/25,14:30:05+04",0'
+        )
+        replacement_report = (
+            '+CMGR: "REC READ",13,"+155****1313",145,'
+            '"24/12/25,14:30:00+04","24/12/25,14:30:05+04",0'
+        )
+
+        async with bus.stream(SMSDeliveryReportEvent) as stream:
+            transport.feed(stale_report, "OK", "ERROR")
+            await service._on_delivery_report(_RawDeliveryReport(storage="SM", index=12))
+            stale_event = await stream.next(timeout=1.0)
+
+            transport.feed(replacement_report, "OK", "OK")
+            await service._on_delivery_report(_RawDeliveryReport(storage="SM", index=12))
+            replacement_event = await stream.next(timeout=1.0)
+
+            transport.feed(stale_report, "OK", "OK")
+            await service._on_delivery_report(_RawDeliveryReport(storage="SM", index=12))
+            later_stale_fingerprint_event = await stream.next(timeout=1.0)
+
+        assert stale_event is not None
+        assert stale_event.reference == 12
+        assert replacement_event is not None
+        assert replacement_event.reference == 13
+        assert later_stale_fingerprint_event is not None
+        assert later_stale_fingerprint_event.reference == 12
 
 
 class TestDeliveryReportEvent:
