@@ -269,8 +269,14 @@ async def notify_webhooks(sender: str, body: str) -> None:
                 )
 
 
-async def main() -> None:
-    async with Modem(ModemConfig()) as modem:
+async def run_server(
+    config: ModemConfig,
+    *,
+    host: str = HTTP_HOST,
+    port: int = HTTP_PORT,
+    api_keys: list[str] | None = None,
+) -> None:
+    async with Modem(config) as modem:
 
         # -- Call handling: auto-answer, play greeting, hang up --
         @modem.on_call
@@ -302,17 +308,26 @@ async def main() -> None:
         modem.bus.subscribe(SMSDeliveryReportEvent, on_delivery_report)
 
         # -- HTTP server --
-        app = create_app(modem)
+        app = create_app(modem, api_keys=api_keys)
         runner = web.AppRunner(app)
         await runner.setup()
-        site = web.TCPSite(runner, HTTP_HOST, HTTP_PORT)
+        site = web.TCPSite(runner, host, port)
         await site.start()
-        logger.info("HTTP server listening on %s:%d", HTTP_HOST, HTTP_PORT)
+        logger.info(
+            "HTTP server listening on %s:%d with %d configured API key(s)",
+            host,
+            port,
+            len(api_keys or []),
+        )
 
         try:
             await modem.run_forever()
         finally:
             await runner.cleanup()
+
+
+async def main() -> None:
+    await run_server(ModemConfig(), host=HTTP_HOST, port=HTTP_PORT)
 
 
 if __name__ == "__main__":

@@ -108,6 +108,153 @@ def test_help_includes_monitor_command(capsys):
     assert "monitor" in output
 
 
+def test_help_includes_serve_command(capsys):
+    import callstack.cli as cli
+
+    code = cli.main(["--help"])
+
+    assert code == 0
+    output = capsys.readouterr().out
+    assert "serve" in output
+
+
+def test_serve_help_includes_server_config_flags(capsys):
+    import callstack.cli as cli
+
+    code = cli.main(["serve", "--help"])
+
+    assert code == 0
+    output = capsys.readouterr().out
+    assert "--host" in output
+    assert "--port" in output
+    assert "--api-key-file" in output
+    assert "--allow-unauthenticated-loopback" in output
+    assert "--at-port" in output
+
+
+def test_serve_loads_api_key_file_and_passes_config_to_runner_without_printing_secrets(
+    monkeypatch, tmp_path, capsys
+):
+    import callstack.cli as cli
+
+    secret = "serve-secret-key-123"
+    key_file = tmp_path / "api-keys"
+    key_file.write_text(f"\n{secret}\nsecond-key\n", encoding="utf-8")
+    called = {}
+
+    async def fake_run_http_server(config, **kwargs):
+        called["config"] = config
+        called.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(cli, "_run_http_server", fake_run_http_server)
+
+    code = cli.main([
+        "serve",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "9090",
+        "--api-key-file",
+        str(key_file),
+        "--at-port",
+        "/dev/flagAT",
+        "--audio-port",
+        "/dev/flagAudio",
+    ])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert called["host"] == "0.0.0.0"
+    assert called["port"] == 9090
+    assert called["api_keys"] == [secret, "second-key"]
+    assert called["config"].at_port == "/dev/flagAT"
+    assert called["config"].audio_port == "/dev/flagAudio"
+    assert secret not in captured.out
+    assert secret not in captured.err
+
+
+def test_serve_rejects_unauthenticated_network_bind_before_runner(monkeypatch, capsys):
+    import callstack.cli as cli
+
+    async def forbidden_run_http_server(*_args, **_kwargs):
+        raise AssertionError("unsafe unauthenticated serve must fail before starting")
+
+    monkeypatch.setattr(cli, "_run_http_server", forbidden_run_http_server)
+
+    code = cli.main(["serve", "--host", "0.0.0.0"])
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert "unauthenticated" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_serve_allows_unauthenticated_loopback_only_with_explicit_override(monkeypatch, capsys):
+    import callstack.cli as cli
+
+    called = {}
+
+    async def fake_run_http_server(config, **kwargs):
+        called["config"] = config
+        called.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(cli, "_run_http_server", fake_run_http_server)
+
+    code = cli.main([
+        "serve",
+        "--host",
+        "127.0.0.1",
+        "--allow-unauthenticated-loopback",
+    ])
+
+    assert code == 0
+    assert called["host"] == "127.0.0.1"
+    assert called["api_keys"] == []
+    capsys.readouterr()
+
+
+def test_serve_cli_flags_override_environment_defaults(monkeypatch, tmp_path, capsys):
+    import callstack.cli as cli
+
+    env_key_file = tmp_path / "env-keys"
+    flag_key_file = tmp_path / "flag-keys"
+    env_key_file.write_text("env-secret\n", encoding="utf-8")
+    flag_key_file.write_text("flag-secret\n", encoding="utf-8")
+    monkeypatch.setenv("CALLSTACK_HTTP_HOST", "127.0.0.1")
+    monkeypatch.setenv("CALLSTACK_HTTP_PORT", "8081")
+    monkeypatch.setenv("CALLSTACK_API_KEY_FILE", str(env_key_file))
+    called = {}
+
+    async def fake_run_http_server(config, **kwargs):
+        called["config"] = config
+        called.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(cli, "_run_http_server", fake_run_http_server)
+
+    code = cli.main([
+        "serve",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "9091",
+        "--api-key-file",
+        str(flag_key_file),
+    ])
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert called["host"] == "0.0.0.0"
+    assert called["port"] == 9091
+    assert called["api_keys"] == ["flag-secret"]
+    assert "env-secret" not in captured.out
+    assert "env-secret" not in captured.err
+    assert "flag-secret" not in captured.out
+    assert "flag-secret" not in captured.err
+
+
 def test_monitor_help_includes_filter_json_once_and_config_flags(capsys):
     import callstack.cli as cli
 

@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import ipaddress
 import json
 import os
 import sys
 from dataclasses import asdict, fields
+from pathlib import Path
 from typing import Any
 
 from callstack.config import ConfigError, ModemConfig, load_modem_config_from_env
@@ -33,6 +35,8 @@ from callstack.modem import Modem
 
 
 _MONITOR_QUEUE_MAXSIZE = 100
+_DEFAULT_HTTP_HOST = "127.0.0.1"
+_DEFAULT_HTTP_PORT = 8080
 _MONITOR_EVENT_TYPES: dict[str, tuple[type[Event], ...]] = {
     "sms.received": (IncomingSMSEvent,),
     "sms.sent": (SMSSentEvent,),
@@ -162,6 +166,34 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Exit after printing N selected events (primarily useful for tests)",
     )
 
+    serve_parser = subparsers.add_parser(
+        "serve",
+        parents=[subcommand_config],
+        help="Run the packaged Callstack HTTP server",
+    )
+    serve_parser.add_argument(
+        "--host",
+        default=argparse.SUPPRESS,
+        help="HTTP bind host (default: CALLSTACK_HTTP_HOST or 127.0.0.1)",
+    )
+    serve_parser.add_argument(
+        "--port",
+        type=_parse_http_port,
+        default=argparse.SUPPRESS,
+        help="HTTP bind port (default: CALLSTACK_HTTP_PORT or 8080)",
+    )
+    serve_parser.add_argument(
+        "--api-key-file",
+        default=argparse.SUPPRESS,
+        help="Path to a newline-delimited API key file; key values are never printed",
+    )
+    serve_parser.add_argument(
+        "--allow-unauthenticated-loopback",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Development-only: allow no API keys when --host is loopback",
+    )
+
     return parser
 
 
@@ -255,6 +287,90 @@ def _parse_once(value: str) -> int:
             f"({_MONITOR_QUEUE_MAXSIZE})"
         )
     return count
+
+
+def _parse_http_port(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("--port must be an integer from 1 to 65535") from exc
+    if port < 1 or port > 65535:
+        raise argparse.ArgumentTypeError("--port must be an integer from 1 to 65535")
+    return port
+
+
+def _parse_bool_env(value: str | None) -> bool:
+    if value is None:
+        return False
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off", ""}:
+        return False
+    raise ConfigError("CALLSTACK_HTTP_ALLOW_UNAUTHENTICATED_LOOPBACK must be a boolean value")
+
+
+def _http_host_from_args(args: argparse.Namespace) -> str:
+    return getattr(args, "host", os.environ.get("CALLSTACK_HTTP_HOST", _DEFAULT_HTTP_HOST))
+
+
+def _http_port_from_args(args: argparse.Namespace) -> int:
+    if hasattr(args, "port"):
+        return args.port
+    raw_port = os.environ.get("CALLSTACK_HTTP_PORT")
+    if raw_port is None:
+        return _DEFAULT_HTTP_PORT
+    try:
+        return _parse_http_port(raw_port)
+    except argparse.ArgumentTypeError as exc:
+        raise ConfigError("CALLSTACK_HTTP_PORT must be an integer from 1 to 65535") from exc
+
+
+def _api_key_file_from_args(args: argparse.Namespace) -> str | None:
+    if hasattr(args, "api_key_file"):
+        return args.api_key_file
+    return os.environ.get("CALLSTACK_API_KEY_FILE")
+
+
+def _allow_unauthenticated_loopback_from_args(args: argparse.Namespace) -> bool:
+    if hasattr(args, "allow_unauthenticated_loopback"):
+        return bool(args.allow_unauthenticated_loopback)
+    return _parse_bool_env(os.environ.get("CALLSTACK_HTTP_ALLOW_UNAUTHENTICATED_LOOPBACK"))
+
+
+def _load_api_key_file(path: str | None) -> list[str]:
+    if not path:
+        return []
+    try:
+        content = Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError("API key file could not be read") from exc
+    keys = [line.strip() for line in content.splitlines() if line.strip()]
+    if not keys:
+        raise ConfigError("API key file must contain at least one nonblank key")
+    return keys
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_serve_auth_policy(host: str, api_keys: list[str], allow_unauthenticated_loopback: bool) -> None:
+    if api_keys:
+        return
+    if allow_unauthenticated_loopback and _is_loopback_host(host):
+        return
+    if allow_unauthenticated_loopback:
+        raise ConfigError("unauthenticated HTTP serve is only allowed on loopback hosts")
+    raise ConfigError(
+        "unauthenticated HTTP serve requires --api-key-file, or "
+        "--allow-unauthenticated-loopback with a loopback --host"
+    )
 
 
 def _doctor_payload(report: ModemDiscoveryReport) -> dict[str, Any]:
@@ -408,6 +524,29 @@ async def _monitor(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _run_http_server(
+    config: ModemConfig,
+    *,
+    host: str,
+    port: int,
+    api_keys: list[str],
+) -> int:
+    from server import run_server
+
+    await run_server(config, host=host, port=port, api_keys=api_keys)
+    return 0
+
+
+async def _serve(args: argparse.Namespace) -> int:
+    config = _config_from_args(args)
+    host = _http_host_from_args(args)
+    port = _http_port_from_args(args)
+    api_keys = _load_api_key_file(_api_key_file_from_args(args))
+    allow_unauthenticated_loopback = _allow_unauthenticated_loopback_from_args(args)
+    _validate_serve_auth_policy(host, api_keys, allow_unauthenticated_loopback)
+    return await _run_http_server(config, host=host, port=port, api_keys=api_keys)
+
+
 async def _run(args: argparse.Namespace) -> int:
     if args.command == "status":
         return await _status(args)
@@ -417,6 +556,8 @@ async def _run(args: argparse.Namespace) -> int:
         return await _doctor(args)
     if args.command == "monitor":
         return await _monitor(args)
+    if args.command == "serve":
+        return await _serve(args)
     raise RuntimeError(f"unsupported command: {args.command}")
 
 

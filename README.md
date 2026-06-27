@@ -76,11 +76,13 @@ Install the HTTP server runtime dependencies with the server extra:
 pip install -e ".[server,sqlite]"
 ```
 
-Run the built-in HTTP server for external integrations:
+Run the packaged HTTP server entrypoint for external integrations:
 
 ```bash
-python server.py
+callstack serve --host 127.0.0.1 --port 8080 --api-key-file /etc/callstack/api-keys
 ```
+
+For legacy source-tree workflows, `python server.py` remains a compatibility wrapper.
 
 Endpoints:
 - `POST /sms/send` — Send SMS (`{"to": "5551234", "body": "..."}`); `to` must be an optional leading `+` followed by 3-15 digits in real requests (use redacted values only in public docs/logs)
