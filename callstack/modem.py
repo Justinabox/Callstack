@@ -246,10 +246,68 @@ class Modem:
 
         elif status == "SIM PUK":
             raise SIMPUKRequired(
-                "SIM is PUK-locked — use modem.unlock_puk(puk, new_pin) to recover"
+                "SIM is PUK-locked — use Modem.recover_puk(config, puk, new_pin) to recover"
             )
         else:
             logger.warning("Unhandled SIM status: %s", status)
+
+    @classmethod
+    async def recover_puk(
+        cls, config: ModemConfig | None, puk: str, new_pin: str
+    ) -> None:
+        """Recover a PUK-locked SIM without running normal modem startup.
+
+        This opens only the AT transport, verifies the SIM is currently asking
+        for a PUK, sends the PUK/new-PIN command, verifies the SIM reports
+        READY, and closes the transport. PUK/PIN values are validated before
+        the transport is opened so invalid credentials are never written.
+        """
+        unlock_command = ATCommand.cpin_puk(puk, new_pin)
+        modem = cls(config)
+
+        try:
+            await modem._at_transport.open()
+            echo_resp = await modem._executor.execute(
+                ATCommand.ECHO_OFF, expect=["OK"], timeout=5.0
+            )
+            if not echo_resp.success:
+                raise SIMUnlockError("could not prepare modem for PUK recovery")
+
+            status = await modem._query_sim_status_for_recovery()
+            if status != "SIM PUK":
+                raise SIMUnlockError(
+                    f"SIM is not PUK-locked; current status is {status or 'unknown'}"
+                )
+
+            unlock_resp = await modem._executor.execute(
+                unlock_command,
+                expect=["OK"],
+                timeout=10.0,
+                log_command='AT+CPIN="<PUK>","<new PIN>"',
+            )
+            if not unlock_resp.success:
+                raise SIMUnlockError("PUK recovery command was rejected by modem")
+
+            status = await modem._query_sim_status_for_recovery()
+            if status != "READY":
+                raise SIMUnlockError(
+                    f"PUK recovery did not leave SIM ready; current status is {status or 'unknown'}"
+                )
+
+            logger.info("SIM recovered with PUK, new PIN set")
+        finally:
+            await modem._at_transport.close()
+
+    async def _query_sim_status_for_recovery(self) -> str | None:
+        resp = await self._executor.execute(ATCommand.CPIN_QUERY, expect=["OK"], timeout=5.0)
+        if not resp.success:
+            return None
+
+        for line in resp.data_lines:
+            status = ATResponseParser.parse_cpin(line)
+            if status:
+                return status
+        return None
 
     def _reader_done_callback(self, task: asyncio.Task) -> None:
         """Handle executor reader task completion (usually a transport error)."""
@@ -372,7 +430,10 @@ class Modem:
     async def unlock_puk(self, puk: str, new_pin: str) -> None:
         """Unlock a PUK-locked SIM by providing the PUK and a new PIN."""
         resp = await self._executor.execute(
-            ATCommand.cpin_puk(puk, new_pin), expect=["OK"], timeout=10.0
+            ATCommand.cpin_puk(puk, new_pin),
+            expect=["OK"],
+            timeout=10.0,
+            log_command='AT+CPIN="<PUK>","<new PIN>"',
         )
         if not resp.success:
             raise SIMUnlockError(f"PUK unlock failed: {resp.lines}")

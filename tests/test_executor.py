@@ -1,6 +1,8 @@
 """Tests for the AT command executor."""
 
 import asyncio
+import io
+import logging
 import pytest
 from callstack.events.bus import EventBus
 from callstack.events.types import CallState, CallStateEvent, RingEvent, DTMFEvent
@@ -255,6 +257,56 @@ async def test_echo_suppression(executor, transport):
     # The echoed command should not be in the response lines
     assert "AT+CSQ" not in resp.lines
     assert "+CSQ: 15,0" in resp.lines
+
+
+async def test_log_command_redacts_sensitive_echoes(executor, transport):
+    """A redacted display command should protect TX, RX echoes, and responses."""
+    secret_command = 'AT+CPIN="12345678","8765"'
+    redacted_command = 'AT+CPIN="<PUK>","<new PIN>"'
+    transport.feed(secret_command, "OK")
+    log_stream = io.StringIO()
+    handler = logging.StreamHandler(log_stream)
+    logger = logging.getLogger("callstack.executor")
+    old_level = logger.level
+    old_propagate = logger.propagate
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+
+    try:
+        resp = await executor.execute(secret_command, log_command=redacted_command)
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(old_level)
+        logger.propagate = old_propagate
+
+    log_text = log_stream.getvalue()
+    assert resp.lines == ["OK"]
+    assert "12345678" not in log_text
+    assert "8765" not in log_text
+    assert redacted_command in log_text
+
+
+async def test_timeout_message_uses_redacted_log_command(executor, transport):
+    """Timeout errors should not include sensitive raw command arguments."""
+    secret_command = 'AT+CPIN="12345678","8765"'
+    redacted_command = 'AT+CPIN="<PUK>","<new PIN>"'
+
+    with pytest.raises(ATTimeoutError) as exc_info:
+        await executor.execute(secret_command, timeout=0.01, log_command=redacted_command)
+
+    message = str(exc_info.value)
+    assert "12345678" not in message
+    assert "8765" not in message
+    assert redacted_command in message
+
+
+async def test_timeout_without_reader_raises_at_timeout_error(transport, urc):
+    """Direct-read commands should report command timeouts, not transport errors."""
+    executor = ATCommandExecutor(transport, urc)
+
+    with pytest.raises(ATTimeoutError):
+        await executor.execute("AT", timeout=0.01)
 
 
 async def test_urc_during_command(executor, transport, bus):

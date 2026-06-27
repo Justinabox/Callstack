@@ -240,6 +240,18 @@ notes before running `callstack status`.
 ### SMS prompt hangs
 Fixed in v0.1.1: Modems send `> ` without newline — `readline()` now handles this.
 
+### PUK-locked SIM recovery
+If startup raises `SIMPUKRequired`, recover the SIM through the public recovery helper instead of using private modem internals:
+
+```python
+from callstack import Modem, ModemConfig
+
+config = ModemConfig(at_port="/dev/ttyUSB2")
+await Modem.recover_puk(config, puk="<8-digit-puk>", new_pin="<4-to-8-digit-pin>")
+```
+
+Callstack validates the PUK/new PIN before opening the serial port and redacts them from debug logs. Reconnect normally after recovery.
+
 ### Port permissions
 ```bash
 sudo usermod -a -G dialout $USER
