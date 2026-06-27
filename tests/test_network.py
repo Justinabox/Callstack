@@ -257,6 +257,77 @@ class TestRegistration:
         assert info == RegistrationInfo(status=0, mode=0)
         _assert_registration_family_queries(transport)
 
+    async def test_registration_query_timeout_continues_to_lte_family_when_no_status_captured(self):
+        class Capture:
+            def __init__(self):
+                self.lines = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        class TimeoutThenLTEExecutor:
+            def __init__(self):
+                self.calls = []
+                self.capture = Capture()
+
+            def capture_urcs(self, *prefixes):
+                return self.capture
+
+            async def execute(self, command, expect=("OK",), timeout=5.0):
+                self.calls.append((command, timeout))
+                if command == "AT+CREG?":
+                    raise ATTimeoutError("timed out waiting for circuit registration")
+                if command == "AT+CEREG?":
+                    self.capture.lines.append("+CEREG: 0,1")
+
+        executor = TimeoutThenLTEExecutor()
+        svc = NetworkService(executor, EventBus(), command_timeout=2.5)
+
+        info = await svc.registration()
+
+        assert info == RegistrationInfo(status=1, mode=0)
+        assert executor.calls == [
+            ("AT+CREG?", 2.5),
+            ("AT+CGREG?", 2.5),
+            ("AT+CEREG?", 2.5),
+        ]
+
+    async def test_registration_returns_default_after_trying_all_families_when_all_time_out(self):
+        class Capture:
+            lines = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        class AllTimeoutExecutor:
+            def __init__(self):
+                self.calls = []
+
+            def capture_urcs(self, *prefixes):
+                return Capture()
+
+            async def execute(self, command, expect=("OK",), timeout=5.0):
+                self.calls.append((command, timeout))
+                raise ATTimeoutError(f"timed out waiting for {command}")
+
+        executor = AllTimeoutExecutor()
+        svc = NetworkService(executor, EventBus(), command_timeout=2.5)
+
+        info = await svc.registration()
+
+        assert info == RegistrationInfo(status=0, mode=0)
+        assert executor.calls == [
+            ("AT+CREG?", 2.5),
+            ("AT+CGREG?", 2.5),
+            ("AT+CEREG?", 2.5),
+        ]
+
     async def test_optional_registration_query_timeout_preserves_captured_status(self):
         class Capture:
             lines = ["+CREG: 0,1"]

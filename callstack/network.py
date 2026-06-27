@@ -114,7 +114,9 @@ class NetworkService:
                     await self._at.execute(command, timeout=self._command_timeout)
                 except ATTimeoutError:
                     logger.debug("Network registration query timed out: %s", command)
-                    break
+                    if cap.lines:
+                        break
+                    continue
 
         first_parsed: RegistrationInfo | None = None
         for line in cap.lines:
