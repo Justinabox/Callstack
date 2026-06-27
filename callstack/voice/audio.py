@@ -1,6 +1,7 @@
 """Audio pipeline: manages PCM streaming over the modem's audio serial port."""
 
 import asyncio
+import math
 import wave
 import logging
 
@@ -78,6 +79,8 @@ class AudioPipeline:
             raise AudioPipelineError(
                 "Audio pipeline is not running; start audio before recording"
             )
+        if not math.isfinite(max_duration) or max_duration <= 0:
+            raise AudioPipelineError("max_duration must be positive and finite")
 
         stop = asyncio.Event()
 
