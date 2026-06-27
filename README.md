@@ -19,7 +19,7 @@ Callstack provides a high-level Python API for managing GSM/LTE modem connection
 | **USSD** | ✅ Ready | `AT+CUSD` balance checks/carrier menus via service + HTTP endpoint |
 | **Raw AT Commands** | ✅ Ready | Direct modem control via `Modem.execute()` |
 | **HTTP Server** | ✅ Ready | API-key auth, rate limiting, SMS/USSD/delivery-report endpoints, `/healthz`, and PII-safe `/metrics` |
-| **CLI** | ✅ Partial | `callstack status`, `callstack send`, safe `callstack doctor`, and PII-safe `callstack monitor`; packaged `callstack serve` is planned |
+| **CLI** | ✅ Partial | `callstack status`, `callstack send`, safe `callstack doctor`, PII-safe `callstack monitor`, and packaged `callstack serve`; active scan/config preview is planned |
 | **Auto-reconnect** | ✅ Ready | Handles USB disconnect/reconnect gracefully; active multi-port auto-detection is planned |
 
 ---
@@ -76,13 +76,51 @@ Install the HTTP server runtime dependencies with the server extra:
 pip install -e ".[server,sqlite]"
 ```
 
-Run the packaged HTTP server entrypoint for external integrations:
+Run the packaged HTTP server entrypoint for external integrations; `callstack serve` is available anywhere the package console script is installed:
 
 ```bash
 callstack serve --host 127.0.0.1 --port 8080 --api-key-file /etc/callstack/api-keys
 ```
 
 For legacy source-tree workflows, `python server.py` remains a compatibility wrapper.
+
+#### Deployment-safe Raspberry Pi server example
+
+Create the API-key file locally and keep it off GitHub, shell transcripts, logs, issues, and PRs:
+
+```bash
+pip install -e ".[server,sqlite]"
+install -d -m 700 /etc/callstack
+install -d -m 700 /var/lib/callstack
+install -m 600 /dev/null /etc/callstack/api-keys
+# Add one locally generated API key to /etc/callstack/api-keys; never paste it into docs or logs.
+```
+
+Then run the server with explicit modem and durable SMS-store settings. The `CALLSTACK_*` variables shown here are parsed by the same redacted config loader used by the CLI, and the key file path may also be supplied with `CALLSTACK_API_KEY_FILE`:
+
+```bash
+CALLSTACK_AT_PORT=/dev/ttyUSB2 \
+CALLSTACK_AUDIO_PORT=/dev/ttyUSB4 \
+CALLSTACK_SMS_DB_PATH=/var/lib/callstack/sms.sqlite3 \
+callstack serve --host 127.0.0.1 --port 8080 --api-key-file /etc/callstack/api-keys
+```
+
+Use public-safe readiness and metrics smoke checks before wiring SMS or USSD automation. When the server is configured with API keys, read a local key into a shell variable instead of printing it:
+
+```bash
+CALLSTACK_BEARER_HEADER="$(awk 'NF {print "Authorization: Bearer " $0; exit}' /etc/callstack/api-keys)"
+test -n "$CALLSTACK_BEARER_HEADER"
+curl -H "$CALLSTACK_BEARER_HEADER" http://127.0.0.1:8080/healthz
+curl -H "$CALLSTACK_BEARER_HEADER" http://127.0.0.1:8080/metrics
+```
+
+For an intentional network-bound server, keep API keys enabled and place the service behind a trusted network boundary:
+
+```bash
+callstack serve --host 0.0.0.0 --port 8080 --api-key-file /etc/callstack/api-keys
+```
+
+The loopback-only unauthenticated override (`--allow-unauthenticated-loopback` or `CALLSTACK_HTTP_ALLOW_UNAUTHENTICATED_LOOPBACK=1`) is development-only and is rejected for non-loopback hosts. Never expose SMS or USSD endpoints without API keys or an equivalent trusted network boundary.
 
 Endpoints:
 - `POST /sms/send` — Send SMS (`{"to": "5551234", "body": "..."}`); `to` must be an optional leading `+` followed by 3-15 digits in real requests (use redacted values only in public docs/logs)
@@ -104,14 +142,16 @@ callstack status --json
 callstack send --to 5551234 --body "Hello from Callstack"
 callstack doctor --ports /dev/ttyUSB2,/dev/ttyUSB3 --json
 callstack monitor --events sms.received,sms.delivery_report --json
+callstack serve --host 127.0.0.1 --port 8080 --api-key-file /etc/callstack/api-keys
 ```
 
 - `callstack status` connects to the configured modem and prints registration, operator, and signal details.
 - `callstack send` sends one SMS through the configured modem and prints only the modem reference.
 - `callstack doctor` is the safest first hardware bring-up command. It probes only explicit candidate ports with non-mutating identity/attention commands and avoids SMS, USSD, call, SIM unlock, storage, IMEI, IMSI, ICCID, or SIM-number commands.
 - `callstack monitor` tails selected typed events as sanitized human text or one JSON object per event. It uses PII-safe event serializers by default and reports queue overflow without printing phone numbers, SMS bodies, USSD payloads, webhook URLs, SIM identifiers, API keys, modem serials, or raw AT lines.
+- `callstack serve` runs the packaged HTTP server with API-key file loading, loopback-only development override, `CALLSTACK_HTTP_HOST`/`CALLSTACK_HTTP_PORT`, and the redacted modem/SMS-store config flags shared by the other CLI commands.
 
-Planned CLI follow-ups include a packaged `callstack serve` HTTP-server entrypoint, active modem scan/config preview, and richer environment/config helpers for server and CLI deployments.
+Planned CLI follow-ups include active modem scan/config preview, richer environment/config helpers for server and CLI deployments, and production deployment examples beyond the minimal smoke checks above.
 
 Voice-call DTMF sends use `AT+VTS`; `CallSession.send_dtmf(..., duration_ms=...)` encodes non-zero tone durations in 100 ms increments (for example, `300` ms becomes an `AT+VTS` duration of `3`). Use `inter_digit_delay_ms` separately when a modem or remote IVR needs spacing between tones.
 
