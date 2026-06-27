@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import os
 import sys
@@ -11,9 +12,46 @@ from dataclasses import asdict, fields
 from typing import Any
 
 from callstack.config import ConfigError, ModemConfig, load_modem_config_from_env
+from callstack.events.serialize import format_event_human, serialize_event
+from callstack.events.types import (
+    CallerIDEvent,
+    CallStateEvent,
+    DTMFEvent,
+    Event,
+    IncomingSMSEvent,
+    ModemDisconnectedEvent,
+    ModemReconnectedEvent,
+    RingEvent,
+    SMSDeliveryReportEvent,
+    SMSSentEvent,
+    SignalQualityEvent,
+    USSDResponseEvent,
+)
 from callstack.hardware.discovery import ModemDiscoveryReport
 from callstack.hardware.probe import probe_modem_ports
 from callstack.modem import Modem
+
+
+_MONITOR_QUEUE_MAXSIZE = 100
+_MONITOR_EVENT_TYPES: dict[str, tuple[type[Event], ...]] = {
+    "sms.received": (IncomingSMSEvent,),
+    "sms.sent": (SMSSentEvent,),
+    "sms.delivery_report": (SMSDeliveryReportEvent,),
+    "call.state": (CallStateEvent,),
+    "call.ring": (RingEvent,),
+    "call.caller_id": (CallerIDEvent,),
+    "call.dtmf": (DTMFEvent,),
+    "modem.state": (ModemDisconnectedEvent, ModemReconnectedEvent),
+    "signal.quality": (SignalQualityEvent,),
+    "ussd.response": (USSDResponseEvent,),
+}
+
+
+class _MonitorOverflowNotice:
+    pass
+
+
+_MONITOR_OVERFLOW_NOTICE = _MonitorOverflowNotice()
 
 
 def _add_config_args(
@@ -96,6 +134,34 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     doctor_parser.add_argument("--json", action="store_true", dest="as_json", help="Emit machine-readable JSON")
 
+    monitor_parser = subparsers.add_parser(
+        "monitor",
+        parents=[subcommand_config],
+        help="PII-safe live event tailing",
+    )
+    monitor_parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="Emit one sanitized JSON object per event",
+    )
+    monitor_parser.add_argument(
+        "--events",
+        type=_parse_monitor_events,
+        default=None,
+        help=(
+            "Comma-separated event names to include "
+            f"(default: {', '.join(_MONITOR_EVENT_TYPES)})"
+        ),
+    )
+    monitor_parser.add_argument(
+        "--once",
+        type=_parse_once,
+        default=None,
+        metavar="N",
+        help="Exit after printing N selected events (primarily useful for tests)",
+    )
+
     return parser
 
 
@@ -155,6 +221,40 @@ def _print_human_status(payload: dict[str, Any]) -> None:
 
 def _parse_ports(value: str) -> list[str]:
     return [port.strip() for port in value.split(",") if port.strip()]
+
+
+def _parse_monitor_events(value: str) -> tuple[str, ...]:
+    raw_events = value.split(",")
+    if any(not event.strip() for event in raw_events):
+        raise argparse.ArgumentTypeError(
+            "--events must not contain empty event names; "
+            f"known events: {', '.join(_MONITOR_EVENT_TYPES)}"
+        )
+
+    requested = tuple(event.strip() for event in raw_events)
+    unknown = [event for event in requested if event not in _MONITOR_EVENT_TYPES]
+    if unknown:
+        raise argparse.ArgumentTypeError(
+            f"unknown event(s): {', '.join(unknown)}; "
+            f"known events: {', '.join(_MONITOR_EVENT_TYPES)}"
+        )
+
+    return tuple(dict.fromkeys(requested))
+
+
+def _parse_once(value: str) -> int:
+    try:
+        count = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("--once must be a positive integer") from exc
+    if count < 1:
+        raise argparse.ArgumentTypeError("--once must be a positive integer")
+    if count > _MONITOR_QUEUE_MAXSIZE:
+        raise argparse.ArgumentTypeError(
+            f"--once must be no greater than the bounded monitor queue size "
+            f"({_MONITOR_QUEUE_MAXSIZE})"
+        )
+    return count
 
 
 def _doctor_payload(report: ModemDiscoveryReport) -> dict[str, Any]:
@@ -235,6 +335,79 @@ async def _doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+def _monitor_overflow_payload() -> dict[str, Any]:
+    return {"type": "monitor.overflow", "data": {"message": "events dropped"}}
+
+
+def _print_monitor_item(item: Event | _MonitorOverflowNotice, as_json: bool) -> None:
+    if isinstance(item, _MonitorOverflowNotice):
+        if as_json:
+            print(json.dumps(_monitor_overflow_payload()), flush=True)
+        else:
+            print("monitor overflow: events dropped", flush=True)
+        return
+
+    if as_json:
+        print(json.dumps(serialize_event(item)), flush=True)
+    else:
+        print(format_event_human(item), flush=True)
+
+
+async def _monitor(args: argparse.Namespace) -> int:
+    config = _config_from_args(args)
+    selected_names = args.events or tuple(_MONITOR_EVENT_TYPES)
+    queue: asyncio.Queue[Event | _MonitorOverflowNotice] = asyncio.Queue(
+        maxsize=_MONITOR_QUEUE_MAXSIZE
+    )
+
+    def enqueue_event(event: Event) -> None:
+        try:
+            queue.put_nowait(event)
+            return
+        except asyncio.QueueFull:
+            pass
+
+        if queue.maxsize <= 1 or (args.once is not None and queue.maxsize <= args.once):
+            with contextlib.suppress(asyncio.QueueEmpty):
+                queue.get_nowait()
+            queue.put_nowait(event)
+            return
+
+        # Preserve an explicit sanitized overflow notice, but do not let it
+        # replace the selected event that triggered backpressure.  Dropping old
+        # items keeps memory bounded while ensuring finite --once runs can still
+        # observe the requested number of real events.
+        for _ in range(2):
+            with contextlib.suppress(asyncio.QueueEmpty):
+                queue.get_nowait()
+
+        try:
+            queue.put_nowait(_MONITOR_OVERFLOW_NOTICE)
+            queue.put_nowait(event)
+        except asyncio.QueueFull:
+            pass
+
+    async with Modem(config) as modem:
+        subscriptions: list[tuple[type[Event], Any]] = []
+        try:
+            for event_name in selected_names:
+                for event_type in _MONITOR_EVENT_TYPES[event_name]:
+                    modem.bus.subscribe(event_type, enqueue_event)
+                    subscriptions.append((event_type, enqueue_event))
+
+            printed = 0
+            while args.once is None or printed < args.once:
+                item = await queue.get()
+                _print_monitor_item(item, args.as_json)
+                if not isinstance(item, _MonitorOverflowNotice):
+                    printed += 1
+        finally:
+            for event_type, handler in subscriptions:
+                modem.bus.unsubscribe(event_type, handler)
+
+    return 0
+
+
 async def _run(args: argparse.Namespace) -> int:
     if args.command == "status":
         return await _status(args)
@@ -242,6 +415,8 @@ async def _run(args: argparse.Namespace) -> int:
         return await _send(args)
     if args.command == "doctor":
         return await _doctor(args)
+    if args.command == "monitor":
+        return await _monitor(args)
     raise RuntimeError(f"unsupported command: {args.command}")
 
 
