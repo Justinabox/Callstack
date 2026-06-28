@@ -97,6 +97,25 @@ async def test_collect_one_returns_none_on_timeout(bus):
     assert result is None
 
 
+async def test_collect_one_honors_explicit_zero_timeout(bus):
+    collector = DTMFCollector(bus, max_digits=10, timeout=10.0)
+
+    result = await asyncio.wait_for(collector.collect_one(timeout=0), timeout=0.1)
+
+    assert result is None
+
+
+async def test_collect_one_from_stream_honors_explicit_zero_timeout(bus):
+    collector = DTMFCollector(bus, max_digits=10, timeout=10.0)
+
+    async with bus.stream(DTMFEvent) as events:
+        result = await asyncio.wait_for(
+            collector.collect_one_from_stream(events, timeout=0), timeout=0.1
+        )
+
+    assert result is None
+
+
 async def test_collect_overrides_max_digits(bus):
     collector = DTMFCollector(bus, max_digits=10, timeout=2.0)
     asyncio.create_task(_emit_digits(bus, "123456"))

@@ -95,7 +95,8 @@ class DTMFCollector:
         This is optimized for the interrupt pattern in play_and_collect:
         wait for one keypress to know if the user wants to interact.
         """
-        result = await self.collect(max_digits=1, timeout=timeout or self.timeout)
+        effective_timeout = timeout if timeout is not None else self.timeout
+        result = await self.collect(max_digits=1, timeout=effective_timeout)
         return result if result else None
 
     async def collect_from_stream(
@@ -149,7 +150,8 @@ class DTMFCollector:
         self, events, timeout: Optional[float] = None
     ) -> Optional[str]:
         """Collect a single digit from an already-open EventStream."""
+        effective_timeout = timeout if timeout is not None else self.timeout
         result = await self.collect_from_stream(
-            events, max_digits=1, timeout=timeout or self.timeout
+            events, max_digits=1, timeout=effective_timeout
         )
         return result if result else None
