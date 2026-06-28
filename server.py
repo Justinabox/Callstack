@@ -17,7 +17,7 @@ from callstack import Modem, ModemConfig, CallSession, IncomingSMSEvent
 from callstack.errors import ATTimeoutError, SMSSendError, TransportError
 from callstack.events.types import SMSDeliveryReportEvent
 from callstack.metrics import CallstackMetrics
-from callstack.privacy import redact_url_for_log
+from callstack.privacy import redact_phone_number, redact_url_for_log
 from callstack.protocol.commands import ATCommand
 
 logger = logging.getLogger("server")
@@ -139,6 +139,44 @@ def _optional_positive_timeout(
     return float(value), None
 
 
+def _bounded_query_limit(request: web.Request, default: int = 50, maximum: int = 500) -> tuple[int | None, web.Response | None]:
+    raw_limit = request.query.get("limit")
+    if raw_limit is None:
+        return default, None
+    try:
+        limit = int(raw_limit)
+    except ValueError:
+        return None, web.json_response({"error": "invalid 'limit'"}, status=400)
+    if limit <= 0 or limit > maximum:
+        return None, web.json_response({"error": "invalid 'limit'"}, status=400)
+    return limit, None
+
+
+def _delivery_report_payload(report: Any) -> dict[str, Any]:
+    if isinstance(report, dict):
+        timestamp = report.get("timestamp")
+        isoformat = getattr(timestamp, "isoformat", None)
+        timestamp_value = isoformat() if callable(isoformat) else timestamp
+        return {
+            "id": report.get("id"),
+            "reference": report.get("reference", 0),
+            "recipient": redact_phone_number(report.get("recipient", "")),
+            "status": report.get("status", ""),
+            "timestamp": timestamp_value,
+            "message_id": report.get("message_id"),
+        }
+
+    timestamp = getattr(report, "timestamp", None)
+    return {
+        "id": getattr(report, "id", None),
+        "reference": getattr(report, "reference", 0),
+        "recipient": redact_phone_number(getattr(report, "recipient", "")),
+        "status": getattr(report, "status", ""),
+        "timestamp": timestamp.isoformat() if timestamp else None,
+        "message_id": getattr(report, "message_id", None),
+    }
+
+
 def _is_sms_body_encoding_error(exc: SMSSendError) -> bool:
     return "SMS body cannot be encoded" in exc.detail
 
@@ -209,7 +247,16 @@ def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Applicati
         return web.json_response(received_messages)
 
     async def list_delivery_reports(request: web.Request) -> web.Response:
-        return web.json_response(delivery_reports)
+        limit, error = _bounded_query_limit(request)
+        if error is not None:
+            return error
+        assert limit is not None
+        list_reports = getattr(modem.sms, "list_delivery_reports", None)
+        if list_reports is None:
+            reports = delivery_reports[-limit:]
+        else:
+            reports = await list_reports(limit=limit)
+        return web.json_response([_delivery_report_payload(report) for report in reports])
 
     async def ussd_send(request: web.Request) -> web.Response:
         data, error = await _json_body(request)

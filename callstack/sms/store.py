@@ -4,9 +4,10 @@ import asyncio
 import importlib
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Optional
 
-from callstack.sms.types import SMS
+from callstack.sms.types import DeliveryReport, SMS
 
 logger = logging.getLogger("callstack.sms.store")
 
@@ -24,6 +25,18 @@ CREATE TABLE IF NOT EXISTS messages (
 )
 """
 
+_CREATE_DELIVERY_REPORTS_TABLE = """
+CREATE TABLE IF NOT EXISTS delivery_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reference INTEGER NOT NULL DEFAULT 0,
+    recipient TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '',
+    timestamp TEXT,
+    discharge_time TEXT,
+    message_id INTEGER
+)
+"""
+
 
 class SMSStore:
     """In-memory SMS store with optional SQLite persistence.
@@ -35,7 +48,9 @@ class SMSStore:
 
     def __init__(self, db_path: Optional[str] = None):
         self._messages: list[SMS] = []
+        self._delivery_reports: list[DeliveryReport] = []
         self._next_id = 1
+        self._next_report_id = 1
         self._db_path = db_path
         self._db = None
         self._lock = asyncio.Lock()
@@ -44,6 +59,7 @@ class SMSStore:
         # the ID was auto-assigned by this instance, which lets reopen logic
         # resolve external SQLite ID collisions without dropping new messages.
         self._pending_saves: dict[int, tuple[SMS, bool]] = {}
+        self._pending_delivery_reports: dict[int, tuple[DeliveryReport, bool]] = {}
 
     async def initialize(self) -> None:
         """Open SQLite connection if db_path was provided, and load existing messages."""
@@ -61,16 +77,17 @@ class SMSStore:
                 return
 
             pending_saves = list(self._pending_saves.values())
+            pending_delivery_reports = list(self._pending_delivery_reports.values())
             self._db = await aiosqlite.connect(self._db_path)
             try:
                 await self._db.execute(_CREATE_TABLE)
+                await self._db.execute(_CREATE_DELIVERY_REPORTS_TABLE)
                 await self._db.commit()
 
                 # Load existing messages from SQLite. Rebuild the in-memory
                 # working set so close()+initialize() on the same store object
                 # does not append persisted rows a second time. Dirty saves made
                 # while SQLite was closed are then flushed deterministically.
-                from datetime import datetime
 
                 loaded_messages: list[SMS] = []
                 loaded_ids: set[int] = set()
@@ -149,6 +166,45 @@ class SMSStore:
                 self._messages = loaded_messages
                 self._next_id = next_id
 
+                loaded_reports: list[DeliveryReport] = []
+                next_report_id = 1
+                async with self._db.execute(
+                    "SELECT id, reference, recipient, status, timestamp, discharge_time, message_id "
+                    "FROM delivery_reports ORDER BY id"
+                ) as cursor:
+                    async for row in cursor:
+                        timestamp = datetime.fromisoformat(row[4]) if row[4] else None
+                        discharge_time = datetime.fromisoformat(row[5]) if row[5] else None
+                        report = DeliveryReport(
+                            id=row[0],
+                            reference=row[1],
+                            recipient=row[2],
+                            status=row[3],
+                            timestamp=timestamp,
+                            discharge_time=discharge_time,
+                            message_id=row[6],
+                        )
+                        loaded_reports.append(report)
+                        if row[0] is not None and row[0] >= next_report_id:
+                            next_report_id = row[0] + 1
+
+                self._delivery_reports = loaded_reports
+                self._next_report_id = next_report_id
+
+                loaded_report_ids = {report.id for report in loaded_reports if report.id is not None}
+                for report, auto_assigned_id in pending_delivery_reports:
+                    if report.id in loaded_report_ids and auto_assigned_id:
+                        while self._next_report_id in loaded_report_ids:
+                            self._next_report_id += 1
+                        report.id = self._next_report_id
+                        self._next_report_id += 1
+                    await self._save_delivery_report_locked(report, commit=False)
+                    if report.id is not None:
+                        loaded_report_ids.add(report.id)
+                if pending_delivery_reports:
+                    await self._db.commit()
+                    self._pending_delivery_reports.clear()
+
                 logger.info(
                     "SMS store initialized with SQLite: %s (%d messages loaded)",
                     self._db_path, len(self._messages),
@@ -213,6 +269,108 @@ class SMSStore:
                 self._messages.append(sms)
 
             return sms
+
+    async def save_delivery_report(self, report: DeliveryReport) -> DeliveryReport:
+        """Save a delivery report and update the latest matching outbound SMS."""
+        async with self._lock:
+            return await self._save_delivery_report_locked(report)
+
+    async def _save_delivery_report_locked(
+        self, report: DeliveryReport, *, commit: bool = True
+    ) -> DeliveryReport:
+        auto_assigned_id = report.id is None
+        if report.id is None:
+            report.id = self._next_report_id
+            self._next_report_id += 1
+        if report.timestamp is None:
+            report.timestamp = datetime.now(timezone.utc)
+
+        matched = self._latest_matching_message(report)
+        if matched is not None:
+            report.message_id = matched.id
+
+        existing_index = None
+        for index, existing in enumerate(self._delivery_reports):
+            if existing.id == report.id:
+                existing_index = index
+                break
+
+        if self._db is not None:
+            report_ts = report.timestamp.isoformat() if report.timestamp else None
+            discharge_ts = report.discharge_time.isoformat() if report.discharge_time else None
+            if existing_index is None:
+                await self._db.execute(
+                    "INSERT INTO delivery_reports (id, reference, recipient, status, timestamp, discharge_time, message_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        report.id,
+                        report.reference,
+                        report.recipient,
+                        report.status,
+                        report_ts,
+                        discharge_ts,
+                        report.message_id,
+                    ),
+                )
+            else:
+                await self._db.execute(
+                    "UPDATE delivery_reports SET reference=?, recipient=?, status=?, timestamp=?, "
+                    "discharge_time=?, message_id=? WHERE id=?",
+                    (
+                        report.reference,
+                        report.recipient,
+                        report.status,
+                        report_ts,
+                        discharge_ts,
+                        report.message_id,
+                        report.id,
+                    ),
+                )
+            if matched is not None:
+                message_ts = matched.timestamp.isoformat() if matched.timestamp else None
+                await self._db.execute(
+                    "UPDATE messages SET sender=?, recipient=?, body=?, timestamp=?, "
+                    "status=?, reference=?, storage_index=? WHERE id=?",
+                    (
+                        matched.sender,
+                        matched.recipient,
+                        matched.body,
+                        message_ts,
+                        report.status,
+                        matched.reference,
+                        matched.storage_index,
+                        matched.id,
+                    ),
+                )
+            if commit:
+                await self._db.commit()
+        elif self._db_path is not None:
+            previous = self._pending_delivery_reports.get(report.id)
+            pending_auto_assigned = auto_assigned_id or (previous[1] if previous else False)
+            self._pending_delivery_reports[report.id] = (report, pending_auto_assigned)
+
+        if matched is not None:
+            matched.status = report.status
+        if existing_index is None:
+            self._delivery_reports.append(report)
+        else:
+            self._delivery_reports[existing_index] = report
+        return report
+
+    def _latest_matching_message(self, report: DeliveryReport) -> SMS | None:
+        if not report.recipient:
+            return None
+        for sms in reversed(self._messages):
+            if sms.id is None or not sms.recipient:
+                continue
+            if sms.reference == report.reference and sms.recipient == report.recipient:
+                return sms
+        return None
+
+    async def list_delivery_reports(self, limit: int = 100) -> list[DeliveryReport]:
+        """List saved delivery reports, newest last, with a bounded result size."""
+        async with self._lock:
+            return self._delivery_reports[-limit:]
 
     async def get(self, id: int) -> Optional[SMS]:
         """Get an SMS by internal ID."""

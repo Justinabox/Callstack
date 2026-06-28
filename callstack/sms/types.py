@@ -37,3 +37,5 @@ class DeliveryReport:
     status: str = ""
     timestamp: Optional[datetime] = None
     discharge_time: Optional[datetime] = None
+    id: Optional[int] = None
+    message_id: Optional[int] = None

@@ -22,7 +22,7 @@ from callstack.protocol.parser import ATResponseParser
 from callstack.privacy import redact_phone_number
 from callstack.sms.pdu import GSM7_BASIC
 from callstack.sms.store import SMSStore
-from callstack.sms.types import SMS, SMSStatus
+from callstack.sms.types import DeliveryReport, SMS, SMSStatus
 
 logger = logging.getLogger("callstack.sms")
 
@@ -351,6 +351,19 @@ class SMSService:
                 self._accepted_uncleared_delivery_report_slots.pop(slot_key, None)
             return
 
+        try:
+            await self._store.save_delivery_report(
+                DeliveryReport(reference=reference, recipient=recipient, status=status)
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to persist delivery report before SIM cleanup: storage=%s index=%d error=%s",
+                event.storage,
+                event.index,
+                type(exc).__name__,
+            )
+            return
+
         deleted = await self._delete_delivery_report_slot(event.storage, event.index)
         if deleted:
             self._accepted_uncleared_delivery_report_slots.pop(slot_key, None)
@@ -404,6 +417,10 @@ class SMSService:
             yield _FilteredStream(stream, filter_sender)
 
     # -- Message Management --
+
+    async def list_delivery_reports(self, limit: int = 100) -> list[DeliveryReport]:
+        """List delivery reports persisted by the SMS store."""
+        return await self._store.list_delivery_reports(limit=limit)
 
     async def list_messages(self, status: str = "ALL") -> list[SMS]:
         """List messages stored on SIM.
