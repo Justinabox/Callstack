@@ -514,6 +514,8 @@ class CallSession:
             )
         if not self.is_active:
             raise RuntimeError("Cannot send DTMF without an active call")
+        if type(digits) is not str or digits == "":
+            raise ValueError("DTMF digits must be a non-empty string")
         commands = [ATCommand.send_dtmf(digit, duration_ms=duration_ms) for digit in digits]
         for index, command in enumerate(commands):
             if not self.is_active:
