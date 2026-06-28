@@ -109,7 +109,6 @@ class APIKeyAuth:
 
     def revoke_key(self, key: str) -> None:
         self._keys.discard(key)
-        self.enabled = bool(self._keys)
 
 
 async def _json_body(request: web.Request) -> tuple[dict[str, Any] | None, web.Response | None]:

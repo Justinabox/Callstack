@@ -147,11 +147,42 @@ class TestAPIKeyManagement:
             auth.add_key("  \n")
         assert auth.enabled is False
 
-    def test_revoke_key(self):
-        auth = APIKeyAuth(api_keys=["only-key"])
+    async def test_revoke_key_invalidates_key_while_preserving_remaining_keys(self, aiohttp_client):
+        auth = APIKeyAuth(api_keys=["revoked-key", "remaining-key"])
+        client = await aiohttp_client(_make_app(auth))
+
+        auth.revoke_key("revoked-key")
+
+        revoked = await client.get("/test", headers={"Authorization": "Bearer revoked-key"})
+        assert revoked.status == 403
+        remaining = await client.get("/test", headers={"Authorization": "Bearer remaining-key"})
+        assert remaining.status == 200
         assert auth.enabled is True
+
+    async def test_revoke_last_key_keeps_middleware_fail_closed(self, aiohttp_client):
+        auth = APIKeyAuth(api_keys=["only-key"])
+        client = await aiohttp_client(_make_app(auth))
+
         auth.revoke_key("only-key")
-        assert auth.enabled is False
+
+        missing = await client.get("/test")
+        assert missing.status == 401
+        invalid = await client.get("/test", headers={"Authorization": "Bearer wrong-key"})
+        assert invalid.status == 403
+        assert auth.enabled is True
+
+    async def test_add_replacement_key_after_last_revoke_restores_access(self, aiohttp_client):
+        auth = APIKeyAuth(api_keys=["old-key"])
+        client = await aiohttp_client(_make_app(auth))
+        auth.revoke_key("old-key")
+
+        auth.add_key("replacement-key")
+
+        old_key = await client.get("/test", headers={"Authorization": "Bearer old-key"})
+        assert old_key.status == 403
+        replacement = await client.get("/test", headers={"Authorization": "Bearer replacement-key"})
+        assert replacement.status == 200
+        assert auth.enabled is True
 
     def test_revoke_nonexistent_key(self):
         auth = APIKeyAuth(api_keys=["key1"])
