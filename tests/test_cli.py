@@ -10,7 +10,7 @@ from callstack.config import ModemConfig
 from callstack.errors import SMSSendError
 from callstack.events.bus import EventBus
 from callstack.events.types import IncomingSMSEvent, USSDResponseEvent
-from callstack.hardware.discovery import ModemDiscoveryReport, ModemIdentity
+from callstack.hardware.discovery import AudioPortHint, ModemDiscoveryReport, ModemIdentity
 from callstack.hardware.profiles import classify_capabilities
 from callstack.network import RegistrationInfo, SignalInfo
 from callstack.sms.types import SMS
@@ -759,8 +759,14 @@ def test_doctor_scan_uses_discovery_patterns_without_default_port_probe(monkeypa
     assert code == 0
     assert called["patterns"] == ("/dev/ttyUSB*", "/dev/ttyACM*")
     assert called["baudrate"] == 57600
+    assert called["configured_audio_port"] is None
     payload = json.loads(capsys.readouterr().out)
     assert payload["at_port"] == "/dev/ttyUSB1"
+    assert payload["audio_hint"] == {
+        "port": None,
+        "confidence": "unknown",
+        "reason": "Audio port role is unknown; configure CALLSTACK_AUDIO_PORT after hardware validation.",
+    }
     assert payload["config_preview"] == {
         "CALLSTACK_AT_PORT": "/dev/ttyUSB1",
         "CALLSTACK_AUDIO_PORT": None,
@@ -782,6 +788,72 @@ def test_doctor_scan_rejects_explicit_ports_before_any_probe(monkeypatch, capsys
     assert code == 1
     assert "cannot combine --scan and --ports" in captured.err
     assert "Traceback" not in captured.err
+
+
+def test_doctor_json_marks_explicit_audio_port_as_configured_without_claiming_probe_verification(
+    monkeypatch, capsys
+):
+    import callstack.cli as cli
+
+    called = {}
+    report = ModemDiscoveryReport(
+        at_port="/dev/fakeAT",
+        audio_port="/dev/fakeAudio",
+        audio_hint=AudioPortHint(
+            port="/dev/fakeAudio",
+            confidence="configured",
+            reason="Operator configured CALLSTACK_AUDIO_PORT explicitly; discovery did not verify the audio role.",
+        ),
+    )
+
+    async def fake_probe(ports, **kwargs):
+        called["ports"] = ports
+        called.update(kwargs)
+        return report
+
+    monkeypatch.setattr(cli, "probe_modem_ports", fake_probe)
+
+    code = cli.main([
+        "doctor",
+        "--ports",
+        "/dev/fakeAT",
+        "--audio-port",
+        "/dev/fakeAudio",
+        "--json",
+    ])
+
+    assert code == 0
+    assert called["configured_audio_port"] == "/dev/fakeAudio"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["audio_port"] == "/dev/fakeAudio"
+    assert payload["audio_hint"] == {
+        "port": "/dev/fakeAudio",
+        "confidence": "configured",
+        "reason": "Operator configured CALLSTACK_AUDIO_PORT explicitly; discovery did not verify the audio role.",
+    }
+    assert payload["config_preview"]["CALLSTACK_AUDIO_PORT"] == "/dev/fakeAudio"
+
+
+def test_doctor_empty_audio_port_does_not_mark_builtin_default_as_configured(monkeypatch, capsys):
+    import callstack.cli as cli
+
+    called = {}
+    report = ModemDiscoveryReport(at_port="/dev/fakeAT")
+
+    async def fake_probe(ports, **kwargs):
+        called["ports"] = ports
+        called.update(kwargs)
+        return report
+
+    monkeypatch.setattr(cli, "probe_modem_ports", fake_probe)
+
+    code = cli.main(["doctor", "--ports", "/dev/fakeAT", "--audio-port", "", "--json"])
+
+    assert code == 0
+    assert called["configured_audio_port"] is None
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["audio_hint"]["confidence"] == "unknown"
+    assert payload["config_preview"]["CALLSTACK_AUDIO_PORT"] is None
 
 
 def test_doctor_json_uses_probe_and_serializes_pii_safe_report(monkeypatch, capsys):
@@ -817,6 +889,11 @@ def test_doctor_json_uses_probe_and_serializes_pii_safe_report(monkeypatch, caps
     assert payload == {
         "at_port": "/dev/fakeAT",
         "audio_port": None,
+        "audio_hint": {
+            "port": None,
+            "confidence": "unknown",
+            "reason": "Audio port role is unknown; configure CALLSTACK_AUDIO_PORT after hardware validation.",
+        },
         "identity": asdict(report.identity),
         "capabilities": asdict(report.capabilities),
         "confidence": "profile-match",
@@ -851,7 +928,7 @@ def test_doctor_human_output_includes_safe_summary_capabilities_notes_and_safety
     assert code == 0
     output = capsys.readouterr().out
     assert "AT port: /dev/fakeAT (confidence: profile-match)" in output
-    assert "Audio port: unknown" in output
+    assert "Audio port: unknown (confidence: unknown)" in output
     assert "Manufacturer: Quectel" in output
     assert "Model: EC25" in output
     assert "sms_text_mode: supported" in output

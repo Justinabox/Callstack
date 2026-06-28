@@ -10,11 +10,12 @@ from typing import Any, cast
 import pytest
 
 from callstack.hardware.discovery import (
+    AudioPortHint,
     ModemCapabilities,
     ModemDiscoveryReport,
     ModemIdentity,
 )
-from callstack.hardware.profiles import classify_capabilities, profile_notes
+from callstack.hardware.profiles import audio_port_hint_for_identity, classify_capabilities, profile_notes
 
 
 LOW_RISK_SIMCOM_CAPABILITIES = {
@@ -108,10 +109,52 @@ class TestModemDiscoveryReport:
         report = ModemDiscoveryReport(at_port="/tmp/fake-at-port")
 
         assert report.audio_port is None
+        assert report.audio_hint == AudioPortHint(
+            port=None,
+            confidence="unknown",
+            reason="Audio port role is unknown; configure CALLSTACK_AUDIO_PORT after hardware validation.",
+        )
         assert report.identity == ModemIdentity()
         assert report.capabilities == ModemCapabilities()
         assert report.confidence == "unknown"
         assert report.notes == ()
+
+    def test_existing_positional_report_construction_keeps_identity_capabilities_confidence_and_notes(self):
+        identity = ModemIdentity(manufacturer="Quectel", model="EC25")
+        capabilities = ModemCapabilities(sms_text_mode="supported")
+
+        report = ModemDiscoveryReport(
+            "/tmp/fake-at-port",
+            "/tmp/fake-audio-port",
+            identity,
+            capabilities,
+            "profile-match",
+            ("legacy positional construction",),
+        )
+
+        assert report.audio_port == "/tmp/fake-audio-port"
+        assert report.identity is identity
+        assert report.capabilities is capabilities
+        assert report.confidence == "profile-match"
+        assert report.notes == ("legacy positional construction",)
+        assert report.audio_hint == AudioPortHint()
+
+    def test_report_can_carry_configured_audio_port_hint_without_sensitive_fields(self):
+        hint = AudioPortHint(
+            port="/tmp/fake-audio-port",
+            confidence="configured",
+            reason="Operator configured CALLSTACK_AUDIO_PORT explicitly.",
+        )
+        report = ModemDiscoveryReport(
+            at_port="/tmp/fake-at-port",
+            audio_port="/tmp/fake-audio-port",
+            audio_hint=hint,
+        )
+
+        assert report.audio_port == "/tmp/fake-audio-port"
+        assert report.audio_hint is hint
+        assert "imei" not in asdict(report.audio_hint)
+        assert "imsi" not in asdict(report.audio_hint)
 
 
 class TestClassifyCapabilities:
@@ -164,3 +207,26 @@ class TestClassifyCapabilities:
         sensitive_terms = ("imei=", "imsi", "iccid")
         combined = f"{identity!r} {capabilities!r} {' '.join(notes)}".lower()
         assert all(term not in combined for term in sensitive_terms)
+
+
+class TestAudioPortHints:
+    def test_simcom_profile_reports_manual_audio_hint_without_selecting_a_port(self):
+        identity = ModemIdentity(manufacturer="SIMCOM INCORPORATED", model="SIMCOM_SIM7600E-H")
+
+        hint = audio_port_hint_for_identity(identity)
+
+        assert hint.port is None
+        assert hint.confidence == "profile-hint"
+        assert "manual" in hint.reason.lower()
+        assert "audio" in hint.reason.lower()
+
+    def test_unknown_profile_keeps_audio_hint_unknown(self):
+        identity = ModemIdentity(manufacturer="MysteryVendor", model="MysteryBox")
+
+        hint = audio_port_hint_for_identity(identity)
+
+        assert hint == AudioPortHint(
+            port=None,
+            confidence="unknown",
+            reason="Audio port role is unknown; configure CALLSTACK_AUDIO_PORT after hardware validation.",
+        )

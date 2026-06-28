@@ -356,6 +356,12 @@ def _allow_unauthenticated_loopback_from_args(args: argparse.Namespace) -> bool:
     return _parse_bool_env(os.environ.get("CALLSTACK_HTTP_ALLOW_UNAUTHENTICATED_LOOPBACK"))
 
 
+def _configured_audio_port_from_args(args: argparse.Namespace, config: ModemConfig) -> str | None:
+    if hasattr(args, "audio_port"):
+        return args.audio_port or None
+    return os.environ.get("CALLSTACK_AUDIO_PORT") or None
+
+
 def _load_api_key_file(path: str | None) -> list[str]:
     if not path:
         return []
@@ -392,16 +398,18 @@ def _validate_serve_auth_policy(host: str, api_keys: list[str], allow_unauthenti
 
 
 def _doctor_payload(report: ModemDiscoveryReport) -> dict[str, Any]:
+    preview_audio_port = report.audio_hint.port if report.audio_hint.confidence == "configured" else None
     return {
         "at_port": report.at_port,
         "audio_port": report.audio_port,
+        "audio_hint": asdict(report.audio_hint),
         "identity": asdict(report.identity),
         "capabilities": asdict(report.capabilities),
         "confidence": report.confidence,
         "notes": list(report.notes),
         "config_preview": {
             "CALLSTACK_AT_PORT": report.at_port or None,
-            "CALLSTACK_AUDIO_PORT": report.audio_port,
+            "CALLSTACK_AUDIO_PORT": preview_audio_port,
         },
     }
 
@@ -416,7 +424,8 @@ def _print_human_doctor(report: ModemDiscoveryReport) -> None:
 
     print("Callstack doctor")
     print(f"AT port: {_unknown(report.at_port)} (confidence: {report.confidence})")
-    print(f"Audio port: {_unknown(report.audio_port)}")
+    print(f"Audio port: {_unknown(report.audio_hint.port)} (confidence: {report.audio_hint.confidence})")
+    print(f"Audio hint: {report.audio_hint.reason}")
     print(f"Manufacturer: {_unknown(identity.manufacturer)}")
     print(f"Model: {_unknown(identity.model)}")
     print(f"Revision: {_unknown(identity.revision)}")
@@ -425,7 +434,8 @@ def _print_human_doctor(report: ModemDiscoveryReport) -> None:
         print(f"  {capability.name}: {getattr(capabilities, capability.name)}")
     print("Config preview:")
     print(f"  CALLSTACK_AT_PORT={_unknown(report.at_port)}")
-    print(f"  CALLSTACK_AUDIO_PORT={_unknown(report.audio_port)}")
+    preview_audio_port = report.audio_hint.port if report.audio_hint.confidence == "configured" else None
+    print(f"  CALLSTACK_AUDIO_PORT={_unknown(preview_audio_port)}")
     print("Notes:")
     if report.notes:
         for note in report.notes:
@@ -467,17 +477,23 @@ async def _send(args: argparse.Namespace) -> int:
 
 async def _doctor(args: argparse.Namespace) -> int:
     config = _config_from_args(args)
+    configured_audio_port = _configured_audio_port_from_args(args, config)
     if args.scan and args.ports:
         raise ConfigError("cannot combine --scan and --ports; use one discovery mode")
     if args.scan:
         reports = await discover_modems(
             patterns=_parse_patterns(args.patterns),
             baudrate=config.baudrate,
+            configured_audio_port=configured_audio_port,
         )
         report = reports[0]
     else:
         ports = _parse_ports(args.ports) if args.ports else [config.at_port]
-        report = await probe_modem_ports(ports, baudrate=config.baudrate)
+        report = await probe_modem_ports(
+            ports,
+            baudrate=config.baudrate,
+            configured_audio_port=configured_audio_port,
+        )
     if args.as_json:
         print(json.dumps(_doctor_payload(report)))
     else:

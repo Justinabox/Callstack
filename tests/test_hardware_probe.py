@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 
+from callstack.hardware.discovery import AudioPortHint
 from callstack.hardware.probe import SAFE_PROBE_COMMANDS, discover_modems, probe_modem_ports
 from callstack.transport.base import Transport
 
@@ -339,3 +340,47 @@ async def test_discover_modems_accepts_single_pattern_string_as_one_glob():
 
     assert glob_calls == ["/dev/ttyUSB*"]
     assert reports[0].at_port == "/dev/ttyUSB0"
+
+
+async def test_probe_surfaces_explicit_audio_port_as_configured_hint_without_extra_commands():
+    transport = ScriptedTransport({"AT": ["OK"], "ATI": ["Quectel", "EC25", "OK"]})
+
+    report = await probe_modem_ports(
+        ["/dev/ttyUSB2"],
+        transport_opener=lambda port: transport,
+        configured_audio_port="/dev/ttyUSB4",
+        command_timeout=0.001,
+    )
+
+    assert report.audio_port == "/dev/ttyUSB4"
+    assert report.audio_hint == AudioPortHint(
+        port="/dev/ttyUSB4",
+        confidence="configured",
+        reason="Operator configured CALLSTACK_AUDIO_PORT explicitly; discovery did not verify the audio role.",
+    )
+    assert tuple(transport.writes) == SAFE_PROBE_COMMANDS
+
+
+async def test_discover_modems_reports_ambiguous_sibling_serial_audio_hint_without_selecting_port():
+    good = ScriptedTransport({"AT": ["OK"], "ATI": ["MysteryVendor", "MysteryModel", "OK"]})
+    quiet = ScriptedTransport({"AT": ["AT"]})
+    transports = {
+        "/dev/ttyUSB0": good,
+        "/dev/ttyUSB1": quiet,
+        "/dev/ttyUSB2": quiet,
+    }
+
+    reports = await discover_modems(
+        patterns="/dev/ttyUSB*",
+        path_glob=lambda pattern: tuple(transports),
+        transport_opener=lambda port: transports[port],
+        command_timeout=0.001,
+    )
+
+    report = reports[0]
+    assert report.at_port == "/dev/ttyUSB0"
+    assert report.audio_port is None
+    assert report.audio_hint.port is None
+    assert report.audio_hint.confidence == "sibling-serial"
+    assert "audio role cannot be proven safely" in report.audio_hint.reason.lower()
+    assert any("CALLSTACK_AUDIO_PORT manually" in note for note in report.notes)

@@ -15,8 +15,8 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import fields, replace
 from typing import Protocol
 
-from callstack.hardware.discovery import ModemCapabilities, ModemDiscoveryReport, ModemIdentity
-from callstack.hardware.profiles import classify_capabilities, profile_notes
+from callstack.hardware.discovery import AudioPortHint, ModemCapabilities, ModemDiscoveryReport, ModemIdentity
+from callstack.hardware.profiles import audio_port_hint_for_identity, classify_capabilities, profile_notes
 from callstack.transport.base import Transport
 from callstack.transport.serial import SerialTransport
 
@@ -190,12 +190,47 @@ def _rank_confidence(confidence: str) -> int:
     return _CONFIDENCE_RANK.get(confidence, 0)
 
 
+def _configured_audio_hint(port: str) -> AudioPortHint:
+    return AudioPortHint(
+        port=port,
+        confidence="configured",
+        reason="Operator configured CALLSTACK_AUDIO_PORT explicitly; discovery did not verify the audio role.",
+    )
+
+
+def _sibling_serial_audio_hint() -> AudioPortHint:
+    return AudioPortHint(
+        port=None,
+        confidence="sibling-serial",
+        reason=(
+            "Serial siblings were present, but audio role cannot be proven safely from identity probes; "
+            "configure CALLSTACK_AUDIO_PORT manually after hardware validation."
+        ),
+    )
+
+
+def _audio_hint(identity: ModemIdentity, configured_audio_port: str | None) -> AudioPortHint:
+    if configured_audio_port:
+        return _configured_audio_hint(configured_audio_port)
+    return audio_port_hint_for_identity(identity)
+
+
+def _has_serial_siblings(candidate_ports: Sequence[str], at_port: str) -> bool:
+    match = re.fullmatch(r"(.+?)(\d+)", at_port)
+    if not match:
+        return False
+    prefix = match.group(1)
+    siblings = [port for port in candidate_ports if port != at_port and port.startswith(prefix)]
+    return bool(siblings)
+
+
 async def probe_modem_ports(
     candidate_ports: Sequence[str],
     *,
     transport_opener: TransportOpener | None = None,
     baudrate: int = 115200,
     command_timeout: float = 0.5,
+    configured_audio_port: str | None = None,
 ) -> ModemDiscoveryReport:
     """Probe explicit candidate AT ports with safe identity commands.
 
@@ -258,7 +293,8 @@ async def probe_modem_ports(
 
         report = ModemDiscoveryReport(
             at_port=port,
-            audio_port=None,
+            audio_port=configured_audio_port,
+            audio_hint=_audio_hint(identity, configured_audio_port),
             identity=identity,
             capabilities=capabilities,
             confidence=confidence,
@@ -274,7 +310,8 @@ async def probe_modem_ports(
 
     return ModemDiscoveryReport(
         at_port="",
-        audio_port=None,
+        audio_port=configured_audio_port,
+        audio_hint=_audio_hint(ModemIdentity(), configured_audio_port),
         identity=ModemIdentity(),
         capabilities=ModemCapabilities(),
         confidence="no-response",
@@ -292,6 +329,7 @@ async def discover_modems(
     transport_opener: TransportOpener | None = None,
     baudrate: int = 115200,
     command_timeout: float = 0.5,
+    configured_audio_port: str | None = None,
 ) -> list[ModemDiscoveryReport]:
     """Opt-in multi-port discovery using only the safe probe allowlist.
 
@@ -304,7 +342,8 @@ async def discover_modems(
         return [
             ModemDiscoveryReport(
                 at_port="",
-                audio_port=None,
+                audio_port=configured_audio_port,
+                audio_hint=_audio_hint(ModemIdentity(), configured_audio_port),
                 identity=ModemIdentity(),
                 capabilities=ModemCapabilities(),
                 confidence="no-response",
@@ -320,9 +359,19 @@ async def discover_modems(
         transport_opener=transport_opener,
         baudrate=baudrate,
         command_timeout=command_timeout,
+        configured_audio_port=configured_audio_port,
     )
     scan_note = (
         f"Scanned {len(candidate_ports)} candidate port(s) from opt-in discovery patterns; "
         "audio port remains unknown unless configured explicitly."
     )
+    if (
+        not configured_audio_port
+        and report.audio_hint.confidence == "unknown"
+        and report.at_port
+        and _has_serial_siblings(candidate_ports, report.at_port)
+    ):
+        sibling_hint = _sibling_serial_audio_hint()
+        sibling_note = sibling_hint.reason
+        report = replace(report, audio_hint=sibling_hint, notes=(sibling_note,) + report.notes)
     return [replace(report, notes=(scan_note,) + report.notes)]
