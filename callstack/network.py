@@ -118,7 +118,7 @@ class NetworkService:
                         break
                     continue
 
-        first_parsed: RegistrationInfo | None = None
+        parsed_infos: list[RegistrationInfo] = []
         for line in cap.lines:
             parsed = ATResponseParser.parse_registration(line)
             if parsed:
@@ -126,9 +126,15 @@ class NetworkService:
                 info = RegistrationInfo(status=status, mode=mode)
                 if info.registered:
                     return info
-                if first_parsed is None:
-                    first_parsed = info
-        return first_parsed or RegistrationInfo(status=0, mode=0)
+                parsed_infos.append(info)
+
+        if parsed_infos:
+            # Prefer the non-registered state that is most useful for operators.
+            # Unrecognized parsed modem statuses are still more specific than
+            # generic "unknown"/"not registered" responses.
+            status_priority = {3: 5, 2: 4, 4: 2, 0: 1}
+            return max(parsed_infos, key=lambda info: status_priority.get(info.status, 3))
+        return RegistrationInfo(status=0, mode=0)
 
     async def operator(self) -> Optional[str]:
         """Query current network operator name (AT+COPS?)."""

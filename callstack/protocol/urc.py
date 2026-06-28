@@ -146,6 +146,13 @@ class URCDispatcher:
         """Return a URC summary safe for diagnostic logs."""
         if line.startswith("+CUSD:"):
             return "+CUSD:<redacted>"
+        if line.startswith(("+CREG:", "+CGREG:", "+CEREG:")):
+            family = line.split(":", 1)[0]
+            parsed = ATResponseParser.parse_registration(line)
+            if parsed:
+                _, status = parsed
+                return f"{family}: status={status}"
+            return f"{family}:<redacted>"
         return line
 
     @staticmethod

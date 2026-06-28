@@ -228,14 +228,86 @@ class TestRegistration:
         _feed_registration_responses(
             transport,
             creg="+CREG: 0,0",
-            cgreg="+CGREG: 0,2",
-            cereg="+CEREG: 0,3",
+            cgreg="+CGREG: 0,0",
+            cereg="+CEREG: 0,0",
         )
         info = await svc.registration()
 
         assert info.registered is False
         assert info.status == 0
         assert info.mode == 0
+
+    async def test_denied_non_registered_family_is_more_actionable_than_searching_or_default(self):
+        svc, transport, _ = _make_service()
+        await transport.open()
+
+        _feed_registration_responses(
+            transport,
+            creg="+CREG: 0,0",
+            cgreg="+CGREG: 0,3",
+            cereg="+CEREG: 0,2",
+        )
+        info = await svc.registration()
+
+        assert info.registered is False
+        assert info.status == 3
+        assert info.mode == 0
+        assert info.description == "registration denied"
+        _assert_registration_family_queries(transport)
+
+    async def test_searching_non_registered_family_is_more_actionable_than_default(self):
+        svc, transport, _ = _make_service()
+        await transport.open()
+
+        _feed_registration_responses(
+            transport,
+            creg="+CREG: 0,0",
+            cgreg="+CGREG: 0,0",
+            cereg="+CEREG: 0,2",
+        )
+        info = await svc.registration()
+
+        assert info.registered is False
+        assert info.status == 2
+        assert info.mode == 0
+        assert info.description == "searching"
+        _assert_registration_family_queries(transport)
+
+    async def test_unknown_non_registered_family_is_more_actionable_than_default(self):
+        svc, transport, _ = _make_service()
+        await transport.open()
+
+        _feed_registration_responses(
+            transport,
+            creg="+CREG: 0,0",
+            cgreg="+CGREG: 0,0",
+            cereg="+CEREG: 0,4",
+        )
+        info = await svc.registration()
+
+        assert info.registered is False
+        assert info.status == 4
+        assert info.mode == 0
+        assert info.description == "unknown"
+        _assert_registration_family_queries(transport)
+
+    async def test_unrecognized_non_registered_status_is_more_actionable_than_default(self):
+        svc, transport, _ = _make_service()
+        await transport.open()
+
+        _feed_registration_responses(
+            transport,
+            creg="+CREG: 0,0",
+            cgreg="+CGREG: 0,4",
+            cereg="+CEREG: 0,8",
+        )
+        info = await svc.registration()
+
+        assert info.registered is False
+        assert info.status == 8
+        assert info.mode == 0
+        assert info.description == "unknown (8)"
+        _assert_registration_family_queries(transport)
 
     async def test_searching(self):
         svc, transport, _ = _make_service()
