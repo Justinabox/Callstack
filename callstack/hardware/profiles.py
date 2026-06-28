@@ -4,7 +4,7 @@ The helpers in this module classify already-known identity strings. They do not
 probe hardware, open serial ports, or execute AT commands.
 """
 
-from callstack.hardware.discovery import ModemCapabilities, ModemIdentity
+from callstack.hardware.discovery import AudioPortHint, ModemCapabilities, ModemIdentity
 
 _QUECTEL_MODEL_HINTS = (
     "BC",
@@ -61,6 +61,22 @@ def classify_capabilities(identity: ModemIdentity) -> ModemCapabilities:
         )
 
     return ModemCapabilities()
+
+
+def audio_port_hint_for_identity(identity: ModemIdentity) -> AudioPortHint:
+    """Return a conservative public-safe audio-port hint for an identity."""
+
+    if _looks_like_simcom(identity):
+        return AudioPortHint(
+            port=None,
+            confidence="profile-hint",
+            reason=(
+                "SIMCom-like modems commonly expose a separate PCM/audio serial interface; "
+                "configure CALLSTACK_AUDIO_PORT manually after hardware validation."
+            ),
+        )
+
+    return AudioPortHint()
 
 
 def profile_notes(identity: ModemIdentity) -> tuple[str, ...]:

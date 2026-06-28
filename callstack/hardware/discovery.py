@@ -8,7 +8,37 @@ from dataclasses import dataclass, field, fields
 from typing import Literal
 
 CapabilityStatus = Literal["supported", "unsupported", "unknown"]
+AudioPortConfidence = Literal["configured", "profile-hint", "sibling-serial", "unknown"]
 _VALID_CAPABILITY_STATUSES = {"supported", "unsupported", "unknown"}
+_VALID_AUDIO_PORT_CONFIDENCES = {"configured", "profile-hint", "sibling-serial", "unknown"}
+UNKNOWN_AUDIO_PORT_REASON = "Audio port role is unknown; configure CALLSTACK_AUDIO_PORT after hardware validation."
+
+
+@dataclass(frozen=True)
+class AudioPortHint:
+    """Public-safe audio-port assignment hint.
+
+    Discovery never proves an audio role by opening live audio/call paths. This
+    type keeps configured values and conservative hints visibly separate from a
+    verified modem setting.
+    """
+
+    port: str | None = None
+    confidence: AudioPortConfidence = "unknown"
+    reason: str = UNKNOWN_AUDIO_PORT_REASON
+
+    def __post_init__(self) -> None:
+        if self.confidence not in _VALID_AUDIO_PORT_CONFIDENCES:
+            raise ValueError(
+                f"audio port confidence must be one of {sorted(_VALID_AUDIO_PORT_CONFIDENCES)}, "
+                f"got {self.confidence!r}"
+            )
+
+
+def unknown_audio_port_hint() -> AudioPortHint:
+    """Return the default public-safe unknown audio-port hint."""
+
+    return AudioPortHint()
 
 
 @dataclass(frozen=True)
@@ -63,3 +93,4 @@ class ModemDiscoveryReport:
     capabilities: ModemCapabilities = field(default_factory=ModemCapabilities)
     confidence: str = "unknown"
     notes: tuple[str, ...] = ()
+    audio_hint: AudioPortHint = field(default_factory=unknown_audio_port_hint)
