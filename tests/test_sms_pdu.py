@@ -255,6 +255,32 @@ class TestDeliverPDU:
             f"{body_packed.hex().upper()}"
         )
 
+    @staticmethod
+    def _numeric_deliver_pdu(
+        sender: str = "5550123",
+        body: str = "Hi",
+        toa: int = 0x81,
+        sender_encoded: str | None = None,
+        sender_len: int | None = None,
+    ) -> str:
+        if sender_encoded is None:
+            sender_encoded, _toa = PDUEncoder.encode_phone_number(sender)
+        if sender_len is None:
+            sender_len = len(sender.lstrip("+"))
+        body_packed, body_len = PDUEncoder.encode_gsm7(body)
+        return (
+            "00"  # SCA: use default SMSC
+            "04"  # SMS-DELIVER
+            f"{sender_len:02X}"
+            f"{toa:02X}"
+            f"{sender_encoded}"
+            "00"  # PID
+            "00"  # DCS: GSM 7-bit default alphabet
+            "42215241030040"  # SCTS
+            f"{body_len:02X}"
+            f"{body_packed.hex().upper()}"
+        )
+
     def test_decode_timestamp(self):
         # 24/12/25 14:30:00 +04 (quarter hours)
         # Swapped BCD: 42 21 52 41 03 00 40
@@ -307,6 +333,42 @@ class TestDeliverPDU:
         assert decoded["sender"] == sender
         assert decoded["body"] == "Hi"
         assert decoded["timestamp"] is not None
+
+    def test_decode_deliver_pdu_preserves_odd_length_numeric_sender(self):
+        decoded = PDUDecoder.decode_deliver_pdu(
+            self._numeric_deliver_pdu(sender="5550123")
+        )
+
+        assert decoded is not None
+        assert decoded["sender"] == "5550123"
+        assert decoded["body"] == "Hi"
+        assert decoded["timestamp"] is not None
+
+    @pytest.mark.parametrize(
+        "sender_encoded,sender_len",
+        [
+            ("21A3B5F7", 7),  # A/B are never valid numeric BCD digits.
+            ("21F365", 6),  # F padding is not valid inside an even-length address.
+            ("１２F３", 3),  # Unicode decimal characters are not ASCII BCD nibbles.
+        ],
+    )
+    def test_decode_deliver_pdu_rejects_malformed_numeric_sender_bcd(
+        self, sender_encoded, sender_len
+    ):
+        pdu = self._numeric_deliver_pdu(
+            sender_encoded=sender_encoded,
+            sender_len=sender_len,
+        )
+
+        assert PDUDecoder.decode_deliver_pdu(pdu) is None
+
+    def test_decode_deliver_pdu_rejects_numeric_sender_with_extra_f_padding(self):
+        pdu = self._numeric_deliver_pdu(
+            sender_encoded="21F3F5",
+            sender_len=5,
+        )
+
+        assert PDUDecoder.decode_deliver_pdu(pdu) is None
 
     def test_decode_deliver_pdu_rejects_truncated_alphanumeric_sender(self):
         sender_packed, sender_len = PDUEncoder.encode_gsm7("DUO")

@@ -98,6 +98,27 @@ def _validate_sms_recipient(recipient: str) -> str:
     return recipient
 
 
+def _is_valid_numeric_originator_bcd(encoded: str, digit_count: int) -> bool:
+    """Return True when a semi-octet numeric originator contains only BCD digits."""
+    expected_len = digit_count + (digit_count % 2)
+    if digit_count <= 0 or len(encoded) != expected_len:
+        return False
+
+    digits = ""
+    for i in range(0, len(encoded), 2):
+        digits += encoded[i + 1] + encoded[i]
+
+    def is_ascii_decimal(text: str) -> bool:
+        return all("0" <= char <= "9" for char in text)
+
+    if digit_count % 2:
+        payload_digits = digits[:digit_count]
+        padding = digits[digit_count:]
+        return is_ascii_decimal(payload_digits) and padding.upper() == "F"
+
+    return is_ascii_decimal(digits)
+
+
 class PDUEncoder:
     """Encode SMS messages into PDU format."""
 
@@ -482,6 +503,8 @@ class PDUDecoder:
                     return None
                 oa_hex = pdu_hex[pos:pos + oa_hex_len]
                 pos += oa_hex_len
+                if not _is_valid_numeric_originator_bcd(oa_hex, oa_len):
+                    return None
                 sender = PDUEncoder.decode_phone_number(oa_hex, oa_toa)
 
             # PID
