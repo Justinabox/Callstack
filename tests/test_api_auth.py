@@ -205,6 +205,59 @@ class TestRateLimiting:
         data = await resp.json()
         assert "Rate limit" in data["error"]
 
+    async def test_invalid_bearer_attempts_are_rate_limited_without_storing_raw_tokens(self, aiohttp_client):
+        auth = APIKeyAuth(api_keys=["key"], rate_limit=2, rate_window=60)
+        client = await aiohttp_client(_make_app(auth))
+
+        for token in ("wrong-0", "wrong-1"):
+            resp = await client.get("/test", headers={"Authorization": f"Bearer {token}"})
+            assert resp.status == 403
+
+        resp = await client.get("/test", headers={"Authorization": "Bearer wrong-2"})
+        assert resp.status == 429
+        for token in ("wrong-0", "wrong-1", "wrong-2"):
+            assert token not in auth._request_log
+            assert all(token not in bucket for bucket in auth._request_log)
+
+    async def test_invalid_bearer_rate_limit_blocks_validation_after_threshold(self, aiohttp_client):
+        auth = APIKeyAuth(api_keys=["key"], rate_limit=2, rate_window=60)
+        client = await aiohttp_client(_make_app(auth))
+
+        for token in ("wrong-0", "wrong-1"):
+            resp = await client.get("/test", headers={"Authorization": f"Bearer {token}"})
+            assert resp.status == 403
+
+        resp = await client.get("/test", headers={"Authorization": "Bearer key"})
+        assert resp.status == 429
+
+    async def test_missing_and_malformed_auth_attempts_are_rate_limited_without_storing_raw_header(self, aiohttp_client):
+        auth = APIKeyAuth(api_keys=["key"], rate_limit=2, rate_window=60)
+        client = await aiohttp_client(_make_app(auth))
+
+        resp = await client.get("/test")
+        assert resp.status == 401
+
+        resp = await client.get("/test", headers={"Authorization": "Basic wrong-0"})
+        assert resp.status == 401
+
+        resp = await client.get("/test")
+        assert resp.status == 429
+        for private_value in ("Basic wrong-0", "wrong-0"):
+            assert private_value not in auth._request_log
+            assert all(private_value not in bucket for bucket in auth._request_log)
+        assert "" not in auth._request_log
+
+    async def test_stale_auth_failure_buckets_are_pruned_on_later_requests(self, aiohttp_client, monkeypatch):
+        auth = APIKeyAuth(api_keys=["key"], rate_limit=2, rate_window=60)
+        auth._request_log["auth-failure:old-peer"] = [10.0]
+        monkeypatch.setattr(server.time, "monotonic", lambda: 100.0)
+        client = await aiohttp_client(_make_app(auth))
+
+        resp = await client.get("/test", headers={"Authorization": "Bearer key"})
+
+        assert resp.status == 200
+        assert "auth-failure:old-peer" not in auth._request_log
+
 
 class TestServerPrivacyLogging:
     async def test_webhook_failure_log_redacts_url_and_exception_details(self, monkeypatch, caplog):
