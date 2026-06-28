@@ -3,6 +3,8 @@
 import asyncio
 from typing import Any, cast
 
+import pytest
+
 from callstack.events.bus import EventBus
 from callstack.events.types import CallState, DTMFEvent
 from callstack.voice.service import CallSession
@@ -84,4 +86,51 @@ async def test_interruptible_play_and_collect_digit_during_prompt_cancels_playba
 
     assert result == "7"
     assert service._audio.cancelled is True
+    assert service._audio.completed is False
+
+
+async def test_collect_dtmf_rejects_zero_max_digits_before_opening_stream():
+    service = _FakeService()
+    session = CallSession(number="unknown", direction="inbound", service=cast(Any, service))
+    service.active_call = session
+
+    with pytest.raises(ValueError, match="max_digits"):
+        await session.collect_dtmf(max_digits=0, timeout=0.01)
+
+    assert service._bus._queues.get(DTMFEvent) is None
+
+
+async def test_noninterrupt_play_and_collect_rejects_zero_max_digits_before_playback():
+    service = _FakeService()
+    session = CallSession(number="unknown", direction="inbound", service=cast(Any, service))
+    service.active_call = session
+
+    with pytest.raises(ValueError, match="max_digits"):
+        await asyncio.wait_for(
+            session.play_and_collect(
+                "menu.wav", max_digits=0, timeout=0.01, interrupt=False
+            ),
+            timeout=0.1,
+        )
+
+    assert service._audio.started.is_set() is False
+    assert service._audio.cancelled is False
+    assert service._audio.completed is False
+
+
+async def test_interruptible_play_and_collect_rejects_zero_max_digits_before_playback():
+    service = _FakeService()
+    session = CallSession(number="unknown", direction="inbound", service=cast(Any, service))
+    service.active_call = session
+
+    with pytest.raises(ValueError, match="max_digits"):
+        await asyncio.wait_for(
+            session.play_and_collect(
+                "menu.wav", max_digits=0, timeout=0.01, interrupt=True
+            ),
+            timeout=0.1,
+        )
+
+    assert service._audio.started.is_set() is False
+    assert service._audio.cancelled is False
     assert service._audio.completed is False
