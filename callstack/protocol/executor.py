@@ -13,6 +13,7 @@ from typing import Optional
 
 from callstack.errors import ATTimeoutError, TransportError
 from callstack.transport.base import Transport
+from callstack.protocol.parser import ATResponseParser
 from callstack.protocol.urc import URCDispatcher
 
 logger = logging.getLogger("callstack.executor")
@@ -73,6 +74,13 @@ def _response_line_for_log(command: str, raw_line: str) -> str:
         return _command_for_log(control_line)
     if display_command != command and control_line == command:
         return display_command
+    if control_line.startswith(("+CREG:", "+CGREG:", "+CEREG:")):
+        family = control_line.split(":", 1)[0]
+        parsed = ATResponseParser.parse_registration(control_line)
+        if parsed:
+            _, status = parsed
+            return f"{family}: status={status}"
+        return f"{family}:<redacted>"
     if command.startswith(("AT+CMGR", "AT+CMGL")) and not _is_final_result_line(raw_line):
         return "<redacted SMS read response>"
     return raw_line

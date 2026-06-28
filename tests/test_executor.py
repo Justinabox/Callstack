@@ -133,6 +133,21 @@ async def test_sms_read_debug_log_does_not_expose_raw_cmgr_payload(executor, tra
     assert "RX: <redacted SMS read response>" in caplog.text
 
 
+async def test_registration_debug_log_does_not_expose_cell_identifiers(executor, transport, caplog):
+    """Debug logs for registration queries must not expose TAC/cell IDs."""
+    raw_registration = '+CEREG: 2,1,"ABCD","12345678",7'
+
+    with caplog.at_level(logging.DEBUG, logger="callstack.executor"):
+        transport.feed(raw_registration, "OK")
+        resp = await executor.execute("AT+CEREG?")
+
+    assert resp.success is True
+    assert "ABCD" not in caplog.text
+    assert "12345678" not in caplog.text
+    assert raw_registration not in caplog.text
+    assert "RX: +CEREG: status=1" in caplog.text
+
+
 async def test_sensitive_cpin_command_is_redacted_from_debug_logs(executor, transport, caplog):
     """SIM PIN commands must not expose credentials in TX or echoed RX logs."""
     command = 'AT+CPIN="1234"'

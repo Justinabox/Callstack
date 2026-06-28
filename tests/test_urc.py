@@ -156,7 +156,7 @@ class TestDispatch:
         assert "Unhandled URC" not in caplog.text
 
     async def test_verbose_cereg_registration_logs_without_cell_identifiers(self, urc, caplog):
-        caplog.set_level(logging.INFO, logger="callstack.urc")
+        caplog.set_level(logging.DEBUG, logger="callstack.urc")
 
         await urc.dispatch('+CEREG: 2,1,"ABCD","12345678",7')
 
