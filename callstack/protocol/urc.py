@@ -109,7 +109,12 @@ class URCDispatcher:
             await self._bus.emit(_RawSMSNotification(sender=sender, body=followup, raw=line))
 
         elif line.startswith("+CMTI:"):
-            await self._bus.emit(_RawSMSNotification(raw=line))
+            parsed = ATResponseParser.parse_cmti(line)
+            if parsed:
+                storage, index = parsed
+                await self._bus.emit(_RawSMSNotification(raw=line, storage=storage, index=index))
+            else:
+                logger.warning("Could not parse SMS notification: %s", line)
 
         elif line.startswith("+CDSI:"):
             parsed = ATResponseParser.parse_cdsi(line)

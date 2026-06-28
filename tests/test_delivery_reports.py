@@ -84,6 +84,34 @@ class TestDeliveryReportService:
         assert "AT+CMGR=5" in written_commands
         assert "AT+CMGD=5" in written_commands
 
+    async def test_cdsi_selects_reported_non_default_storage_before_read_and_delete(
+        self, bus, urc
+    ):
+        """A +CDSI from ME storage must read and delete the status report from ME."""
+        transport = MockTransport()
+        service = SMSService(ATCommandExecutor(transport, urc), bus)
+
+        async with bus.stream(SMSDeliveryReportEvent) as stream:
+            transport.feed("OK")  # AT+CPMS before read
+            transport.feed(
+                '+CMGR: "REC READ",6,"+120****0123",145,'
+                '"24/12/25,14:30:00+04","24/12/25,14:30:05+04",0',
+                "OK",
+            )
+            transport.feed("OK")  # AT+CPMS before delete
+            transport.feed("OK")  # AT+CMGD
+            await service._on_delivery_report(_RawDeliveryReport(storage="ME", index=5))
+            event = await stream.next(timeout=1.0)
+
+        assert event.reference == 6
+        assert event.status == "delivered"
+        assert [command.strip() for command in transport.all_written] == [
+            'AT+CPMS="ME","ME","ME"',
+            "AT+CMGR=5",
+            'AT+CPMS="ME","ME","ME"',
+            "AT+CMGD=5",
+        ]
+
     @pytest.mark.parametrize(
         ("status_code", "expected_status"),
         [

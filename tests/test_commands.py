@@ -20,3 +20,21 @@ def test_send_sms_rejects_invalid_recipient_strings(recipient):
 )
 def test_send_sms_accepts_documented_recipient_formats(recipient, expected):
     assert ATCommand.send_sms(recipient) == expected
+
+
+@pytest.mark.parametrize(
+    ("storage", "expected"),
+    [
+        ("SM", 'AT+CPMS="SM","SM","SM"'),
+        ("ME", 'AT+CPMS="ME","ME","ME"'),
+        ("MT", 'AT+CPMS="MT","MT","MT"'),
+    ],
+)
+def test_select_sms_storage_builds_safe_cpms_command(storage, expected):
+    assert ATCommand.select_sms_storage(storage) == expected
+
+
+@pytest.mark.parametrize("storage", ["", "ME\"", "SM\r", "SM\n", "TOO_LONG"])
+def test_select_sms_storage_rejects_unsafe_storage_names(storage):
+    with pytest.raises(ValueError):
+        ATCommand.select_sms_storage(storage)

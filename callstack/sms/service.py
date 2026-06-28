@@ -17,7 +17,7 @@ from callstack.events.types import (
     _RawSMSNotification,
 )
 from callstack.protocol.commands import ATCommand
-from callstack.protocol.executor import ATCommandExecutor
+from callstack.protocol.executor import ATCommandExecutor, ATResponse
 from callstack.protocol.parser import ATResponseParser
 from callstack.privacy import redact_phone_number
 from callstack.sms.pdu import GSM7_BASIC
@@ -92,10 +92,17 @@ class SMSService:
         command_timeout: float = 5.0,
         sms_prompt_timeout: float = 10.0,
         sms_submit_timeout: float = 30.0,
+        sms_storage: str = "SM",
     ):
         self._at = executor
         self._bus = bus
         self._store = store or SMSStore()
+        # Validate through the AT command builder so config/env values cannot
+        # escape the quoted CPMS command.  The service tracks the selected
+        # storage to avoid redundant switches on the configured default path.
+        ATCommand.select_sms_storage(sms_storage)
+        self._sms_storage = sms_storage
+        self._selected_sms_storage: str | None = sms_storage
         self._command_timeout = command_timeout
         self._sms_prompt_timeout = sms_prompt_timeout
         self._sms_submit_timeout = sms_submit_timeout
@@ -118,6 +125,8 @@ class SMSService:
         await self._at.execute(ATCommand.SMS_TEXT_MODE, timeout=self._command_timeout)
         # GSM charset
         await self._at.execute(ATCommand.SMS_CHARSET_GSM, timeout=self._command_timeout)
+        # Select preferred message stores for read/write/receive slots.
+        await self._select_sms_storage(self._sms_storage, force=True)
         # Route new SMS to SIM storage (+CMTI URCs), then fetch via +CMGR so
         # modem final result codes frame complete multiline message bodies.
         await self._at.execute(ATCommand.SMS_NOTIFY, timeout=self._command_timeout)
@@ -126,6 +135,28 @@ class SMSService:
 
         self._initialized = True
         logger.info("SMS service initialized")
+
+    async def _select_sms_storage(self, storage: str, *, force: bool = False) -> bool:
+        """Select message storage for subsequent SMS read/write/delete commands."""
+        if not force and storage == self._selected_sms_storage:
+            return True
+        if force:
+            self._selected_sms_storage = None
+        resp = await self._at.execute(
+            ATCommand.select_sms_storage(storage), expect=["OK"], timeout=self._command_timeout
+        )
+        if resp.success:
+            self._selected_sms_storage = storage
+        return resp.success
+
+    async def _ensure_storage_for_slot(
+        self, storage: str | None, *, force: bool = False
+    ) -> bool:
+        if not storage:
+            if self._selected_sms_storage != self._sms_storage:
+                return await self._select_sms_storage(self._sms_storage, force=True)
+            return True
+        return await self._select_sms_storage(storage, force=force)
 
     # -- Sending --
 
@@ -199,12 +230,16 @@ class SMSService:
 
         if raw.startswith("+CMTI:"):
             # Notification mode: fetch the message from storage
-            parsed = ATResponseParser.parse_cmti(raw)
+            parsed = (
+                (event.storage, event.index)
+                if event.storage and event.index
+                else ATResponseParser.parse_cmti(raw)
+            )
             if parsed:
                 storage, index = parsed
                 logger.debug("CMTI notification: storage=%s, index=%d", storage, index)
                 slot_key = (storage, index)
-                sms = await self.read_message(index)
+                sms = await self.read_message(index, storage=storage)
                 if sms:
                     fingerprint = self._cmti_sms_fingerprint(sms)
                     already_accepted = (
@@ -262,7 +297,7 @@ class SMSService:
             else "Failed to delete SIM SMS slot after local acceptance"
         )
         try:
-            deleted = await self.delete_message(index)
+            deleted = await self.delete_message(index, storage=storage)
         except Exception as exc:
             logger.warning(
                 "%s: storage=%s index=%d error=%s",
@@ -293,11 +328,7 @@ class SMSService:
             else "Failed to delete delivery report slot after local acceptance"
         )
         try:
-            resp = await self._at.execute(
-                ATCommand.delete_sms(index),
-                expect=["OK"],
-                timeout=self._command_timeout,
-            )
+            deleted = await self.delete_message(index, storage=storage)
         except Exception as exc:
             logger.warning(
                 "%s: storage=%s index=%d error=%s",
@@ -307,18 +338,16 @@ class SMSService:
                 type(exc).__name__,
             )
             return False
-        if not resp.success:
+        if not deleted:
             logger.warning("%s: storage=%s index=%d", warning, storage, index)
-        return resp.success
+        return deleted
 
     # -- Delivery Reports --
 
     async def _on_delivery_report(self, event: _RawDeliveryReport) -> None:
         """Handle +CDSI delivery report notification."""
         logger.debug("Delivery report: storage=%s, index=%d", event.storage, event.index)
-        resp = await self._at.execute(
-            ATCommand.read_sms(event.index), expect=["OK"], timeout=self._command_timeout
-        )
+        resp = await self._read_raw_message(event.index, storage=event.storage)
         if not resp.success:
             logger.warning("Failed to read delivery report at index %d", event.index)
             return
@@ -410,6 +439,8 @@ class SMSService:
 
         Status values: "ALL", "REC UNREAD", "REC READ", "STO UNSENT", "STO SENT"
         """
+        if not await self._ensure_storage_for_slot(None):
+            return []
         resp = await self._at.execute(
             ATCommand.list_sms(status), expect=["OK"], timeout=self._command_timeout
         )
@@ -417,17 +448,26 @@ class SMSService:
             return []
         return self._parse_message_list(resp.lines)
 
-    async def read_message(self, index: int) -> Optional[SMS]:
-        """Read a single message from SIM storage by index."""
-        resp = await self._at.execute(
+    async def _read_raw_message(self, index: int, storage: str | None = None) -> ATResponse:
+        """Read a raw SMS/storage record after selecting its reported storage."""
+        if not await self._ensure_storage_for_slot(storage):
+            return ATResponse(success=False, lines=[])
+        return await self._at.execute(
             ATCommand.read_sms(index), expect=["OK"], timeout=self._command_timeout
         )
+
+    async def read_message(self, index: int, storage: str | None = None) -> Optional[SMS]:
+        """Read a single message from SIM storage by index."""
+        resp = await self._read_raw_message(index, storage=storage)
         if not resp.success:
             return None
         return self._parse_single_message(resp.lines, index)
 
-    async def delete_message(self, index: int) -> bool:
+    async def delete_message(self, index: int, storage: str | None = None) -> bool:
         """Delete a message from SIM storage by index."""
+        force_select = storage is not None and storage != self._sms_storage
+        if not await self._ensure_storage_for_slot(storage, force=force_select):
+            return False
         resp = await self._at.execute(
             ATCommand.delete_sms(index), expect=["OK"], timeout=self._command_timeout
         )
@@ -437,6 +477,8 @@ class SMSService:
 
     async def delete_all(self) -> bool:
         """Delete all messages from SIM storage."""
+        if not await self._ensure_storage_for_slot(None):
+            return False
         resp = await self._at.execute(
             ATCommand.DELETE_ALL_SMS, expect=["OK"], timeout=self._command_timeout
         )

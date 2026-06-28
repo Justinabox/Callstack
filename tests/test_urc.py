@@ -147,6 +147,8 @@ class TestDispatch:
             await urc.dispatch('+CMTI: "SM",3')
             event = await stream.next(timeout=1.0)
             assert isinstance(event, _RawSMSNotification)
+            assert event.storage == "SM"
+            assert event.index == 3
 
     async def test_cereg_registration_is_handled_intentionally(self, urc, caplog):
         caplog.set_level(logging.WARNING, logger="callstack.urc")

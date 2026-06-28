@@ -4,6 +4,7 @@ import re
 
 _PHONE_RE = re.compile(r'^[0-9+*#]+$')
 _SMS_RECIPIENT_RE = re.compile(r'^\+?[0-9]{3,15}$')
+_SMS_STORAGE_RE = re.compile(r'^[A-Z0-9]{1,2}$')
 _USSD_BREAKOUT_CHARS = frozenset({'"', "\r", "\n"})
 
 
@@ -102,6 +103,12 @@ class ATCommand:
         if not isinstance(index, int) or index < 0:
             raise ValueError(f"Invalid SMS index: {index!r} (must be non-negative integer)")
         return f"AT+CMGD={index}"
+
+    @staticmethod
+    def select_sms_storage(storage: str) -> str:
+        if not isinstance(storage, str) or not _SMS_STORAGE_RE.fullmatch(storage):
+            raise ValueError("Invalid SMS storage name")
+        return f'AT+CPMS="{storage}","{storage}","{storage}"'
 
     @staticmethod
     def list_sms(status: str = "ALL") -> str:

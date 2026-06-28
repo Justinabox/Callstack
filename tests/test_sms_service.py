@@ -64,6 +64,7 @@ async def test_initialize(sms_service, transport):
     """Initialize sends correct AT commands."""
     transport.feed("OK")  # CMGF
     transport.feed("OK")  # CSCS
+    transport.feed("OK")  # CPMS
     transport.feed("OK")  # CNMI
     transport.feed("OK")  # CSMP
     await sms_service.initialize()
@@ -71,7 +72,154 @@ async def test_initialize(sms_service, transport):
     written = transport.all_written
     assert any("CMGF=1" in w for w in written)
     assert any("CSCS" in w for w in written)
+    assert 'AT+CPMS="SM","SM","SM"\r\n' in written
     assert 'AT+CNMI=2,1,0,1,0\r\n' in written
+
+
+async def test_initialize_selects_configured_sms_storage(executor, bus, store):
+    """SMS initialization applies the configured preferred message storage."""
+    calls = []
+
+    async def record_execute(command, expect=("OK",), timeout=5.0):
+        calls.append(command)
+        return ATResponse(success=True, lines=["OK"])
+
+    executor.execute = record_execute
+    service = SMSService(executor, bus, store, sms_storage="ME")
+
+    await service.initialize()
+
+    assert calls == [
+        "AT+CMGF=1",
+        'AT+CSCS="GSM"',
+        'AT+CPMS="ME","ME","ME"',
+        "AT+CNMI=2,1,0,1,0",
+        "AT+CSMP=49,167,0,0",
+    ]
+
+
+async def test_failed_storage_selection_is_retried_before_later_storage_read(
+    executor, bus, store
+):
+    """A failed CPMS during init must not poison later same-storage reads."""
+    calls = []
+    cpms_attempts = 0
+
+    async def record_execute(command, expect=("OK",), timeout=5.0):
+        nonlocal cpms_attempts
+        calls.append(command)
+        if command.startswith("AT+CPMS"):
+            cpms_attempts += 1
+            if cpms_attempts == 1:
+                return ATResponse(success=False, lines=["ERROR"])
+        if command.startswith("AT+CMGR"):
+            return ATResponse(
+                success=True,
+                lines=[
+                    '+CMGR: "REC UNREAD","+155****9876","","24/12/25,14:30:00+04"',
+                    "Hello there!",
+                    "OK",
+                ],
+            )
+        return ATResponse(success=True, lines=["OK"])
+
+    executor.execute = record_execute
+    service = SMSService(executor, bus, store, sms_storage="ME")
+
+    await service.initialize()
+    sms = await service.read_message(5, storage="ME")
+
+    assert sms is not None
+    assert calls == [
+        "AT+CMGF=1",
+        'AT+CSCS="GSM"',
+        'AT+CPMS="ME","ME","ME"',
+        "AT+CNMI=2,1,0,1,0",
+        "AT+CSMP=49,167,0,0",
+        'AT+CPMS="ME","ME","ME"',
+        "AT+CMGR=5",
+    ]
+
+
+async def test_default_read_restores_configured_storage_after_non_default_read(
+    sms_service, transport
+):
+    """No-storage public reads return to the configured default store after ME work."""
+    transport.feed("OK")  # AT+CPMS ME
+    transport.feed(
+        '+CMGR: "REC UNREAD","+155****9876","","24/12/25,14:30:00+04"',
+        "ME message",
+        "OK",
+    )
+    transport.feed("OK")  # AT+CPMS SM
+    transport.feed(
+        '+CMGR: "REC UNREAD","+155****2468","","24/12/25,14:35:00+04"',
+        "SM message",
+        "OK",
+    )
+
+    me_sms = await sms_service.read_message(3, storage="ME")
+    default_sms = await sms_service.read_message(4)
+
+    assert me_sms is not None
+    assert default_sms is not None
+    assert default_sms.body == "SM message"
+    assert [command.strip() for command in transport.all_written] == [
+        'AT+CPMS="ME","ME","ME"',
+        "AT+CMGR=3",
+        'AT+CPMS="SM","SM","SM"',
+        "AT+CMGR=4",
+    ]
+
+
+async def test_list_messages_restores_configured_storage_after_non_default_read(
+    sms_service, transport
+):
+    """No-storage SMS listing returns to the configured default store after ME work."""
+    transport.feed("OK")  # AT+CPMS ME
+    transport.feed(
+        '+CMGR: "REC UNREAD","+155****9876","","24/12/25,14:30:00+04"',
+        "ME message",
+        "OK",
+    )
+    transport.feed("OK")  # AT+CPMS SM
+    transport.feed("OK")  # AT+CMGL
+
+    await sms_service.read_message(3, storage="ME")
+    messages = await sms_service.list_messages()
+
+    assert messages == []
+    assert [command.strip() for command in transport.all_written] == [
+        'AT+CPMS="ME","ME","ME"',
+        "AT+CMGR=3",
+        'AT+CPMS="SM","SM","SM"',
+        'AT+CMGL="ALL"',
+    ]
+
+
+async def test_delete_all_restores_configured_storage_after_non_default_read(
+    sms_service, transport
+):
+    """No-storage bulk delete returns to the configured default store after ME work."""
+    transport.feed("OK")  # AT+CPMS ME
+    transport.feed(
+        '+CMGR: "REC UNREAD","+155****9876","","24/12/25,14:30:00+04"',
+        "ME message",
+        "OK",
+    )
+    transport.feed("OK")  # AT+CPMS SM
+    transport.feed("OK")  # AT+CMGD=1,4
+
+    await sms_service.read_message(3, storage="ME")
+    deleted = await sms_service.delete_all()
+
+    assert deleted is True
+    assert [command.strip() for command in transport.all_written] == [
+        'AT+CPMS="ME","ME","ME"',
+        "AT+CMGR=3",
+        'AT+CPMS="SM","SM","SM"',
+        "AT+CMGD=1,4",
+    ]
 
 
 async def test_initialize_uses_configured_command_timeout(executor, bus, store):
@@ -80,6 +228,7 @@ async def test_initialize_uses_configured_command_timeout(executor, bus, store):
 
     async def record_execute(command, expect=("OK",), timeout=5.0):
         calls.append((command, timeout))
+        return ATResponse(success=True, lines=["OK"])
 
     executor.execute = record_execute
     service = SMSService(executor, bus, store, command_timeout=1.75)
@@ -89,6 +238,7 @@ async def test_initialize_uses_configured_command_timeout(executor, bus, store):
     assert calls == [
         ("AT+CMGF=1", 1.75),
         ('AT+CSCS="GSM"', 1.75),
+        ('AT+CPMS="SM","SM","SM"', 1.75),
         ("AT+CNMI=2,1,0,1,0", 1.75),
         ("AT+CSMP=49,167,0,0", 1.75),
     ]
@@ -388,6 +538,38 @@ async def test_receive_cmti_accepts_optional_comma_whitespace(sms_service, trans
     ]
 
 
+async def test_receive_cmti_selects_reported_non_default_storage_before_read_and_delete(
+    sms_service, transport, bus, store
+):
+    """A +CMTI from ME storage must read and delete from ME, not current SM."""
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+    transport.feed("OK")  # AT+CPMS before read
+    transport.feed(
+        '+CMGR: "REC UNREAD","+155****9876","","24/12/25,14:30:00+04"',
+        "Hello there!",
+        "OK",
+    )
+    transport.feed("OK")  # AT+CPMS before delete
+    transport.feed("OK")  # AT+CMGD
+
+    await sms_service._on_incoming(_RawSMSNotification(raw='+CMTI: "ME",3'))
+    await asyncio.sleep(0.01)
+
+    assert len(received) == 1
+    assert await store.count() == 1
+    assert [command.strip() for command in transport.all_written] == [
+        'AT+CPMS="ME","ME","ME"',
+        "AT+CMGR=3",
+        'AT+CPMS="ME","ME","ME"',
+        "AT+CMGD=3",
+    ]
+
+
 async def test_receive_cmti_store_failure_does_not_delete_sim_slot(executor, transport, bus):
     """If durable store save fails, the SIM slot remains for retry/recovery."""
     service = SMSService(executor, bus, FailingSMSStore())
@@ -541,7 +723,7 @@ async def test_receive_cmti_delete_exception_surfaces_cleanup_without_private_ec
     async def track(event):
         received.append(event)
 
-    async def fail_delete(index):
+    async def fail_delete(index, storage=None):
         raise TimeoutError(f"timed out deleting {sender} {body}")
 
     bus.subscribe(IncomingSMSEvent, track)
