@@ -6,12 +6,117 @@ import pytest
 
 import callstack.sms.store as sms_store_module
 from callstack.sms.store import SMSStore
-from callstack.sms.types import SMS
+from callstack.sms.types import DeliveryReport, SMS
 
 
 @pytest.fixture
 def store():
     return SMSStore()
+
+
+async def test_save_delivery_report_correlates_latest_matching_outbound_sms(store):
+    older = await store.save(SMS(recipient="+15551234567", status="sent", reference=42))
+    newer = await store.save(SMS(recipient="+15551234567", status="sent", reference=42))
+    await store.save(SMS(recipient="+15557654321", status="sent", reference=42))
+
+    report = await store.save_delivery_report(
+        DeliveryReport(reference=42, recipient="+15551234567", status="delivered")
+    )
+
+    assert report.id == 1
+    assert report.message_id == newer.id
+    assert (await store.get(older.id)).status == "sent"
+    assert (await store.get(newer.id)).status == "delivered"
+    listed = await store.list_delivery_reports()
+    assert [(item.id, item.reference, item.message_id, item.status) for item in listed] == [
+        (1, 42, newer.id, "delivered")
+    ]
+
+
+async def test_sqlite_delivery_reports_survive_reopen_and_preserve_message_status(tmp_path):
+    pytest.importorskip("aiosqlite")
+    db_path = str(tmp_path / "sms.db")
+    store = SMSStore(db_path=db_path)
+    try:
+        await store.initialize()
+        sms = await store.save(SMS(recipient="+15551234567", status="sent", reference=43))
+        saved = await store.save_delivery_report(
+            DeliveryReport(reference=43, recipient="+15551234567", status="failed")
+        )
+        assert saved.message_id == sms.id
+        await store.close()
+
+        reopened = SMSStore(db_path=db_path)
+        try:
+            await reopened.initialize()
+            reports = await reopened.list_delivery_reports()
+            messages = await reopened.list()
+        finally:
+            await reopened.close()
+
+        assert [(report.reference, report.recipient, report.status, report.message_id) for report in reports] == [
+            (43, "+15551234567", "failed", sms.id)
+        ]
+        assert [(message.id, message.status) for message in messages] == [(sms.id, "failed")]
+    finally:
+        await store.close()
+
+
+async def test_save_delivery_report_does_not_correlate_inbound_message_with_same_reference(store):
+    incoming = await store.save(SMS(sender="+155****0000", status="unread", reference=42))
+
+    report = await store.save_delivery_report(
+        DeliveryReport(reference=42, recipient="+155****4567", status="delivered")
+    )
+
+    assert report.message_id is None
+    assert (await store.get(incoming.id)).status == "unread"
+
+
+async def test_delivery_report_saved_before_initialize_persists_on_initialize(tmp_path):
+    pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        saved = await store.save_delivery_report(
+            DeliveryReport(reference=44, recipient="+155****4567", status="delivered")
+        )
+
+        await store.initialize()
+
+        assert [(report.id, report.reference, report.recipient, report.status) for report in await store.list_delivery_reports()] == [
+            (saved.id, 44, "+155****4567", "delivered")
+        ]
+        await store.close()
+        await store.initialize()
+        assert [(report.id, report.reference, report.recipient, report.status) for report in await store.list_delivery_reports()] == [
+            (saved.id, 44, "+155****4567", "delivered")
+        ]
+    finally:
+        await store.close()
+
+
+async def test_sqlite_save_delivery_report_replaces_existing_report_id(tmp_path):
+    pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await store.initialize()
+        report = await store.save_delivery_report(
+            DeliveryReport(reference=45, recipient="+155****4567", status="pending")
+        )
+        report.status = "delivered"
+
+        await store.save_delivery_report(report)
+
+        assert [(item.id, item.status) for item in await store.list_delivery_reports()] == [
+            (report.id, "delivered")
+        ]
+        await store.close()
+        await store.initialize()
+        assert [(item.id, item.status) for item in await store.list_delivery_reports()] == [
+            (report.id, "delivered")
+        ]
+    finally:
+        await store.close()
 
 
 async def test_save_assigns_id(store):

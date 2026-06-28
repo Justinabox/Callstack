@@ -1,6 +1,7 @@
 """Tests for API key authentication middleware."""
 
 import logging
+from datetime import datetime, timezone
 import time
 from types import SimpleNamespace
 from typing import cast
@@ -16,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from callstack.events.bus import EventBus
 from callstack.protocol.executor import ATCommandExecutor
+from callstack.sms.types import DeliveryReport
 from callstack.ussd import USSDService
 import server
 from server import APIKeyAuth, create_app
@@ -267,6 +269,77 @@ class TestServerPrivacyLogging:
         assert "notaport" not in caplog.text
         assert "super-secret" not in caplog.text
         assert "private sms body secret" not in caplog.text
+
+
+class TestDeliveryReportEndpoint:
+    async def test_delivery_reports_endpoint_reads_sms_store_with_limit_and_redacts_recipient(self, aiohttp_client):
+        class FakeSMS:
+            def __init__(self):
+                self.limits = []
+
+            async def list_delivery_reports(self, limit=100):
+                self.limits.append(limit)
+                return [
+                    DeliveryReport(
+                        id=7,
+                        reference=42,
+                        recipient="+15551234567",
+                        status="delivered",
+                        timestamp=datetime(2026, 6, 28, tzinfo=timezone.utc),
+                        message_id=3,
+                    )
+                ]
+
+        fake_sms = FakeSMS()
+        modem = SimpleNamespace(sms=fake_sms, ussd=SimpleNamespace(), bus=EventBus(), connected=True)
+        client = await aiohttp_client(create_app(modem))
+
+        resp = await client.get("/sms/delivery-reports?limit=1")
+
+        assert resp.status == 200
+        assert fake_sms.limits == [1]
+        assert await resp.json() == [
+            {
+                "id": 7,
+                "reference": 42,
+                "recipient": "+***4567",
+                "status": "delivered",
+                "timestamp": "2026-06-28T00:00:00+00:00",
+                "message_id": 3,
+            }
+        ]
+
+
+    async def test_delivery_reports_endpoint_fallback_handles_legacy_dict_reports(self, aiohttp_client):
+        previous_reports = list(server.delivery_reports)
+        server.delivery_reports[:] = [
+            {
+                "id": 9,
+                "reference": 43,
+                "recipient": "+15551230000",
+                "status": "failed",
+                "timestamp": "2026-06-28T01:02:03+00:00",
+                "message_id": 4,
+            }
+        ]
+        modem = SimpleNamespace(sms=SimpleNamespace(), ussd=SimpleNamespace(), bus=EventBus(), connected=True)
+        try:
+            client = await aiohttp_client(create_app(modem))
+            resp = await client.get("/sms/delivery-reports")
+        finally:
+            server.delivery_reports[:] = previous_reports
+
+        assert resp.status == 200
+        assert await resp.json() == [
+            {
+                "id": 9,
+                "reference": 43,
+                "recipient": "+***0000",
+                "status": "failed",
+                "timestamp": "2026-06-28T01:02:03+00:00",
+                "message_id": 4,
+            }
+        ]
 
 
 class TestUSSDEndpointValidation:

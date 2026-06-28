@@ -14,6 +14,7 @@ from callstack.protocol.executor import ATCommandExecutor
 from callstack.protocol.parser import ATResponseParser
 from callstack.protocol.urc import URCDispatcher
 from callstack.sms.service import SMSService
+from callstack.sms.store import SMSStore
 from callstack.transport.mock import MockTransport
 
 
@@ -63,6 +64,54 @@ class TestCDSIDispatch:
 
 
 class TestDeliveryReportService:
+    async def test_parsed_delivery_report_is_saved_before_event_emission(self, bus, urc):
+        transport = MockTransport()
+        store = SMSStore()
+        service = SMSService(ATCommandExecutor(transport, urc), bus, store=store)
+
+        async with bus.stream(SMSDeliveryReportEvent) as stream:
+            transport.feed(
+                '+CMGR: "REC READ",14,"+15551234567",145,'
+                '"24/12/25,14:30:00+04","24/12/25,14:30:05+04",0',
+                "OK",
+                "OK",
+            )
+            await service._on_delivery_report(_RawDeliveryReport(storage="SM", index=14))
+            event = await stream.next(timeout=1.0)
+
+        reports = await store.list_delivery_reports()
+        assert event.reference == 14
+        assert [(report.reference, report.recipient, report.status) for report in reports] == [
+            (14, "+15551234567", "delivered")
+        ]
+
+    async def test_delivery_report_store_failure_preserves_slot_and_suppresses_event(self, bus, urc, caplog):
+        class FailingStore(SMSStore):
+            async def save_delivery_report(self, report):
+                raise OSError("database path includes +15551234567 secret")
+
+        transport = MockTransport()
+        service = SMSService(ATCommandExecutor(transport, urc), bus, store=FailingStore())
+
+        async with bus.stream(SMSDeliveryReportEvent) as stream:
+            transport.feed(
+                '+CMGR: "REC READ",15,"+155****4567",145,'
+                '"24/12/25,14:30:00+04","24/12/25,14:30:05+04",0',
+                "OK",
+                "OK",
+            )
+            with caplog.at_level(logging.WARNING, logger="callstack.sms"):
+                await service._on_delivery_report(_RawDeliveryReport(storage="SM", index=15))
+            event = await stream.next(timeout=0.01)
+
+        written_commands = [chunk.strip() for chunk in transport.all_written]
+        assert event is None
+        assert "AT+CMGD=15" not in written_commands
+        assert "Failed to persist delivery report" in caplog.text
+        assert "storage=SM index=15" in caplog.text
+        assert "+155****4567" not in caplog.text
+        assert "15551234567" not in caplog.text
+
     async def test_text_mode_report_preserves_reference_recipient_and_status(self, bus, urc):
         transport = MockTransport()
         service = SMSService(ATCommandExecutor(transport, urc), bus)
