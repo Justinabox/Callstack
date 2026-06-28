@@ -1133,6 +1133,30 @@ class TestCallSession:
 
         assert service._at.commands == []
 
+    async def test_send_dtmf_rejects_active_empty_digits_before_modem_write(self):
+        class FakeAT:
+            def __init__(self):
+                self.commands = []
+
+            async def execute(self, command, **kwargs):
+                self.commands.append((command, kwargs))
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeService:
+            def __init__(self):
+                self.state = CallState.ACTIVE
+                self.active_call: object | None = None
+                self._at = FakeAT()
+
+        service = FakeService()
+        session = CallSession(number="+1234", direction="outbound", service=cast(CallService, service))
+        service.active_call = session
+
+        with pytest.raises(ValueError, match="DTMF digits"):
+            await session.send_dtmf("")
+
+        assert service._at.commands == []
+
     async def test_send_dtmf_rejects_stale_session_when_another_call_is_active(self):
         class FakeAT:
             def __init__(self):
