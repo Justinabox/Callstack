@@ -383,4 +383,33 @@ async def test_discover_modems_reports_ambiguous_sibling_serial_audio_hint_witho
     assert report.audio_hint.port is None
     assert report.audio_hint.confidence == "sibling-serial"
     assert "audio role cannot be proven safely" in report.audio_hint.reason.lower()
+    assert "audio hint confidence: sibling-serial" in report.notes[0]
     assert any("CALLSTACK_AUDIO_PORT manually" in note for note in report.notes)
+
+
+async def test_discover_modems_scan_note_reflects_profile_audio_hint_without_claiming_configured_port():
+    """Profile hints should not be contradicted by the opt-in scan summary note."""
+    simcom = ScriptedTransport(
+        {
+            "AT": ["OK"],
+            "ATI": ["SIMCOM INCORPORATED", "SIMCOM_SIM7600E-H", "OK"],
+            "AT+GMI": ["SIMCOM INCORPORATED", "OK"],
+            "AT+GMM": ["SIMCOM_SIM7600E-H", "OK"],
+            "AT+GMR": ["LE20B01SIM7600M22", "OK"],
+        }
+    )
+
+    reports = await discover_modems(
+        patterns="/dev/ttyUSB*",
+        path_glob=lambda pattern: ["/dev/ttyUSB2"],
+        transport_opener=lambda port: simcom,
+        command_timeout=0.001,
+    )
+
+    report = reports[0]
+    assert report.audio_hint.port is None
+    assert report.audio_hint.confidence == "profile-hint"
+    scan_note = report.notes[0]
+    assert "audio hint confidence: profile-hint" in scan_note
+    assert "audio port remains unknown unless configured explicitly" not in scan_note
+    assert report.audio_port is None
