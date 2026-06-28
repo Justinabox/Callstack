@@ -92,6 +92,8 @@ class APIKeyAuth:
         return await handler(request)
 
     def _is_valid_key(self, candidate_key: str) -> bool:
+        if not candidate_key.isascii():
+            return False
         valid = False
         for stored_key in self._keys:
             valid |= secrets.compare_digest(candidate_key, stored_key)
@@ -101,6 +103,8 @@ class APIKeyAuth:
     def _validated_key(key: str) -> str:
         if not key.strip():
             raise ValueError("API key must not be blank")
+        if not key.isascii():
+            raise ValueError("API key must contain only ASCII characters")
         return key
 
     def add_key(self, key: str) -> None:

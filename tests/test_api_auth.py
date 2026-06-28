@@ -79,6 +79,15 @@ class TestAPIKeyAuthEnabled:
         resp = await client.get("/test", headers={"Authorization": "Basic abc123"})
         assert resp.status == 401
 
+    async def test_non_ascii_bearer_token_fails_closed_without_rate_log_entry(self, aiohttp_client, auth):
+        client = await aiohttp_client(_make_app(auth))
+
+        resp = await client.get("/test", headers={"Authorization": "Bearer é"})
+
+        assert resp.status == 403
+        assert await resp.json() == {"error": "Invalid API key."}
+        assert "é" not in auth._request_log
+
     def test_blank_configured_key_is_rejected(self):
         with pytest.raises(ValueError, match="API key must not be blank"):
             APIKeyAuth(api_keys=[""])
@@ -86,6 +95,10 @@ class TestAPIKeyAuthEnabled:
     def test_whitespace_configured_key_is_rejected(self):
         with pytest.raises(ValueError, match="API key must not be blank"):
             APIKeyAuth(api_keys=["   \t"])
+
+    def test_non_ascii_configured_key_is_rejected(self):
+        with pytest.raises(ValueError, match="API key must contain only ASCII characters"):
+            APIKeyAuth(api_keys=["é"])
 
 
 class TestAPIKeyConstantTimeComparison:
@@ -126,6 +139,19 @@ class TestAPIKeyConstantTimeComparison:
             ("matching-key", "other-key"),
         ]
 
+    def test_non_ascii_candidate_key_returns_false_without_comparing(self, monkeypatch):
+        auth = APIKeyAuth(api_keys=["test-key-123", "another-key"])
+        calls = []
+
+        def fake_compare_digest(left, right):
+            calls.append((left, right))
+            return left == right
+
+        monkeypatch.setattr(server.secrets, "compare_digest", fake_compare_digest)
+
+        assert auth._is_valid_key("é") is False
+        assert calls == []
+
 
 class TestAPIKeyManagement:
     def test_add_key(self):
@@ -145,6 +171,12 @@ class TestAPIKeyManagement:
         auth = APIKeyAuth()
         with pytest.raises(ValueError, match="API key must not be blank"):
             auth.add_key("  \n")
+        assert auth.enabled is False
+
+    def test_add_key_rejects_non_ascii_key(self):
+        auth = APIKeyAuth()
+        with pytest.raises(ValueError, match="API key must contain only ASCII characters"):
+            auth.add_key("é")
         assert auth.enabled is False
 
     def test_revoke_key(self):
