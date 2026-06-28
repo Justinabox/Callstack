@@ -182,9 +182,11 @@ class PDUEncoder:
         # Validity period (relative, 1 day = 167)
         vp = "A7"
 
-        # User data
-        packed, septet_count = PDUEncoder.encode_gsm7(body)
-        udl = f"{septet_count:02X}"
+        # User data. Send-ready PDUs must fail closed instead of silently
+        # replacing unsupported characters with "?".
+        septets = _gsm7_septets(body, allow_fallback=False)
+        packed = _pack_gsm7_septets(septets)
+        udl = f"{len(septets):02X}"
         ud = packed.hex().upper()
 
         tpdu = pdu_type + mr + da + pid + dcs + vp + udl + ud

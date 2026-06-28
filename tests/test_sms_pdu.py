@@ -142,10 +142,28 @@ class TestSubmitPDU:
 
     def test_submit_pdu_length_counts_full_tpdu_after_sca(self):
         for body in ("Hi", "Hello World"):
-            pdu, length = PDUEncoder.build_submit_pdu("+12055550123", body)
+            pdu, length = PDUEncoder.build_submit_pdu("5551234", body)
             sca_octets = int(pdu[:2], 16)
             expected_tpdu_octets = (len(pdu) // 2) - (1 + sca_octets)
             assert length == expected_tpdu_octets
+
+    def test_build_submit_pdu_rejects_ucs2_required_text_before_encoding(self):
+        with pytest.raises(ValueError, match="GSM 03.38") as excinfo:
+            PDUEncoder.build_submit_pdu("5550100", "OTP 漢")
+
+        assert "OTP" not in str(excinfo.value)
+        assert "漢" not in str(excinfo.value)
+
+    def test_build_submit_pdu_preserves_gsm7_extension_table_characters(self):
+        body = "Braces {}[] cost €5 ~^|\\"
+
+        pdu, _ = PDUEncoder.build_submit_pdu("5550100", body)
+        fields = _submit_pdu_fields(pdu)
+        decoded = PDUDecoder.decode_gsm7(
+            fields["user_data"], fields["user_data_length"]
+        )
+
+        assert decoded == body
 
     @pytest.mark.parametrize(
         "recipient",
