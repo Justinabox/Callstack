@@ -13,7 +13,7 @@
 - ✅ Signal-quality polish: BER values now have human-readable descriptions.
 - ✅ Multipart SMS groundwork: concatenated-message UDH metadata parser for 8-bit and 16-bit references.
 - ✅ HTTP observability: `/healthz` and PII-safe Prometheus `/metrics` expose aggregate readiness and runtime counters.
-- ✅ CLI groundwork: `callstack status`, `callstack send`, safe `callstack doctor`, and PII-safe `callstack monitor` support local Pi operations, hardware bring-up, and sanitized event tailing.
+- ✅ CLI groundwork: `callstack status`, `callstack send`, safe `callstack doctor` with opt-in scan/config preview, and PII-safe `callstack monitor` support local Pi operations, hardware bring-up, and sanitized event tailing.
 - ✅ Conservative modem profile helpers classify known modem identities without mutating hardware state.
 
 ---
@@ -34,7 +34,8 @@
 
 ### Modem Auto-Detection
 - Safe explicit-port `callstack doctor` probing is shipped.
-- Next step: active auto-detection that can scan candidate `/dev/ttyUSB*` ports, choose AT/audio assignments conservatively, and keep all probes non-mutating.
+- Opt-in `callstack doctor --scan --patterns ...` can enumerate candidate serial devices, choose the best AT port by conservative confidence ranking, and print a config preview while keeping all probes non-mutating.
+- Next step: richer hardware profiles that can choose audio-port assignments conservatively without mutating modem state.
 
 ---
 
@@ -59,8 +60,8 @@
 ## Phase 4 — Developer Experience (v0.5)
 
 ### CLI Tool
-- Shipped: `callstack send`, `callstack status`, safe `callstack doctor`, PII-safe `callstack monitor`, and packaged `callstack serve` for HTTP server mode.
-- Planned: active modem scan/config preview, richer config/env loading, systemd-style deployment examples, and production-safe health/metrics scrape guidance.
+- Shipped: `callstack send`, `callstack status`, safe `callstack doctor` with opt-in scan/config preview, PII-safe `callstack monitor`, and packaged `callstack serve` for HTTP server mode.
+- Planned: richer config/env loading, conservative audio-port assignment, systemd-style deployment examples, and production-safe health/metrics scrape guidance.
 
 ---
 
@@ -70,9 +71,9 @@ Prefer these small, reviewable slices before broad realtime/dashboard expansion:
 
 1. Auth and secret hygiene: deployment-safe auth defaults (#4), invalid-key rate limiting (#120), redacted environment config (#58), and privacy-safe default logging (#61).
 2. SMS correctness: text-mode inbound body fidelity (#72), multipart receive/send finality (#10/#100), delivery-report cleanup (#148), and continued recipient-validation regression coverage.
-3. Modem safety: SIM-readiness fail-closed behavior (#142) and conservative active modem scan/config preview (#11) before unattended deployments.
+3. Modem safety: SIM-readiness fail-closed behavior (#142), safe doctor scan follow-ups for audio-port assignment, and clear profile evidence before unattended deployments.
 4. Webhook safety: URL admission and dispatch hardening (#47), signed delivery with retry/backoff (#21), and bounded error logs.
-5. Operator DX: keep shipped `callstack doctor`, `callstack monitor`, and `callstack serve` docs aligned with code, then add active scan/config preview and production-safe health/metrics deployment notes.
+5. Operator DX: keep shipped `callstack doctor`, `callstack monitor`, and `callstack serve` docs aligned with code, then add production-safe health/metrics deployment notes.
 6. Realtime and PBX: WebSocket event streaming (#31), scheduled SMS (#49), pre-answer routing (#40), voicemail helpers (#41), and IVR/DTMF hardening once SMS/security foundations stay green.
 
 ### Plugin/Middleware System
@@ -111,8 +112,8 @@ Prefer these small, reviewable slices before broad realtime/dashboard expansion:
 | P0 | Multi-Part SMS Reassembly | Medium | High | UDH parser done; service integration next |
 | P0 | SMS/security hardening | Small-Medium | High | Continue recipient validation, text-mode fidelity, auth, redaction, and webhook safety |
 | P1 | WebSocket Feed | Medium | High | Planned after SMS/security foundations |
-| P1 | PII-safe CLI monitor + serve DX | Low-Medium | Medium | ✅ Shipped; next CLI DX is active scan/config preview and deployment examples |
-| P1 | Modem Auto-Detection | Medium | High | Safe explicit-port doctor shipped; active scanning/assignment planned |
+| P1 | PII-safe CLI monitor + serve DX | Low-Medium | Medium | ✅ Shipped; next CLI DX is deployment examples and richer config helpers |
+| P1 | Modem Auto-Detection | Medium | High | Opt-in safe scan/config preview shipped; conservative audio-port assignment planned |
 | P2 | Voicemail System | Medium | High | Planned |
 | P2 | GPS/GNSS | Medium | High | Planned |
 | P2 | Scheduled SMS | Low | Medium | Planned |
