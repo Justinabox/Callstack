@@ -399,8 +399,13 @@ async def test_dial_terminal_result_is_failed_response_not_urc(
     assert received_call_states == []
 
 
-async def test_idle_no_carrier_still_dispatches_call_state_urc(transport, bus, urc):
-    """The ATD special case must not disable idle NO CARRIER URC handling."""
+@pytest.mark.parametrize(
+    "terminal_result", ["NO CARRIER", "NO DIALTONE", "NO DIAL TONE"]
+)
+async def test_idle_call_terminal_result_dispatches_call_state_urc(
+    transport, bus, urc, terminal_result
+):
+    """The ATD special case must not disable idle call-ended URC handling."""
     executor = ATCommandExecutor(transport, urc)
     received_call_states = []
 
@@ -410,7 +415,7 @@ async def test_idle_no_carrier_still_dispatches_call_state_urc(transport, bus, u
 
     await executor.start_reader()
     try:
-        transport.feed("NO CARRIER")
+        transport.feed(terminal_result)
         for _ in range(10):
             if received_call_states:
                 break

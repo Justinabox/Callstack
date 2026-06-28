@@ -28,6 +28,7 @@ class URCDispatcher:
         "RING", "+CLIP", "+DTMF", "RXDTMF",
         "+CMT", "+CMTI", "+CDSI",
         "VOICE CALL", "NO CARRIER", "BUSY", "NO ANSWER",
+        "NO DIALTONE", "NO DIAL TONE",
         "+CUSD", "+CREG", "+CGREG", "+CEREG",
     )
 
@@ -101,7 +102,13 @@ class URCDispatcher:
         elif line.startswith("VOICE CALL: END"):
             await self._bus.emit(CallStateEvent(state=CallState.ENDED))
 
-        elif line == "NO CARRIER" or line == "BUSY" or line == "NO ANSWER":
+        elif line in (
+            "NO CARRIER",
+            "BUSY",
+            "NO ANSWER",
+            "NO DIALTONE",
+            "NO DIAL TONE",
+        ):
             await self._bus.emit(CallStateEvent(state=CallState.ENDED))
 
         elif line.startswith("+CMT:"):
