@@ -361,10 +361,6 @@ async def discover_modems(
         command_timeout=command_timeout,
         configured_audio_port=configured_audio_port,
     )
-    scan_note = (
-        f"Scanned {len(candidate_ports)} candidate port(s) from opt-in discovery patterns; "
-        "audio port remains unknown unless configured explicitly."
-    )
     if (
         not configured_audio_port
         and report.audio_hint.confidence == "unknown"
@@ -374,4 +370,8 @@ async def discover_modems(
         sibling_hint = _sibling_serial_audio_hint()
         sibling_note = sibling_hint.reason
         report = replace(report, audio_hint=sibling_hint, notes=(sibling_note,) + report.notes)
+    scan_note = (
+        f"Scanned {len(candidate_ports)} candidate port(s) from opt-in discovery patterns; "
+        f"audio hint confidence: {report.audio_hint.confidence}."
+    )
     return [replace(report, notes=(scan_note,) + report.notes)]
