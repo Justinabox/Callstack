@@ -45,6 +45,10 @@ class TestIsURC:
     def test_no_carrier(self, urc):
         assert urc.is_urc("NO CARRIER") is True
 
+    @pytest.mark.parametrize("result", ["NO DIALTONE", "NO DIAL TONE"])
+    def test_no_dialtone_variants(self, urc, result):
+        assert urc.is_urc(result) is True
+
     def test_cmt(self, urc):
         assert urc.is_urc('+CMT: "+1555"') is True
 
@@ -125,6 +129,13 @@ class TestDispatch:
     async def test_no_carrier(self, bus, urc):
         async with bus.stream(CallStateEvent) as stream:
             await urc.dispatch("NO CARRIER")
+            event = await stream.next(timeout=1.0)
+            assert event.state == CallState.ENDED
+
+    @pytest.mark.parametrize("result", ["NO DIALTONE", "NO DIAL TONE"])
+    async def test_no_dialtone_variants_end_call(self, bus, urc, result):
+        async with bus.stream(CallStateEvent) as stream:
+            await urc.dispatch(result)
             event = await stream.next(timeout=1.0)
             assert event.state == CallState.ENDED
 

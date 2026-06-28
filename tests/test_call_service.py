@@ -239,6 +239,31 @@ class TestCallService:
         assert service.state == CallState.IDLE
         assert service.active_call is None
 
+    @pytest.mark.parametrize("terminal_result", ["NO DIALTONE", "NO DIAL TONE"])
+    async def test_delayed_no_dialtone_result_cleans_up_dialing_session(
+        self, executor, service, at_transport, terminal_result
+    ):
+        await executor.start_reader()
+        try:
+            async def respond_ok():
+                await asyncio.sleep(0.01)
+                at_transport.feed("OK")
+
+            asyncio.create_task(respond_ok())
+            session = await service.dial("5551234", timeout=0.5)
+
+            assert service.state == CallState.DIALING
+            assert service.active_call is session
+
+            at_transport.feed(terminal_result)
+            assert await session.wait_for_end(timeout=0.5) is True
+
+            assert service.state == CallState.IDLE
+            assert service.active_call is None
+            assert session.is_active is False
+        finally:
+            await executor.stop_reader()
+
     async def test_dial_terminal_failure_cleans_up_inflight_audio_enable(self, bus):
         class LockedAT:
             def __init__(self):
