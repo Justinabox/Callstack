@@ -127,11 +127,42 @@ class TestCallService:
             at_transport.feed("OK")
         asyncio.create_task(respond())
 
-        session = await service.dial("+123****7890")
-        assert session.number == "+123****7890"
+        session = await service.dial("5551234")
+        assert session.number == "5551234"
         assert session.direction == "outbound"
         assert service.state == CallState.DIALING
-        assert "ATD+123****7890;" in at_transport.last_written
+        assert "ATD5551234;" in at_transport.last_written
+
+    @pytest.mark.parametrize("number", ["12+34", "++123", "+123#"])
+    async def test_dial_invalid_number_fails_before_executor_write(self, bus, number):
+        class RecordingExecutor:
+            def __init__(self):
+                self.calls: list[str] = []
+
+            async def execute(self, command, **kwargs):
+                self.calls.append(command)
+                raise AssertionError("dial validation should run before modem writes")
+
+        class FakeAudio:
+            running = False
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+
+        executor = RecordingExecutor()
+        service = CallService(
+            cast(ATCommandExecutor, executor), cast(AudioPipeline, FakeAudio()), bus
+        )
+
+        with pytest.raises(ValueError):
+            await service.dial(number)
+
+        assert executor.calls == []
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
 
     async def test_dial_info_log_redacts_outbound_number(self, service, at_transport, caplog):
         """Outbound dial logs must not expose the raw destination number."""
@@ -196,7 +227,7 @@ class TestCallService:
         loop = asyncio.get_running_loop()
         started = loop.time()
         with pytest.raises(DialError) as exc_info:
-            await service.dial("+123****7890", timeout=0.5)
+            await service.dial("5551234", timeout=0.5)
         elapsed = loop.time() - started
 
         assert terminal_result in str(exc_info.value)
@@ -235,13 +266,13 @@ class TestCallService:
         service = CallService(at, audio, bus)
 
         with pytest.raises(DialError):
-            await service.dial("+123****7890")
+            await service.dial("5551234")
         await asyncio.sleep(0.05)
 
         assert service.state == CallState.IDLE
         assert service.active_call is None
         assert audio.running is False
-        assert at.calls == ["ATD+123****7890;", "AT+CPCMREG=1", "AT+CPCMREG=0"]
+        assert at.calls == ["ATD5551234;", "AT+CPCMREG=1", "AT+CPCMREG=0"]
 
     async def test_incoming_ring_transitions_to_ringing(self, service, bus):
         await bus.emit(RingEvent())

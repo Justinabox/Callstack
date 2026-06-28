@@ -2,16 +2,22 @@
 
 import re
 
-_PHONE_RE = re.compile(r'^[0-9+*#]+$')
+_VOICE_DIAL_NUMBER_RE = re.compile(r'\+?[0-9]+$')
+_VOICE_DIAL_SERVICE_RE = re.compile(r'[*#][0-9*#]*$')
 _SMS_RECIPIENT_RE = re.compile(r'^\+?[0-9]{3,15}$')
 _USSD_BREAKOUT_CHARS = frozenset({'"', "\r", "\n"})
 
 
 def _validate_phone(number: str) -> str:
-    """Validate and sanitize a phone number for AT commands."""
-    if not number or not _PHONE_RE.match(number):
-        raise ValueError(f"Invalid phone number: {number!r} (only digits, +, *, # allowed)")
-    return number
+    """Validate and sanitize a voice dial target for ATD commands."""
+    if not isinstance(number, str) or not number:
+        raise ValueError("Invalid phone number")
+    if _VOICE_DIAL_NUMBER_RE.fullmatch(number) or _VOICE_DIAL_SERVICE_RE.fullmatch(number):
+        return number
+    raise ValueError(
+        f"Invalid phone number: {number!r} "
+        "(use digits, one leading + followed by digits, or a *# service code)"
+    )
 
 
 def _validate_sms_recipient(number: str) -> str:
