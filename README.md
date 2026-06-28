@@ -19,8 +19,8 @@ Callstack provides a high-level Python API for managing GSM/LTE modem connection
 | **USSD** | ✅ Ready | `AT+CUSD` balance checks/carrier menus via service + HTTP endpoint |
 | **Raw AT Commands** | ✅ Ready | Direct modem control via `Modem.execute()` |
 | **HTTP Server** | ✅ Ready | API-key auth, rate limiting, SMS/USSD/delivery-report endpoints, `/healthz`, and PII-safe `/metrics` |
-| **CLI** | ✅ Partial | `callstack status`, `callstack send`, safe `callstack doctor`, PII-safe `callstack monitor`, and packaged `callstack serve`; active scan/config preview is planned |
-| **Auto-reconnect** | ✅ Ready | Handles USB disconnect/reconnect gracefully; active multi-port auto-detection is planned |
+| **CLI** | ✅ Partial | `callstack status`, `callstack send`, safe `callstack doctor` with opt-in scan/config preview, PII-safe `callstack monitor`, and packaged `callstack serve` |
+| **Auto-reconnect** | ✅ Ready | Handles USB disconnect/reconnect gracefully; conservative audio-port assignment and multi-modem orchestration are planned |
 
 ---
 
@@ -141,17 +141,18 @@ The package exposes a `callstack` command for local Raspberry Pi workflows:
 callstack status --json
 callstack send --to 5551234 --body "Hello from Callstack"
 callstack doctor --ports /dev/ttyUSB2,/dev/ttyUSB3 --json
+callstack doctor --scan --patterns '/dev/ttyUSB*,/dev/ttyACM*' --json
 callstack monitor --events sms.received,sms.delivery_report --json
 callstack serve --host 127.0.0.1 --port 8080 --api-key-file /etc/callstack/api-keys
 ```
 
 - `callstack status` connects to the configured modem and prints registration, operator, and signal details.
 - `callstack send` sends one SMS through the configured modem and prints only the modem reference.
-- `callstack doctor` is the safest first hardware bring-up command. It probes only explicit candidate ports with non-mutating identity/attention commands and avoids SMS, USSD, call, SIM unlock, storage, IMEI, IMSI, ICCID, or SIM-number commands.
+- `callstack doctor` is the safest first hardware bring-up command. By default it probes only the configured modem port; pass `--ports` for explicit candidates, or opt in to `--scan --patterns ...` when you want Callstack to enumerate matching serial devices. Every doctor mode uses only non-mutating identity/attention commands and avoids SMS, USSD, call, SIM unlock, storage, IMEI, IMSI, ICCID, or SIM-number commands. The output includes a config preview for `CALLSTACK_AT_PORT` and `CALLSTACK_AUDIO_PORT`; audio-port detection remains conservative and may stay `unknown` until you configure it explicitly.
 - `callstack monitor` tails selected typed events as sanitized human text or one JSON object per event. It uses PII-safe event serializers by default and reports queue overflow without printing phone numbers, SMS bodies, USSD payloads, webhook URLs, SIM identifiers, API keys, modem serials, or raw AT lines.
 - `callstack serve` runs the packaged HTTP server with API-key file loading, loopback-only development override, `CALLSTACK_HTTP_HOST`/`CALLSTACK_HTTP_PORT`, and the redacted modem/SMS-store config flags shared by the other CLI commands.
 
-Planned CLI follow-ups include active modem scan/config preview, richer environment/config helpers for server and CLI deployments, and production deployment examples beyond the minimal smoke checks above.
+Planned CLI follow-ups include richer environment/config helpers for server and CLI deployments, production deployment examples beyond the minimal smoke checks above, and conservative audio-port assignment once hardware profiles provide enough evidence.
 
 Voice-call DTMF sends use `AT+VTS`; `CallSession.send_dtmf(..., duration_ms=...)` encodes non-zero tone durations in 100 ms increments (for example, `300` ms becomes an `AT+VTS` duration of `3`). Use `inter_digit_delay_ms` separately when a modem or remote IVR needs spacing between tones.
 
@@ -264,17 +265,22 @@ See `modules/auth/_sms_otp.py` in CourseXScrapper for production implementation.
 
 Start with the safe doctor probe before checking live status. It only sends
 non-mutating identity/attention commands (`AT`, `ATI`, `AT+GMI`, `AT+GMM`,
-`AT+GMR`) to explicit ports you provide, and does not send SMS, USSD, call, SIM
-unlock, storage, IMEI, IMSI, ICCID, or SIM-number commands.
+`AT+GMR`) and does not send SMS, USSD, call, SIM unlock, storage, IMEI, IMSI,
+ICCID, or SIM-number commands. Default `callstack doctor` checks the configured
+AT port; `--ports` checks only the explicit candidates you provide; `--scan` is
+an opt-in host scan over the supplied glob patterns.
 
 ```bash
 callstack doctor
 callstack doctor --ports /dev/ttyUSB2,/dev/ttyUSB3
+callstack doctor --scan --patterns '/dev/ttyUSB*,/dev/ttyACM*'
 callstack doctor --ports /dev/ttyUSB2 --json
 ```
 
 Review the reported AT port, confidence, manufacturer/model, capabilities, and
-notes before running `callstack status`.
+config preview before running `callstack status`. Treat identity output such as
+`ATI` as potentially PII-bearing in support logs; redact serial-like values
+before sharing transcripts.
 
 ### Modem not responding
 - Check USB ports: `ls /dev/ttyUSB*`
