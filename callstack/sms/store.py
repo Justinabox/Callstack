@@ -3,6 +3,7 @@
 import asyncio
 import importlib
 import logging
+import os
 from typing import Optional
 
 from callstack.sms.types import SMS
@@ -242,15 +243,45 @@ class SMSStore:
     async def delete(self, id: int) -> bool:
         """Delete a message by internal ID."""
         async with self._lock:
+            target_index = None
             for i, msg in enumerate(self._messages):
                 if msg.id == id:
-                    self._messages.pop(i)
-                    self._pending_saves.pop(id, None)
-                    if self._db is not None:
-                        await self._db.execute("DELETE FROM messages WHERE id = ?", (id,))
-                        await self._db.commit()
-                    return True
-            return False
+                    target_index = i
+                    break
+
+            if target_index is None:
+                return False
+
+            pending = self._pending_saves.get(id)
+            pending_auto_assigned = pending[1] if pending is not None else False
+            should_delete_from_closed_db = (
+                self._db is None
+                and self._db_path is not None
+                and os.path.exists(self._db_path)
+                and not pending_auto_assigned
+            )
+
+            if self._db is not None:
+                await self._db.execute("DELETE FROM messages WHERE id = ?", (id,))
+                await self._db.commit()
+            elif should_delete_from_closed_db:
+                try:
+                    aiosqlite = importlib.import_module("aiosqlite")
+                except ImportError:
+                    logger.warning("aiosqlite not installed; SMS persistence disabled")
+                    return False
+
+                db = await aiosqlite.connect(self._db_path)
+                try:
+                    await db.execute(_CREATE_TABLE)
+                    await db.execute("DELETE FROM messages WHERE id = ?", (id,))
+                    await db.commit()
+                finally:
+                    await db.close()
+
+            self._messages.pop(target_index)
+            self._pending_saves.pop(id, None)
+            return True
 
     async def count(self) -> int:
         """Return total message count."""
