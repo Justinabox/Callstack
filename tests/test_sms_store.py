@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+import callstack.sms.store as sms_store_module
 from callstack.sms.store import SMSStore
 from callstack.sms.types import SMS
 
@@ -303,6 +304,111 @@ async def test_sqlite_delete_removes_pending_save_before_initialize(tmp_path):
         await store.initialize()
 
         assert await store.count() == 0
+    finally:
+        await store.close()
+
+
+async def test_sqlite_delete_after_close_deletes_persisted_row(tmp_path):
+    pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await store.initialize()
+        saved = await store.save(SMS(body="persisted before delete", status="unread"))
+        assert saved.id is not None
+        await store.close()
+
+        assert await store.delete(saved.id)
+
+        assert store._db is None
+        assert await store.count() == 0
+        await store.initialize()
+        assert await store.get(saved.id) is None
+        assert await store.list() == []
+    finally:
+        await store.close()
+
+
+async def test_sqlite_delete_after_close_preserves_message_when_durable_delete_fails(tmp_path, monkeypatch):
+    aiosqlite = pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await store.initialize()
+        saved = await store.save(SMS(body="keep retryable", status="unread"))
+        assert saved.id is not None
+        await store.close()
+
+        class FailingConnection:
+            async def execute(self, *_args, **_kwargs):
+                raise OSError("database locked")
+
+            async def commit(self):
+                raise AssertionError("commit should not run after failed delete")
+
+            async def close(self):
+                pass
+
+        async def failing_connect(*_args, **_kwargs):
+            return FailingConnection()
+
+        monkeypatch.setattr(aiosqlite, "connect", failing_connect)
+
+        with pytest.raises(OSError, match="database locked"):
+            await store.delete(saved.id)
+
+        assert await store.count() == 1
+        assert await store.get(saved.id) is saved
+    finally:
+        await store.close()
+
+
+async def test_sqlite_delete_after_close_fails_closed_without_aiosqlite(tmp_path, monkeypatch):
+    pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await store.initialize()
+        saved = await store.save(SMS(body="requires durable delete"))
+        assert saved.id is not None
+        await store.close()
+
+        real_import_module = sms_store_module.importlib.import_module
+
+        def import_without_aiosqlite(name, *args, **kwargs):
+            if name == "aiosqlite":
+                raise ImportError("aiosqlite unavailable")
+            return real_import_module(name, *args, **kwargs)
+
+        monkeypatch.setattr(sms_store_module.importlib, "import_module", import_without_aiosqlite)
+
+        assert await store.delete(saved.id) is False
+        assert await store.count() == 1
+        assert await store.get(saved.id) is saved
+    finally:
+        await store.close()
+
+
+async def test_sqlite_delete_auto_pending_collision_keeps_existing_row(tmp_path):
+    pytest.importorskip("aiosqlite")
+    db_path = str(tmp_path / "sms.db")
+    existing = SMSStore(db_path=db_path)
+    try:
+        await existing.initialize()
+        persisted = await existing.save(SMS(body="persisted elsewhere"))
+        assert persisted.id == 1
+    finally:
+        await existing.close()
+
+    store = SMSStore(db_path=db_path)
+    try:
+        pending = await store.save(SMS(body="pending before init"))
+        assert pending.id == persisted.id
+
+        assert await store.delete(pending.id)
+        assert await store.count() == 0
+
+        await store.initialize()
+        assert [(sms.id, sms.body) for sms in await store.list()] == [
+            (persisted.id, "persisted elsewhere")
+        ]
     finally:
         await store.close()
 
