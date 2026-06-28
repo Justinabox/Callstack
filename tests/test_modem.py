@@ -59,6 +59,7 @@ class MockModem(Modem):
             self._executor,
             self.bus,
             SMSStore(),
+            sms_storage=self.config.sms_storage,
             command_timeout=self.config.command_timeout,
             sms_prompt_timeout=self.config.sms_prompt_timeout,
             sms_submit_timeout=self.config.sms_submit_timeout,
@@ -90,7 +91,8 @@ def _feed_init_responses(transport: MockTransport):
     transport.feed("OK")
     # AT+COLP=1
     transport.feed("OK")
-    # SMS init: AT+CMGF=1, AT+CSCS="GSM", AT+CNMI=..., AT+CSMP=...
+    # SMS init: AT+CMGF=1, AT+CSCS="GSM", AT+CPMS=..., AT+CNMI=..., AT+CSMP=...
+    transport.feed("OK")
     transport.feed("OK")
     transport.feed("OK")
     transport.feed("OK")
@@ -254,6 +256,12 @@ class TestModemInit:
 
         assert modem.sms._sms_prompt_timeout == 1.5
         assert modem.sms._sms_submit_timeout == 12.0
+
+    def test_sms_service_receives_configured_sms_storage(self):
+        with patch("callstack.modem.setup_logging"):
+            modem = Modem(ModemConfig(sms_storage="ME"))
+
+        assert modem.sms._sms_storage == "ME"
 
     async def test_close_is_idempotent(self):
         modem = MockModem()

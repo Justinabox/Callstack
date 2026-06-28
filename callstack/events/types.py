@@ -88,6 +88,8 @@ class _RawSMSNotification(Event):
     sender: str = ""
     body: str = ""
     raw: str = ""
+    storage: str = ""
+    index: int = 0
 
 
 @dataclass(frozen=True)
