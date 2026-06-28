@@ -1219,6 +1219,31 @@ class TestCallSession:
         ]
         assert sleeps == [0.05]
 
+    @pytest.mark.parametrize("digits", ["X", "12X"])
+    async def test_send_dtmf_rejects_invalid_sequence_before_modem_write(self, digits):
+        class FakeAT:
+            def __init__(self):
+                self.commands = []
+
+            async def execute(self, command, **kwargs):
+                self.commands.append((command, kwargs))
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeService:
+            def __init__(self):
+                self.state = CallState.ACTIVE
+                self.active_call: object | None = None
+                self._at = FakeAT()
+
+        service = FakeService()
+        session = CallSession(number="+1234", direction="outbound", service=cast(CallService, service))
+        service.active_call = session
+
+        with pytest.raises(ValueError, match="Invalid DTMF digit"):
+            await session.send_dtmf(digits)
+
+        assert service._at.commands == []
+
     async def test_send_dtmf_rejects_invalid_duration_before_modem_write(self):
         class FakeAT:
             def __init__(self):
