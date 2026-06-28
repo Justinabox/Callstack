@@ -41,8 +41,11 @@ def test_readme_documents_packaged_serve_as_shipped_operator_flow():
     assert "packaged `callstack serve` is planned" not in readme
     assert "`callstack serve` is available" in readme
     assert "--api-key-file /etc/callstack/api-keys" in readme
-    assert "install -d -m 700 /etc/callstack" in readme
-    assert "install -d -m 700 /var/lib/callstack" in readme
+    assert "getent group callstack >/dev/null 2>&1 || groupadd --system callstack" in readme
+    assert "useradd --system --gid callstack --home /var/lib/callstack --shell /usr/sbin/nologin callstack" in readme
+    assert "install -d -m 750 -o root -g callstack /etc/callstack" in readme
+    assert "install -d -m 700 -o callstack -g callstack /var/lib/callstack" in readme
+    assert "install -m 640 -o root -g callstack /dev/null /etc/callstack/api-keys" in readme
     assert "CALLSTACK_SMS_DB_PATH=/var/lib/callstack/sms.sqlite3" in readme
     assert "loopback-only unauthenticated" in readme
     assert "CALLSTACK_BEARER_HEADER" in readme

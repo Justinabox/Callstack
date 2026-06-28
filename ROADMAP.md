@@ -61,7 +61,7 @@
 
 ### CLI Tool
 - Shipped: `callstack send`, `callstack status`, safe `callstack doctor` with opt-in scan/config preview, PII-safe `callstack monitor`, and packaged `callstack serve` for HTTP server mode.
-- Planned: richer config/env loading, conservative audio-port assignment, systemd-style deployment examples, and production-safe health/metrics scrape guidance.
+- Planned: richer config/env loading, conservative audio-port assignment, and keeping the production deployment guide accurate as deployment guidance evolves.
 
 ---
 
@@ -73,7 +73,7 @@ Prefer these small, reviewable slices before broad realtime/dashboard expansion:
 2. SMS correctness: text-mode inbound body fidelity (#72), multipart receive/send finality (#10/#100), delivery-report cleanup (#148), and continued recipient-validation regression coverage.
 3. Modem safety: SIM-readiness fail-closed behavior (#142), safe doctor scan follow-ups for audio-port assignment, and clear profile evidence before unattended deployments.
 4. Webhook safety: URL admission and dispatch hardening (#47), signed delivery with retry/backoff (#21), and bounded error logs.
-5. Operator DX: keep shipped `callstack doctor`, `callstack monitor`, and `callstack serve` docs aligned with code, then add production-safe health/metrics deployment notes.
+5. Operator DX: keep shipped `callstack doctor`, `callstack monitor`, `callstack serve`, and the production deployment guide aligned with code while richer config helpers and conservative audio-port assignment evolve.
 6. Realtime and PBX: WebSocket event streaming (#31), scheduled SMS (#49), pre-answer routing (#40), voicemail helpers (#41), and IVR/DTMF hardening once SMS/security foundations stay green.
 
 ### Plugin/Middleware System
