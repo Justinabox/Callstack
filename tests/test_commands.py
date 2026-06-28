@@ -11,6 +11,12 @@ def test_dial_rejects_embedded_or_repeated_plus_signs(number):
         ATCommand.dial(number)
 
 
+@pytest.mark.parametrize("number", ["*", "#", "*123", "#123#", "*1##", "**123#"])
+def test_dial_rejects_malformed_service_codes(number):
+    with pytest.raises(ValueError):
+        ATCommand.dial(number)
+
+
 @pytest.mark.parametrize(
     ("number", "expected"),
     [

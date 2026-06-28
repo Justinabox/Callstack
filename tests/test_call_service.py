@@ -133,7 +133,10 @@ class TestCallService:
         assert service.state == CallState.DIALING
         assert "ATD5551234;" in at_transport.last_written
 
-    @pytest.mark.parametrize("number", ["12+34", "++123", "+123#"])
+    @pytest.mark.parametrize(
+        "number",
+        ["12+34", "++123", "+123#", "*", "#", "*123", "#123#", "*1##", "**123#"],
+    )
     async def test_dial_invalid_number_fails_before_executor_write(self, bus, number):
         class RecordingExecutor:
             def __init__(self):

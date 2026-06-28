@@ -3,7 +3,7 @@
 import re
 
 _VOICE_DIAL_NUMBER_RE = re.compile(r'\+?[0-9]+$')
-_VOICE_DIAL_SERVICE_RE = re.compile(r'[*#][0-9*#]*$')
+_VOICE_DIAL_SERVICE_RE = re.compile(r'\*[0-9]+(?:\*[0-9]+)*#$')
 _SMS_RECIPIENT_RE = re.compile(r'^\+?[0-9]{3,15}$')
 _USSD_BREAKOUT_CHARS = frozenset({'"', "\r", "\n"})
 
