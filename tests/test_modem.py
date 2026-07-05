@@ -19,6 +19,7 @@ from callstack.modem import Modem
 from callstack.protocol.commands import ATCommand
 from callstack.protocol.executor import ATResponse
 from callstack.transport.mock import MockTransport
+from callstack.voice.service import CallService
 
 
 class MockModem(Modem):
@@ -76,6 +77,7 @@ class MockModem(Modem):
         self._shutdown = asyncio.Event()
         self._call_handlers = []
         self._tasks = set()
+        self._ring_answer_lock = asyncio.Lock()
 
 
 def _feed_init_responses(transport: MockTransport):
@@ -299,6 +301,33 @@ class TestModemInit:
         assert modem._executor._reader_active is False
 
 
+class SlowAnswerAT:
+    """Executor double that holds ATA in flight until the test releases it."""
+
+    def __init__(self):
+        self.calls = []
+        self.gate = asyncio.Event()
+        self.answer_started = asyncio.Event()
+
+    async def execute(self, command, **kwargs):
+        self.calls.append(command)
+        if command == ATCommand.ANSWER:
+            self.answer_started.set()
+            await self.gate.wait()
+        return ATResponse(success=True, lines=["OK"])
+
+
+class FakeAudio:
+    def __init__(self):
+        self.running = False
+
+    async def start(self):
+        self.running = True
+
+    async def stop(self):
+        self.running = False
+
+
 class TestModemOnCall:
     async def test_on_call_decorator_registers_handler(self):
         modem = MockModem()
@@ -332,6 +361,37 @@ class TestModemOnCall:
             pass
 
         assert len(modem._call_handlers) == 2
+
+
+    async def test_duplicate_ring_does_not_start_second_answer_while_first_in_flight(self):
+        modem = MockModem()
+        slow_at = SlowAnswerAT()
+        modem.call = CallService(slow_at, FakeAudio(), modem.bus)  # type: ignore[arg-type]
+        sessions = []
+        handler_called = asyncio.Event()
+
+        @modem.on_call
+        async def handler(session):
+            sessions.append(session)
+            handler_called.set()
+
+        await modem.call._on_ring(RingEvent())
+        assert modem.call.state == CallState.RINGING
+
+        first = asyncio.create_task(modem._on_ring(RingEvent()))
+        await asyncio.wait_for(slow_at.answer_started.wait(), timeout=1.0)
+        second = asyncio.create_task(modem._on_ring(RingEvent()))
+        await asyncio.sleep(0)
+
+        try:
+            assert slow_at.calls.count(ATCommand.ANSWER) == 1
+        finally:
+            slow_at.gate.set()
+            await asyncio.gather(first, second)
+
+        await asyncio.wait_for(handler_called.wait(), timeout=1.0)
+        assert slow_at.calls.count(ATCommand.ANSWER) == 1
+        assert len(sessions) == 1
 
 
 class TestModemRunForever:

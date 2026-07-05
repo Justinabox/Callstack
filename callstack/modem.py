@@ -92,6 +92,7 @@ class Modem:
         self._shutdown = asyncio.Event()
         self._call_handlers: list[Callable[[CallSession], Awaitable[None]]] = []
         self._tasks: set[asyncio.Task] = set()
+        self._ring_answer_lock = asyncio.Lock()
 
         # Wire incoming call routing (subscribe once, not per-connection)
         self.bus.subscribe(RingEvent, self._on_ring)
@@ -344,17 +345,21 @@ class Modem:
         """Handle RING events by answering and dispatching to registered handlers."""
         if not self._call_handlers:
             return
-        if self.call.state != CallState.RINGING:
+        if self._ring_answer_lock.locked():
             return
 
-        try:
-            session = await self.call.answer()
-            for handler in self._call_handlers:
-                task = asyncio.create_task(self._safe_call_handler(handler, session))
-                self._tasks.add(task)
-                task.add_done_callback(self._tasks.discard)
-        except Exception as exc:
-            logger.error("Failed to answer incoming call: %s", exc)
+        async with self._ring_answer_lock:
+            if self.call.state != CallState.RINGING:
+                return
+
+            try:
+                session = await self.call.answer()
+                for handler in self._call_handlers:
+                    task = asyncio.create_task(self._safe_call_handler(handler, session))
+                    self._tasks.add(task)
+                    task.add_done_callback(self._tasks.discard)
+            except Exception as exc:
+                logger.error("Failed to answer incoming call: %s", exc)
 
     async def _safe_call_handler(
         self, handler: Callable[[CallSession], Awaitable[None]], session: CallSession
