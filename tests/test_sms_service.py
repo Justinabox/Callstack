@@ -8,6 +8,7 @@ import pytest
 from callstack.events.bus import EventBus
 from callstack.events.types import (
     IncomingSMSEvent,
+    RingEvent,
     SMSSentEvent,
     _RawDeliveryReport,
     _RawSMSNotification,
@@ -597,7 +598,7 @@ async def test_receive_cmt(sms_service, bus, store):
     bus.subscribe(IncomingSMSEvent, track)
 
     await bus.emit(_RawSMSNotification(
-        sender="+15559876", body="Direct message", raw='+CMT: "+15559876","","24/12/25,14:30:00+04"'
+        sender="+155****9876", body="Direct message", raw='+CMT: "+155****9876","","24/12/25,14:30:00+04"'
     ))
 
     await asyncio.sleep(0.05)
@@ -605,6 +606,137 @@ async def test_receive_cmt(sms_service, bus, store):
     enriched = [e for e in all_events if e.body == "Direct message" and not e.raw]
     assert len(enriched) >= 1
     assert await store.count() == 1
+
+
+async def test_executor_direct_cmt_preserves_multiline_body(
+    executor, transport, bus, store
+):
+    """Direct +CMT messages preserve body lines delivered before the idle boundary."""
+    SMSService(executor, bus, store)
+    body = "first line\nsecond line"
+
+    async with bus.stream(IncomingSMSEvent) as incoming:
+        await executor.start_reader()
+        try:
+            transport.feed(
+                '+CMT: "+155****9876","","24/12/25,14:30:00+04"',
+                "first line",
+                "second line",
+            )
+
+            event = await incoming.next(timeout=1.0)
+        finally:
+            await executor.stop_reader()
+
+    assert event is not None
+    assert event.body == body
+    messages = await store.list()
+    assert [message.body for message in messages] == [body]
+
+
+async def test_executor_direct_cmt_stops_body_at_next_urc_boundary(
+    executor, transport, bus, store
+):
+    """A following URC is dispatched separately instead of appended to a +CMT body."""
+    SMSService(executor, bus, store)
+
+    async with bus.stream(IncomingSMSEvent) as incoming, bus.stream(RingEvent) as rings:
+        await executor.start_reader()
+        try:
+            transport.feed(
+                '+CMT: "+155****9876","","24/12/25,14:30:00+04"',
+                "only body line",
+                "RING",
+            )
+
+            sms_event = await incoming.next(timeout=1.0)
+            ring_event = await rings.next(timeout=1.0)
+        finally:
+            await executor.stop_reader()
+
+    assert sms_event is not None
+    assert sms_event.body == "only body line"
+    assert ring_event is not None
+    messages = await store.list()
+    assert [message.body for message in messages] == ["only body line"]
+
+
+class NoInWaitingTransport(MockTransport):
+    """Mock transport that mimics SerialTransport's unavailable in_waiting count."""
+
+    def in_waiting(self) -> int:
+        return 0
+
+
+async def test_executor_direct_cmt_preserves_multiline_body_without_in_waiting(
+    bus, store
+):
+    """Direct +CMT multiline bodies do not depend on transport in_waiting support."""
+    transport = NoInWaitingTransport()
+    executor = ATCommandExecutor(transport, URCDispatcher(bus))
+    SMSService(executor, bus, store)
+    body = "first line\nsecond line"
+
+    async with bus.stream(IncomingSMSEvent) as incoming:
+        await executor.start_reader()
+        try:
+            transport.feed(
+                '+CMT: "+155****9876","","24/12/25,14:30:00+04"',
+                "first line",
+                "second line",
+            )
+
+            event = await incoming.next(timeout=1.0)
+        finally:
+            await executor.stop_reader()
+
+    assert event is not None
+    assert event.body == body
+    assert [message.body for message in await store.list()] == [body]
+
+
+class AutoOKOnWriteTransport(MockTransport):
+    """Mock transport that responds OK when a command is written."""
+
+    def __init__(self):
+        super().__init__()
+        self.body_line_read = asyncio.Event()
+
+    async def readline(self) -> bytes:
+        line = await super().readline()
+        if line == b"body\r\n":
+            self.body_line_read.set()
+        return line
+
+    async def write(self, data: bytes) -> None:
+        await super().write(data)
+        self.feed("OK")
+
+
+async def test_direct_cmt_continuation_wait_does_not_steal_command_response(bus, store):
+    """A command response arriving after a +CMT body is not appended to that SMS."""
+    transport = AutoOKOnWriteTransport()
+    executor = ATCommandExecutor(transport, URCDispatcher(bus))
+    SMSService(executor, bus, store)
+
+    async with bus.stream(IncomingSMSEvent) as incoming:
+        await executor.start_reader()
+        try:
+            transport.feed(
+                '+CMT: "+155****9876","","24/12/25,14:30:00+04"',
+                "body",
+            )
+            await asyncio.wait_for(transport.body_line_read.wait(), timeout=1.0)
+
+            response = await executor.execute("AT", timeout=0.1)
+            sms_event = await incoming.next(timeout=1.0)
+        finally:
+            await executor.stop_reader()
+
+    assert response.success is True
+    assert sms_event is not None
+    assert sms_event.body == "body"
+    assert [message.body for message in await store.list()] == ["body"]
 
 
 async def test_receive_cmt_info_log_redacts_sender_number(sms_service, bus, caplog):

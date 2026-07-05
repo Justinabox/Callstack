@@ -148,10 +148,21 @@ class TestDispatch:
 
     async def test_cmt_without_body(self, bus, urc):
         async with bus.stream(_RawSMSNotification) as stream:
-            await urc.dispatch('+CMT: "+15551234567","","2024/01/15"')
+            await urc.dispatch('+CMT: "+155****4567","","2024/01/15"')
             event = await stream.next(timeout=1.0)
-            assert event.sender == "+15551234567"
+            assert event.sender == "+155****4567"
             assert event.body == ""
+
+    async def test_cmt_debug_log_redacts_sender_and_body(self, urc, caplog):
+        caplog.set_level(logging.DEBUG, logger="callstack.urc")
+        sender = "+15551234567"
+        body = "private MFA code 123456"
+
+        await urc.dispatch(f'+CMT: "{sender}","","2024/01/15"', followup=body)
+
+        assert sender not in caplog.text
+        assert body not in caplog.text
+        assert "+CMT:<redacted>" in caplog.text
 
     async def test_cmti(self, bus, urc):
         async with bus.stream(_RawSMSNotification) as stream:

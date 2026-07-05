@@ -434,6 +434,41 @@ async def test_urc_during_command(executor, transport, bus):
     assert len(received_urcs) == 1
 
 
+async def test_cmt_urc_during_command_debug_logs_redact_sender_and_body(
+    executor, transport, caplog
+):
+    """Debug logs for direct +CMT during commands must not expose SMS details."""
+    sender = "+155****4567"
+    body = "private MFA code 123456"
+
+    transport.feed(f'+CMT: "{sender}","","2024/01/15"', body, "OK")
+    with caplog.at_level(logging.DEBUG, logger="callstack.executor"):
+        resp = await executor.execute("AT")
+
+    assert resp.success is True
+    assert sender not in caplog.text
+    assert body not in caplog.text
+    assert "+CMT:<redacted>" in caplog.text
+
+
+async def test_multiline_cmt_during_command_does_not_log_or_return_body_tail(
+    executor, transport, caplog
+):
+    """Extra direct +CMT body lines during commands are privacy-dropped."""
+    sender = "+155****4567"
+    body_tail = "private MFA code 654321"
+
+    transport.feed(f'+CMT: "{sender}","","2024/01/15"', "first line", body_tail, "OK")
+    with caplog.at_level(logging.DEBUG, logger="callstack.executor"):
+        resp = await executor.execute("AT")
+
+    assert resp.success is True
+    assert resp.lines == ["OK"]
+    assert sender not in caplog.text
+    assert body_tail not in caplog.text
+    assert "<redacted direct SMS continuation>" in caplog.text
+
+
 @pytest.mark.parametrize(
     "terminal_result",
     ["BUSY", "NO CARRIER", "NO ANSWER", "NO DIALTONE", "NO DIAL TONE"],
