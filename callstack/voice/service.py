@@ -15,7 +15,7 @@ from callstack.events.types import (
     DTMFEvent,
     RingEvent,
 )
-from callstack.errors import DialError, AnswerError, ATCommandError
+from callstack.errors import DialError, AnswerError, ATCommandError, TransportError
 from callstack.privacy import redact_phone_number
 from callstack.protocol.executor import ATCommandExecutor
 from callstack.protocol.commands import ATCommand
@@ -48,6 +48,7 @@ class CallService:
         self._audio_bridge_registered = False
         self._active_call: Optional[CallSession] = None
         self._pending_caller: Optional[str] = None
+        self._disconnect_generation = 0
 
         # Wire URC events to internal handlers
         self._handlers = [
@@ -77,19 +78,24 @@ class CallService:
         """Initiate an outbound call. Returns a CallSession handle."""
         await self._fsm.transition(CallState.DIALING)
         logger.info("Dialing %s", redact_phone_number(number))
+        disconnect_generation = self._disconnect_generation
 
         try:
             resp = await self._at.execute(
                 ATCommand.dial(number), expect=["OK"], timeout=timeout
             )
-        except Exception:
-            await self._cleanup_failed_dial()
+        except Exception as exc:
+            await self._cleanup_failed_dial(
+                transport_disconnected=isinstance(exc, TransportError)
+            )
             raise
 
         if not resp.success:
             await self._cleanup_failed_dial()
             raise DialError(resp.lines)
-
+        if disconnect_generation != self._disconnect_generation:
+            self._active_call = None
+            raise DialError(["modem disconnected during dial"])
         session = CallSession(number=number, direction="outbound", service=self)
         self._active_call = session
         return session
@@ -99,21 +105,38 @@ class CallService:
     async def answer(self) -> "CallSession":
         """Answer an incoming call. Returns a CallSession handle."""
         logger.info("Answering call from %s", redact_phone_number(self._pending_caller))
+        disconnect_generation = self._disconnect_generation
 
         try:
             resp = await self._at.execute(
                 ATCommand.ANSWER, expect=["OK", "VOICE CALL: BEGIN"], timeout=10.0
             )
-        except Exception:
-            await self._cleanup_failed_answer()
+        except Exception as exc:
+            await self._cleanup_failed_answer(
+                transport_disconnected=isinstance(exc, TransportError)
+            )
             raise
         if not resp.success:
             await self._cleanup_failed_answer()
             raise AnswerError(resp.lines)
+        if disconnect_generation != self._disconnect_generation:
+            self._active_call = None
+            self._pending_caller = None
+            raise AnswerError(["modem disconnected during answer"])
 
         if self._fsm.state != CallState.ACTIVE:
             await self._fsm.transition(CallState.ACTIVE)
-        await self._ensure_audio_enabled()
+        try:
+            await self._ensure_audio_enabled()
+        except Exception as exc:
+            await self._cleanup_failed_answer(
+                transport_disconnected=isinstance(exc, TransportError)
+            )
+            raise
+        if disconnect_generation != self._disconnect_generation:
+            self._active_call = None
+            self._pending_caller = None
+            raise AnswerError(["modem disconnected during answer"])
 
         session = CallSession(
             number=self._pending_caller or "unknown",
@@ -166,6 +189,8 @@ class CallService:
             resp = await self._at.execute(
                 ATCommand.CPCMREG_ON, expect=["OK"], timeout=self._command_timeout
             )
+        except TransportError:
+            raise
         except Exception as exc:
             logger.warning("Audio bridge registration failed: %s — call may have no audio", exc)
             return
@@ -192,6 +217,42 @@ class CallService:
                 )
             finally:
                 self._audio_bridge_registered = False
+
+    async def handle_modem_disconnected(self) -> None:
+        """Fail closed locally after the AT reader/modem transport disconnects.
+
+        The AT transport is already unavailable on this path, so only local
+        state and local audio resources are cleaned up. In particular, do not
+        call ``_disable_audio()``, because it writes AT+CPCMREG=0 to unregister
+        the PCM bridge on a live modem.
+        """
+        logger.debug("Cleaning up local call state after modem disconnect")
+        self._disconnect_generation += 1
+
+        if self._fsm.state not in (CallState.ENDED, CallState.IDLE):
+            try:
+                await self._fsm.transition(CallState.ENDED)
+            except Exception as exc:
+                logger.debug("Call state transition during disconnect cleanup failed: %s", exc)
+                await self._fsm.reset()
+
+        async with self._audio_enable_lock:
+            if self._audio.running:
+                try:
+                    await self._audio.stop()
+                except Exception as exc:
+                    logger.debug("Local audio stop after modem disconnect failed: %s", exc)
+            self._audio_bridge_registered = False
+
+        if self._active_call:
+            self._active_call._ended.set()
+        self._active_call = None
+        self._pending_caller = None
+
+        if self._fsm.state == CallState.ENDED:
+            await self._reset_to_idle()
+        elif self._fsm.state != CallState.IDLE:
+            await self._fsm.reset()
 
     # -- Internal event handlers --
 
@@ -238,27 +299,37 @@ class CallService:
         self._pending_caller = None
         await self._reset_to_idle()
 
-    async def _cleanup_failed_dial(self) -> None:
+    async def _cleanup_failed_dial(self, *, transport_disconnected: bool = False) -> None:
         """Clean up an outbound dial attempt that failed before a session existed."""
         if self._fsm.state not in (CallState.ENDED, CallState.IDLE):
             await self._fsm.transition(CallState.ENDED)
         async with self._audio_enable_lock:
             if self._audio.running or self._audio_bridge_registered:
                 try:
-                    await self._disable_audio()
+                    if transport_disconnected:
+                        if self._audio.running:
+                            await self._audio.stop()
+                        self._audio_bridge_registered = False
+                    else:
+                        await self._disable_audio()
                 except Exception as exc:
                     logger.debug("Audio cleanup after failed dial failed: %s", exc)
         self._active_call = None
         await self._reset_to_idle()
 
-    async def _cleanup_failed_answer(self) -> None:
+    async def _cleanup_failed_answer(self, *, transport_disconnected: bool = False) -> None:
         """Clean up an inbound call attempt that failed before a session existed."""
         if self._fsm.state not in (CallState.ENDED, CallState.IDLE):
             await self._fsm.transition(CallState.ENDED)
         async with self._audio_enable_lock:
             if self._audio.running or self._audio_bridge_registered:
                 try:
-                    await self._disable_audio()
+                    if transport_disconnected:
+                        if self._audio.running:
+                            await self._audio.stop()
+                        self._audio_bridge_registered = False
+                    else:
+                        await self._disable_audio()
                 except Exception as exc:
                     logger.debug("Audio cleanup after failed answer failed: %s", exc)
         self._active_call = None
