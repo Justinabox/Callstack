@@ -84,15 +84,18 @@ callstack serve --host 127.0.0.1 --port 8080 --api-key-file /etc/callstack/api-k
 
 For legacy source-tree workflows, `python server.py` remains a compatibility wrapper.
 
+For systemd-style production deployment, local API-key files, and authenticated `/healthz` + `/metrics` smoke checks, see the [production deployment guide](docs/deployment.md).
+
 #### Deployment-safe Raspberry Pi server example
 
 Create the API-key file locally and keep it off GitHub, shell transcripts, logs, issues, and PRs:
 
 ```bash
-pip install -e ".[server,sqlite]"
-install -d -m 700 /etc/callstack
-install -d -m 700 /var/lib/callstack
-install -m 600 /dev/null /etc/callstack/api-keys
+getent group callstack >/dev/null 2>&1 || groupadd --system callstack
+id -u callstack >/dev/null 2>&1 || useradd --system --gid callstack --home /var/lib/callstack --shell /usr/sbin/nologin callstack
+install -d -m 750 -o root -g callstack /etc/callstack
+install -d -m 700 -o callstack -g callstack /var/lib/callstack
+install -m 640 -o root -g callstack /dev/null /etc/callstack/api-keys
 # Add one locally generated API key to /etc/callstack/api-keys; never paste it into docs or logs.
 ```
 
@@ -152,7 +155,7 @@ callstack serve --host 127.0.0.1 --port 8080 --api-key-file /etc/callstack/api-k
 - `callstack monitor` tails selected typed events as sanitized human text or one JSON object per event. It uses PII-safe event serializers by default and reports queue overflow without printing phone numbers, SMS bodies, USSD payloads, webhook URLs, SIM identifiers, API keys, modem serials, or raw AT lines.
 - `callstack serve` runs the packaged HTTP server with API-key file loading, loopback-only development override, `CALLSTACK_HTTP_HOST`/`CALLSTACK_HTTP_PORT`, and the redacted modem/SMS-store config flags shared by the other CLI commands.
 
-Planned CLI follow-ups include richer environment/config helpers for server and CLI deployments, production deployment examples beyond the minimal smoke checks above, and conservative audio-port assignment once hardware profiles provide enough evidence.
+Planned CLI follow-ups include richer environment/config helpers for server and CLI deployments, conservative audio-port assignment once hardware profiles provide enough evidence, and keeping the production deployment guide aligned with shipped health/metrics behavior.
 
 Voice-call DTMF sends use `AT+VTS`; `CallSession.send_dtmf(..., duration_ms=...)` encodes non-zero tone durations in 100 ms increments (for example, `300` ms becomes an `AT+VTS` duration of `3`). Use `inter_digit_delay_ms` separately when a modem or remote IVR needs spacing between tones.
 
