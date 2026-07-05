@@ -1,6 +1,7 @@
 """Regression tests for CallSession play-and-collect timing."""
 
 import asyncio
+import math
 from typing import Any, cast
 
 import pytest
@@ -100,6 +101,32 @@ async def test_collect_dtmf_rejects_zero_max_digits_before_opening_stream():
     assert service._bus._queues.get(DTMFEvent) is None
 
 
+@pytest.mark.parametrize("bad_timeout", [math.nan, math.inf, -math.inf])
+async def test_collect_dtmf_rejects_non_finite_timeout_before_opening_stream(
+    bad_timeout: float,
+):
+    service = _FakeService()
+    session = CallSession(number="unknown", direction="inbound", service=cast(Any, service))
+    service.active_call = session
+
+    with pytest.raises(ValueError, match="timeout"):
+        await asyncio.wait_for(
+            session.collect_dtmf(timeout=bad_timeout),
+            timeout=0.1,
+        )
+
+    assert service._bus._queues.get(DTMFEvent) is None
+
+
+async def test_collect_dtmf_keeps_zero_and_negative_timeout_immediate():
+    service = _FakeService()
+    session = CallSession(number="unknown", direction="inbound", service=cast(Any, service))
+    service.active_call = session
+
+    assert await asyncio.wait_for(session.collect_dtmf(timeout=0.0), timeout=0.1) == ""
+    assert await asyncio.wait_for(session.collect_dtmf(timeout=-1.0), timeout=0.1) == ""
+
+
 async def test_noninterrupt_play_and_collect_rejects_zero_max_digits_before_playback():
     service = _FakeService()
     session = CallSession(number="unknown", direction="inbound", service=cast(Any, service))
@@ -109,6 +136,52 @@ async def test_noninterrupt_play_and_collect_rejects_zero_max_digits_before_play
         await asyncio.wait_for(
             session.play_and_collect(
                 "menu.wav", max_digits=0, timeout=0.01, interrupt=False
+            ),
+            timeout=0.1,
+        )
+
+    assert service._audio.started.is_set() is False
+    assert service._audio.cancelled is False
+    assert service._audio.completed is False
+
+
+@pytest.mark.parametrize("bad_timeout", [math.nan, math.inf, -math.inf])
+@pytest.mark.parametrize("interrupt", [False, True])
+async def test_play_and_collect_rejects_non_finite_timeout_before_playback(
+    bad_timeout: float,
+    interrupt: bool,
+):
+    service = _FakeService()
+    session = CallSession(number="unknown", direction="inbound", service=cast(Any, service))
+    service.active_call = session
+
+    with pytest.raises(ValueError, match="timeout"):
+        await asyncio.wait_for(
+            session.play_and_collect(
+                "menu.wav", timeout=bad_timeout, interrupt=interrupt
+            ),
+            timeout=0.1,
+        )
+
+    assert service._audio.started.is_set() is False
+    assert service._audio.cancelled is False
+    assert service._audio.completed is False
+
+
+@pytest.mark.parametrize("bad_timeout", [math.nan, math.inf, -math.inf])
+@pytest.mark.parametrize("interrupt", [False, True])
+async def test_play_and_collect_rejects_non_finite_inter_digit_timeout_before_playback(
+    bad_timeout: float,
+    interrupt: bool,
+):
+    service = _FakeService()
+    session = CallSession(number="unknown", direction="inbound", service=cast(Any, service))
+    service.active_call = session
+
+    with pytest.raises(ValueError, match="inter_digit_timeout"):
+        await asyncio.wait_for(
+            session.play_and_collect(
+                "menu.wav", inter_digit_timeout=bad_timeout, interrupt=interrupt
             ),
             timeout=0.1,
         )

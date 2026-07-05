@@ -2,12 +2,18 @@
 
 import asyncio
 import logging
+import math
 from typing import Optional
 
 from callstack.events.bus import EventBus
 from callstack.events.types import DTMFEvent
 
 logger = logging.getLogger("callstack.voice.dtmf")
+
+
+def _validate_timeout(value: Optional[float], name: str = "timeout") -> None:
+    if value is not None and (type(value) is bool or not math.isfinite(value)):
+        raise ValueError(f"DTMF {name} must be finite")
 
 
 class DTMFCollector:
@@ -55,6 +61,8 @@ class DTMFCollector:
         max_d = max_digits if max_digits is not None else self.max_digits
         overall_timeout = timeout if timeout is not None else self.timeout
         idt = inter_digit_timeout if inter_digit_timeout is not None else self.inter_digit_timeout
+        _validate_timeout(overall_timeout, "timeout")
+        _validate_timeout(idt, "inter_digit_timeout")
         digits: list[str] = []
 
         async with self._bus.stream(DTMFEvent) as events:
@@ -114,6 +122,8 @@ class DTMFCollector:
         max_d = max_digits if max_digits is not None else self.max_digits
         overall_timeout = timeout if timeout is not None else self.timeout
         idt = inter_digit_timeout if inter_digit_timeout is not None else self.inter_digit_timeout
+        _validate_timeout(overall_timeout, "timeout")
+        _validate_timeout(idt, "inter_digit_timeout")
         digits: list[str] = []
 
         now = asyncio.get_running_loop().time
