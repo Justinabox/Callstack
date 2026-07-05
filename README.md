@@ -18,7 +18,7 @@ Callstack provides a high-level Python API for managing GSM/LTE modem connection
 | **SIM + Network** | ✅ Ready | SIM PIN unlock, registration/signal snapshots, BER descriptions |
 | **USSD** | ✅ Ready | `AT+CUSD` balance checks/carrier menus via service + HTTP endpoint |
 | **Raw AT Commands** | ✅ Ready | Direct modem control via `Modem.execute()` |
-| **HTTP Server** | ✅ Ready | API-key auth, rate limiting, SMS/USSD/delivery-report endpoints, `/healthz`, and PII-safe `/metrics` |
+| **HTTP Server** | ✅ Ready | API-key auth, rate limiting, SMS/USSD/delivery-report endpoints, authenticated `/ws`, `/healthz`, and PII-safe `/metrics` |
 | **CLI** | ✅ Partial | `callstack status`, `callstack send`, safe `callstack doctor` with opt-in scan/config preview, PII-safe `callstack monitor`, and packaged `callstack serve` |
 | **Auto-reconnect** | ✅ Ready | Handles USB disconnect/reconnect gracefully; conservative audio-port assignment and multi-modem orchestration are planned |
 
@@ -128,10 +128,29 @@ Endpoints:
 - `GET /sms/messages` — List received messages
 - `GET /sms/delivery-reports` — List delivery status reports
 - `POST /ussd/send` — Send USSD short codes (`{"code": "*123#"}`)
+- `GET /ws` — authenticated WebSocket realtime feed for PII-safe typed events
 - `GET /healthz` — Return a public-safe readiness payload with modem connectivity, uptime, and SMS-store readiness
 - `GET /metrics` — Return Prometheus text metrics with aggregate counters/gauges only; labels and values intentionally avoid phone numbers, SMS bodies, USSD payloads, SIM identifiers, API keys, and raw modem identifiers
 
 If `create_app(..., api_keys=[...])` is configured, HTTP requests must include an `Authorization` header containing the configured bearer token, and requests are rate-limited per key. Do not expose the HTTP server beyond localhost without API keys or an equivalent trusted network boundary; deployment-safe auth defaults remain tracked separately in issue #4.
+
+#### WebSocket realtime feed
+
+`GET /ws` uses the same bearer-token protection as the HTTP endpoints when API keys are configured. It is intended for PII-safe typed events, not raw AT/modem traffic, raw SMS body streaming, raw USSD responses, or durable replay.
+
+The connection starts with a public-safe `hello` envelope that lists supported event types:
+
+```json
+{"type": "hello", "version": 1, "events": ["sms.received", "sms.delivery_report", "sms.sent", "call.state", "call.ring", "call.caller_id", "call.dtmf", "modem.state", "signal.quality", "ussd.response"]}
+```
+
+Representative event envelopes redact private payloads while preserving useful metadata for dashboards and integrations:
+
+```json
+{"type": "sms.received", "timestamp": "2026-01-01T00:00:00Z", "data": {"sender": "+***0100", "body": "[redacted]", "body_length": 23}}
+```
+
+Use a local WebSocket client that can set headers, and read the bearer token into a shell variable without printing it before connecting. The implementation does not publish raw AT lines, full phone numbers, SIM identifiers, modem serials, SMS bodies, USSD text, or API keys.
 
 ### CLI
 

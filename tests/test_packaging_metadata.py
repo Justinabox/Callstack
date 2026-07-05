@@ -1,6 +1,7 @@
 """Packaging metadata guards for documented install modes."""
 
 from pathlib import Path
+import json
 import tomllib
 
 
@@ -57,6 +58,45 @@ def test_roadmap_lists_packaged_serve_as_shipped_not_pending():
     assert "packaged `callstack serve`, active modem scan" not in roadmap
     assert "next CLI DX is packaged serve" not in roadmap
     assert "packaged `callstack serve` for HTTP server mode" in roadmap
+
+
+def test_readme_documents_authenticated_pii_safe_websocket_endpoint():
+    readme = (ROOT / "README.md").read_text()
+
+    assert "`GET /ws`" in readme
+    assert "authenticated WebSocket realtime feed" in readme
+    assert "PII-safe typed events" in readme
+    assert '"type": "hello"' in readme
+    assert '"events"' in readme
+    assert '"body": "[redacted]"' in readme
+    assert "raw AT" in readme
+    assert "not raw AT/modem traffic" in readme
+
+
+def test_readme_websocket_hello_example_matches_supported_event_names():
+    from server import SUPPORTED_WEBSOCKET_EVENTS
+
+    readme = (ROOT / "README.md").read_text()
+    hello_line = next(
+        line for line in readme.splitlines() if line.startswith('{"type": "hello"')
+    )
+
+    assert json.loads(hello_line) == {
+        "type": "hello",
+        "version": 1,
+        "events": list(SUPPORTED_WEBSOCKET_EVENTS),
+    }
+
+
+def test_roadmap_lists_websocket_feed_as_shipped_not_planned():
+    roadmap = (ROOT / "ROADMAP.md").read_text()
+
+    assert "WebSocket Real-Time Feed" in roadmap
+    assert "authenticated WebSocket realtime feed" in roadmap
+    assert "WebSocket Feed | Medium | High | Planned" not in roadmap
+    assert "planned after SMS/security foundations" not in roadmap
+    assert "durable replay" in roadmap
+    assert "dashboard" in roadmap
 
 
 def test_packaged_console_script_includes_server_helper_module():

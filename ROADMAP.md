@@ -13,6 +13,7 @@
 - ✅ Signal-quality polish: BER values now have human-readable descriptions.
 - ✅ Multipart SMS groundwork: concatenated-message UDH metadata parser for 8-bit and 16-bit references.
 - ✅ HTTP observability: `/healthz` and PII-safe Prometheus `/metrics` expose aggregate readiness and runtime counters.
+- ✅ Realtime feed: authenticated WebSocket `/ws` streams sanitized typed event envelopes for SMS, delivery reports, signal quality, USSD responses, call state, and DTMF without raw modem payloads.
 - ✅ CLI groundwork: `callstack status`, `callstack send`, safe `callstack doctor` with opt-in scan/config preview, and PII-safe `callstack monitor` support local Pi operations, hardware bring-up, and sanitized event tailing.
 - ✅ Conservative modem profile helpers classify known modem identities without mutating hardware state.
 
@@ -25,8 +26,9 @@
 - Next step: reassemble long messages in `SMSService`, persist grouped parts, and emit one public incoming-message event when complete.
 
 ### WebSocket Real-Time Feed
-- `/ws` endpoint for live event streaming: SMS, delivery reports, call state, signal quality, and USSD responses.
-- Keep API-key authentication, bounded labels/payloads, and no raw SMS bodies, phone numbers, USSD text, SIM identifiers, or modem serials in broadcast metadata unless an explicit authenticated consumer requests them.
+- The authenticated WebSocket realtime feed at `/ws` is shipped for PII-safe typed events backed by the same public serializers used by `callstack monitor`.
+- Keep follow-up realtime work scoped to durable replay/cursors, event filters, dashboard integration, and privileged raw streams only after explicit privacy/security review.
+- Continue keeping broadcast metadata free of raw SMS bodies, phone numbers, USSD text, SIM identifiers, modem serials, and raw AT payloads unless a future authenticated privileged mode is designed and reviewed.
 
 ### Observability Follow-Ups
 - `/healthz`, `/metrics`, and PII-safe local event tailing through `callstack monitor` are shipped.
@@ -74,7 +76,7 @@ Prefer these small, reviewable slices before broad realtime/dashboard expansion:
 3. Modem safety: SIM-readiness fail-closed behavior (#142), safe doctor scan follow-ups for audio-port assignment, and clear profile evidence before unattended deployments.
 4. Webhook safety: URL admission and dispatch hardening (#47), signed delivery with retry/backoff (#21), and bounded error logs.
 5. Operator DX: keep shipped `callstack doctor`, `callstack monitor`, and `callstack serve` docs aligned with code, then add production-safe health/metrics deployment notes.
-6. Realtime and PBX: WebSocket event streaming (#31), scheduled SMS (#49), pre-answer routing (#40), voicemail helpers (#41), and IVR/DTMF hardening once SMS/security foundations stay green.
+6. Realtime and PBX: durable WebSocket replay/filtering and dashboard work (#197 follow-ups), scheduled SMS (#49), pre-answer routing (#40), voicemail helpers (#41), and IVR/DTMF hardening once SMS/security foundations stay green.
 
 ### Plugin/Middleware System
 - Hook into event pipeline: auto-reply, spam filtering, message transforms.
@@ -111,7 +113,7 @@ Prefer these small, reviewable slices before broad realtime/dashboard expansion:
 |----------|---------|--------|--------|--------|
 | P0 | Multi-Part SMS Reassembly | Medium | High | UDH parser done; service integration next |
 | P0 | SMS/security hardening | Small-Medium | High | Continue recipient validation, text-mode fidelity, auth, redaction, and webhook safety |
-| P1 | WebSocket Feed | Medium | High | Planned after SMS/security foundations |
+| P1 | WebSocket Feed | Low-Medium | High | ✅ Shipped for authenticated PII-safe typed events; durable replay/dashboard follow-ups planned separately |
 | P1 | PII-safe CLI monitor + serve DX | Low-Medium | Medium | ✅ Shipped; next CLI DX is deployment examples and richer config helpers |
 | P1 | Modem Auto-Detection | Medium | High | Opt-in safe scan/config preview shipped; conservative audio-port assignment planned |
 | P2 | Voicemail System | Medium | High | Planned |
