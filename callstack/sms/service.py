@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Optional
 
-from callstack.errors import SMSSendError, SMSReadError
+from callstack.errors import SMSSendError, SMSReadError, SMSPersistenceError
 from callstack.events.bus import EventBus, EventStream
 from callstack.events.types import (
     IncomingSMSEvent,
@@ -182,7 +182,20 @@ class SMSService:
             reference=reference,
             timestamp=datetime.now(),
         )
-        await self._store.save(sms)
+        try:
+            await self._store.save(sms)
+        except Exception as exc:
+            await self._bus.emit(SMSSentEvent(recipient=to, reference=reference))
+            logger.warning(
+                "SMS accepted by modem but was not persisted (ref: %d)",
+                reference,
+            )
+            raise SMSPersistenceError(
+                reference=reference,
+                recipient=to,
+                sms=sms,
+                detail="local SMS persistence failed after modem acceptance",
+            ) from exc
         await self._bus.emit(SMSSentEvent(recipient=to, reference=reference))
         logger.info("SMS sent to %s (ref: %d)", redact_phone_number(to), reference)
         return sms

@@ -100,6 +100,26 @@ class SMSSendError(SMSError):
         super().__init__(f"SMS send failed: {detail}")
 
 
+class SMSPersistenceError(SMSError):
+    """SMS was accepted by the modem but could not be persisted locally."""
+
+    def __init__(
+        self,
+        *,
+        reference: int,
+        recipient: str = "",
+        sms=None,
+        detail: str = "",
+    ):
+        self.reference = reference
+        self.recipient = recipient
+        self.sms = sms
+        self.detail = detail
+        super().__init__(
+            f"SMS accepted by modem but was not persisted (reference={reference})"
+        )
+
+
 class SMSReadError(SMSError):
     """Failed to read an SMS message from storage."""
 

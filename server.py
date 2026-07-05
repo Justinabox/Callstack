@@ -15,7 +15,12 @@ import aiohttp
 from aiohttp import web
 
 from callstack import Modem, ModemConfig, CallSession, IncomingSMSEvent
-from callstack.errors import ATTimeoutError, SMSSendError, TransportError
+from callstack.errors import (
+    ATTimeoutError,
+    SMSPersistenceError,
+    SMSSendError,
+    TransportError,
+)
 from callstack.events.serialize import serialize_event
 from callstack.events.types import (
     CallerIDEvent,
@@ -306,6 +311,19 @@ def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Applicati
             sms = await modem.sms.send(to, body)
         except ValueError:
             return web.json_response({"error": "invalid SMS request"}, status=400)
+        except SMSPersistenceError as exc:
+            logger.warning(
+                "SMS accepted by modem but local persistence failed; returning redacted HTTP 202"
+            )
+            return web.json_response(
+                {
+                    "status": "submitted_not_persisted",
+                    "to": to,
+                    "reference": exc.reference,
+                    "persisted": False,
+                },
+                status=202,
+            )
         except (ATTimeoutError, TimeoutError):
             logger.warning("SMS send timed out; returning redacted HTTP 504")
             return web.json_response({"error": "SMS send timed out"}, status=504)
