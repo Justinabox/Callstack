@@ -212,6 +212,8 @@ class ATCommandExecutor:
                             raw_f = await asyncio.wait_for(
                                 self._transport.readline(), timeout=2.0
                             )
+                            if raw_f == b"":
+                                raise TransportError("Transport closed (EOF)")
                             followup = _decode_transport_line(raw_f)
                         except asyncio.TimeoutError:
                             pass

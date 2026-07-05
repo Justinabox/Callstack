@@ -4,7 +4,13 @@ import asyncio
 import logging
 import pytest
 from callstack.events.bus import EventBus
-from callstack.events.types import CallState, CallStateEvent, RingEvent, DTMFEvent
+from callstack.events.types import (
+    CallState,
+    CallStateEvent,
+    RingEvent,
+    DTMFEvent,
+    _RawSMSNotification,
+)
 from callstack.errors import ATTimeoutError, TransportError
 from callstack.protocol.executor import ATCommandExecutor, ATResponse
 from callstack.protocol.urc import URCDispatcher
@@ -343,6 +349,59 @@ async def test_direct_command_empty_read_raises_transport_error(urc):
         await executor.execute("AT", timeout=0.05)
 
     assert transport.writes == [b"AT\r\n"]
+
+
+class FollowupEOFTransport(Transport):
+    """Transport double that disconnects while a multiline URC body is expected."""
+
+    def __init__(self):
+        self.reads = 0
+        self._lines = [b'+CMT: "+155****0100"\r\n', b""]
+
+    async def open(self) -> None:
+        pass
+
+    async def close(self) -> None:
+        pass
+
+    async def write(self, data: bytes) -> None:
+        pass
+
+    async def read(self, size: int = -1) -> bytes:
+        return b""
+
+    async def readline(self) -> bytes:
+        self.reads += 1
+        await asyncio.sleep(0)
+        if self._lines:
+            return self._lines.pop(0)
+        return b""
+
+    def in_waiting(self) -> int:
+        return 0
+
+
+async def test_reader_loop_treats_followup_empty_read_as_transport_disconnect(bus):
+    """EOF while reading a multiline URC body must not emit an empty SMS event."""
+    transport = FollowupEOFTransport()
+    executor = ATCommandExecutor(transport, URCDispatcher(bus))
+
+    async with bus.stream(_RawSMSNotification) as sms_events:
+        await executor.start_reader()
+        try:
+            for _ in range(20):
+                if not executor._reader_active:
+                    break
+                await asyncio.sleep(0.01)
+
+            assert executor._reader_active is False
+            assert executor._reader_task is not None
+            with pytest.raises(TransportError, match="closed|EOF|empty"):
+                executor._reader_task.result()
+            assert transport.reads == 2
+            assert await sms_events.next(timeout=0.01) is None
+        finally:
+            await executor.stop_reader()
 
 
 async def test_echo_suppression(executor, transport):
