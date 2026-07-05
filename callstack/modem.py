@@ -271,6 +271,10 @@ class Modem:
 
     async def _handle_reader_failure(self, exc: Exception) -> None:
         """Emit disconnect event and optionally start auto-reconnect."""
+        try:
+            await self.call.handle_modem_disconnected()
+        except Exception as cleanup_exc:
+            logger.debug("Call cleanup after reader failure failed: %s", cleanup_exc)
         await self.bus.emit(ModemDisconnectedEvent(reason=str(exc)))
         if self.config.auto_reconnect:
             async with self._reconnect_lock:

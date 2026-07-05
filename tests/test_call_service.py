@@ -15,7 +15,13 @@ from callstack.events.types import (
     DTMFEvent,
     RingEvent,
 )
-from callstack.errors import DialError, AnswerError, ATTimeoutError, ATCommandError
+from callstack.errors import (
+    DialError,
+    AnswerError,
+    ATTimeoutError,
+    ATCommandError,
+    TransportError,
+)
 from callstack.protocol.urc import URCDispatcher
 from callstack.protocol.executor import ATCommandExecutor, ATResponse
 from callstack.voice.audio import AudioPipeline
@@ -119,6 +125,224 @@ class TestCallService:
             ("AT+CPCMREG=0", 1.75),
             ("AT+VTS=5,1", 1.75),
         ]
+
+    async def test_disconnect_during_dial_command_does_not_create_stale_session(self, bus):
+        command_started = asyncio.Event()
+        command_can_return = asyncio.Event()
+
+        class BlockingExecutor:
+            async def execute(self, command, expect=("OK",), timeout=5.0):
+                command_started.set()
+                await command_can_return.wait()
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeAudio:
+            running = False
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+
+        service = CallService(
+            cast(ATCommandExecutor, BlockingExecutor()), cast(AudioPipeline, FakeAudio()), bus
+        )
+        dial_task = asyncio.create_task(service.dial("5551234", timeout=0.5))
+        await command_started.wait()
+
+        await service.handle_modem_disconnected()
+        command_can_return.set()
+
+        with pytest.raises(DialError, match="modem disconnected"):
+            await dial_task
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
+
+    async def test_disconnect_during_answer_command_does_not_create_stale_session(self, bus):
+        command_started = asyncio.Event()
+        command_can_return = asyncio.Event()
+
+        class BlockingExecutor:
+            async def execute(self, command, expect=("OK",), timeout=5.0):
+                command_started.set()
+                await command_can_return.wait()
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeAudio:
+            running = False
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+
+        service = CallService(
+            cast(ATCommandExecutor, BlockingExecutor()), cast(AudioPipeline, FakeAudio()), bus
+        )
+        await service._fsm.transition(CallState.RINGING)
+        service._pending_caller = "+155****0001"
+        answer_task = asyncio.create_task(service.answer())
+        await command_started.wait()
+
+        await service.handle_modem_disconnected()
+        command_can_return.set()
+
+        with pytest.raises(AnswerError, match="modem disconnected"):
+            await answer_task
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
+        assert service._pending_caller is None
+
+    async def test_disconnect_during_answer_audio_enable_does_not_create_stale_session(self, bus):
+        audio_enable_started = asyncio.Event()
+        audio_enable_can_return = asyncio.Event()
+
+        class BlockingExecutor:
+            async def execute(self, command, expect=("OK",), timeout=5.0):
+                if command == "AT+CPCMREG=1":
+                    audio_enable_started.set()
+                    await audio_enable_can_return.wait()
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeAudio:
+            running = False
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+
+        service = CallService(
+            cast(ATCommandExecutor, BlockingExecutor()), cast(AudioPipeline, FakeAudio()), bus
+        )
+        await service._fsm.transition(CallState.RINGING)
+        service._pending_caller = "+155****0001"
+        answer_task = asyncio.create_task(service.answer())
+        await audio_enable_started.wait()
+
+        cleanup_task = asyncio.create_task(service.handle_modem_disconnected())
+        await asyncio.sleep(0)
+        audio_enable_can_return.set()
+        await cleanup_task
+
+        with pytest.raises(AnswerError, match="modem disconnected"):
+            await answer_task
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
+        assert service._pending_caller is None
+
+    async def test_transport_error_during_dial_stops_local_audio_without_at_unregister(self, bus):
+        class RecordingExecutor:
+            def __init__(self):
+                self.calls: list[str] = []
+
+            async def execute(self, command, expect=("OK",), timeout=5.0):
+                self.calls.append(command)
+                if command.startswith("ATD"):
+                    raise TransportError("serial disconnected")
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeAudio:
+            running = True
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+
+        executor = RecordingExecutor()
+        service = CallService(
+            cast(ATCommandExecutor, executor), cast(AudioPipeline, FakeAudio()), bus
+        )
+        service._audio_bridge_registered = True
+
+        with pytest.raises(TransportError, match="serial disconnected"):
+            await service.dial("5551234", timeout=0.5)
+
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
+        assert service._audio.running is False
+        assert service._audio_bridge_registered is False
+        assert "AT+CPCMREG=0" not in executor.calls
+
+    async def test_transport_error_during_answer_stops_local_audio_without_at_unregister(self, bus):
+        class RecordingExecutor:
+            def __init__(self):
+                self.calls: list[str] = []
+
+            async def execute(self, command, expect=("OK",), timeout=5.0):
+                self.calls.append(command)
+                if command == "ATA":
+                    raise TransportError("serial disconnected")
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeAudio:
+            running = True
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+
+        executor = RecordingExecutor()
+        service = CallService(
+            cast(ATCommandExecutor, executor), cast(AudioPipeline, FakeAudio()), bus
+        )
+        await service._fsm.transition(CallState.RINGING)
+        service._pending_caller = "+155****0001"
+        service._audio_bridge_registered = True
+
+        with pytest.raises(TransportError, match="serial disconnected"):
+            await service.answer()
+
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
+        assert service._pending_caller is None
+        assert service._audio.running is False
+        assert service._audio_bridge_registered is False
+        assert "AT+CPCMREG=0" not in executor.calls
+
+    async def test_transport_error_during_answer_audio_enable_fails_closed(self, bus):
+        class RecordingExecutor:
+            def __init__(self):
+                self.calls: list[str] = []
+
+            async def execute(self, command, expect=("OK",), timeout=5.0):
+                self.calls.append(command)
+                if command == "AT+CPCMREG=1":
+                    raise TransportError("serial disconnected")
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeAudio:
+            running = False
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+
+        executor = RecordingExecutor()
+        service = CallService(
+            cast(ATCommandExecutor, executor), cast(AudioPipeline, FakeAudio()), bus
+        )
+        await service._fsm.transition(CallState.RINGING)
+        service._pending_caller = "+155****0001"
+
+        with pytest.raises(TransportError, match="serial disconnected"):
+            await service.answer()
+
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
+        assert service._pending_caller is None
+        assert service._audio.running is False
+        assert service._audio_bridge_registered is False
+        assert "AT+CPCMREG=0" not in executor.calls
 
     async def test_dial_success(self, service, at_transport):
         # Queue the modem response

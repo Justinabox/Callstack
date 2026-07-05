@@ -19,7 +19,7 @@ from callstack.modem import Modem
 from callstack.protocol.commands import ATCommand
 from callstack.protocol.executor import ATResponse
 from callstack.transport.mock import MockTransport
-from callstack.voice.service import CallService
+from callstack.voice.service import CallService, CallSession
 
 
 class MockModem(Modem):
@@ -477,6 +477,66 @@ class TestModemURCReader:
 
             assert len(disconnected) >= 1
             assert "USB disconnected" in disconnected[0].reason
+
+    async def test_reader_failure_clears_active_call_session(self):
+        modem = MockModem(ModemConfig(auto_reconnect=False))
+        disconnected = []
+        modem.bus.subscribe(ModemDisconnectedEvent, lambda e: disconnected.append(e))
+
+        session = CallSession(number="+155****0000", direction="outbound", service=modem.call)
+        await modem.call._fsm.transition(CallState.DIALING)
+        await modem.call._fsm.transition(CallState.ACTIVE)
+        modem.call._active_call = session
+        modem._connected = False
+
+        await modem._handle_reader_failure(Exception("USB disconnected"))
+
+        assert modem.call.state == CallState.IDLE
+        assert modem.call.active_call is None
+        assert session.is_active is False
+        assert await session.wait_for_end(timeout=0.05) is True
+        assert len(disconnected) == 1
+        assert "USB disconnected" in disconnected[0].reason
+
+    @pytest.mark.parametrize("state", [CallState.DIALING, CallState.RINGING])
+    async def test_reader_failure_clears_non_active_call_state(self, state):
+        modem = MockModem(ModemConfig(auto_reconnect=False))
+        session = None
+        if state == CallState.DIALING:
+            await modem.call._fsm.transition(CallState.DIALING)
+            session = CallSession(
+                number="+155****0000", direction="outbound", service=modem.call
+            )
+            modem.call._active_call = session
+        else:
+            await modem.call._fsm.transition(CallState.RINGING)
+            modem.call._pending_caller = "+155****0001"
+        modem._connected = False
+
+        await modem._handle_reader_failure(Exception("USB disconnected"))
+
+        assert modem.call.state == CallState.IDLE
+        assert modem.call.active_call is None
+        assert modem.call._pending_caller is None
+        if session is not None:
+            assert await session.wait_for_end(timeout=0.05) is True
+
+    async def test_reader_failure_stops_local_audio_without_at_unregister(self):
+        modem = MockModem(ModemConfig(auto_reconnect=False))
+        session = CallSession(number="+155****0000", direction="outbound", service=modem.call)
+        await modem.call._fsm.transition(CallState.DIALING)
+        await modem.call._fsm.transition(CallState.ACTIVE)
+        modem.call._active_call = session
+        modem.call._audio_bridge_registered = True
+        await modem.call._audio.start()
+        modem._connected = False
+
+        await modem._handle_reader_failure(Exception("USB disconnected"))
+
+        assert modem.call._audio.running is False
+        assert modem.call._audio_bridge_registered is False
+        assert not any("AT+CPCMREG=0" in write for write in modem._at_transport.all_written)
+        assert await session.wait_for_end(timeout=0.05) is True
 
     async def test_empty_transport_read_emits_disconnected(self):
         """EOF-like empty lines must reach the modem disconnect callback."""
