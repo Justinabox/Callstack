@@ -100,6 +100,7 @@ class AudioPipeline:
         os.close(fd)
         recording_succeeded = False
         try:
+            audio_bytes_written = 0
             with wave.open(recording_path, "wb") as wf:
                 wf.setnchannels(self.CHANNELS)
                 wf.setsampwidth(self.SAMPLE_WIDTH)
@@ -133,8 +134,13 @@ class AudioPipeline:
                                 "Audio transport ended during recording"
                             )
                         wf.writeframes(data)
+                        audio_bytes_written += len(data)
                     except asyncio.TimeoutError:
                         continue
+
+            frame_size = self.CHANNELS * self.SAMPLE_WIDTH
+            if audio_bytes_written < frame_size:
+                raise AudioPipelineError("Audio transport produced no audio frames")
 
             os.replace(recording_path, output_path_str)
             recording_succeeded = True
