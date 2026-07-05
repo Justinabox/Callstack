@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import math
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Optional, Callable, Awaitable
@@ -299,6 +300,11 @@ class CallSession:
         if type(max_digits) is not int or max_digits < 1:
             raise ValueError("DTMF max_digits must be a positive integer")
 
+    @staticmethod
+    def _validate_timeout(value: Optional[float], name: str = "timeout") -> None:
+        if value is not None and (type(value) is bool or not math.isfinite(value)):
+            raise ValueError(f"DTMF {name} must be finite")
+
     async def _next_dtmf_event_while_active(
         self, events, timeout: float | None
     ) -> DTMFEvent | None:
@@ -397,6 +403,8 @@ class CallSession:
         """
         self._require_active_call("collect DTMF")
         self._validate_max_digits(max_digits)
+        self._validate_timeout(timeout, "timeout")
+        self._validate_timeout(inter_digit_timeout, "inter_digit_timeout")
         async with self.service._bus.stream(DTMFEvent) as events:
             return await self._collect_dtmf_from_stream_while_active(
                 events, max_digits, timeout, terminator, inter_digit_timeout
@@ -426,6 +434,8 @@ class CallSession:
         """
         self._require_active_call("play and collect DTMF")
         self._validate_max_digits(max_digits)
+        self._validate_timeout(timeout, "timeout")
+        self._validate_timeout(inter_digit_timeout, "inter_digit_timeout")
 
         if interrupt:
             # Use a single stream context to avoid losing events between the
