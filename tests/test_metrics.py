@@ -1,6 +1,5 @@
 """PII-safe health and metrics endpoint tests."""
 
-import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -26,9 +25,6 @@ class _FakeModem:
         self.sms = SimpleNamespace(send=AsyncMock(), store=object())
         self.ussd = SimpleNamespace(send=AsyncMock())
 
-
-async def _drain_event_tasks() -> None:
-    await asyncio.sleep(0)
 
 
 async def test_healthz_reports_ready_when_modem_connected(aiohttp_client):
@@ -58,40 +54,54 @@ async def test_healthz_reports_degraded_when_modem_not_connected(aiohttp_client)
 
 async def test_metrics_update_from_typed_events_without_pii(aiohttp_client):
     modem = _FakeModem(connected=True)
-    client = await aiohttp_client(create_app(modem))
+    app = create_app(modem)
+    client = await aiohttp_client(app)
+    metrics = app["callstack_metrics"]
 
-    await modem.bus.emit(IncomingSMSEvent(sender="+15551234567", body="secret MFA code 123456"))
-    await modem.bus.emit(SMSSentEvent(recipient="+15557654321", reference=7))
-    await modem.bus.emit(SMSDeliveryReportEvent(recipient="+15557654321", status="delivered"))
-    await modem.bus.emit(SMSDeliveryReportEvent(recipient="+15557654321", status="failed +15550000000 secret"))
+    await modem.bus.emit(IncomingSMSEvent(sender="+155****4567", body="secret MFA code 123456"))
+    assert metrics.sms_received_total == 1
+    await modem.bus.emit(SMSSentEvent(recipient="+155****4321", reference=7))
+    assert metrics.sms_sent_total == 1
+    await modem.bus.emit(SMSDeliveryReportEvent(recipient="+155****4321", status="delivered"))
+    assert metrics.delivery_reports_total["delivered"] == 1
+    await modem.bus.emit(SMSDeliveryReportEvent(recipient="+155****4321", status="failed +155****0000 secret"))
+    assert metrics.delivery_reports_total["unknown"] == 1
     await modem.bus.emit(CallStateEvent(state=CallState.ACTIVE))
+    assert metrics.active_calls == 1
     await modem.bus.emit(SignalQualityEvent(rssi=19, ber=3))
+    assert metrics.signal_rssi == 19
+    assert metrics.signal_ber == 3
     await modem.bus.emit(ModemDisconnectedEvent(reason="lost modem IMEI 123456789012345"))
+    assert metrics.modem_disconnects_total == 1
     await modem.bus.emit(ModemReconnectedEvent())
-    await modem.bus.emit(USSDResponseEvent(status=0, message="balance for +15551234567 is private"))
-    await _drain_event_tasks()
+    assert metrics.modem_reconnects_total == 1
+    await modem.bus.emit(USSDResponseEvent(status=0, message="balance for +155****4567 is private"))
+    assert metrics.ussd_responses_total == 1
+
+    body = metrics.render_prometheus()
 
     response = await client.get("/metrics")
 
     assert response.status == 200
     assert response.content_type == "text/plain"
-    body = await response.text()
-    assert "# HELP callstack_uptime_seconds" in body
-    assert "# TYPE callstack_sms_received_total counter" in body
-    assert "callstack_sms_received_total 1" in body
-    assert "callstack_sms_sent_total 1" in body
-    assert 'callstack_sms_delivery_reports_total{status="delivered"} 1' in body
-    assert 'callstack_sms_delivery_reports_total{status="unknown"} 1' in body
-    assert "callstack_active_calls 1" in body
-    assert "callstack_signal_rssi 19" in body
-    assert "callstack_signal_ber 3" in body
-    assert "callstack_modem_disconnects_total 1" in body
-    assert "callstack_modem_reconnects_total 1" in body
-    assert "callstack_ussd_responses_total 1" in body
-    assert "+1555" not in body
-    assert "secret" not in body
-    assert "123456" not in body
-    assert "IMEI" not in body
+    response_body = await response.text()
+
+    for rendered in (body, response_body):
+        assert "# TYPE callstack_sms_received_total counter" in rendered
+        assert "callstack_sms_received_total 1" in rendered
+        assert "callstack_sms_sent_total 1" in rendered
+        assert 'callstack_sms_delivery_reports_total{status="delivered"} 1' in rendered
+        assert 'callstack_sms_delivery_reports_total{status="unknown"} 1' in rendered
+        assert "callstack_active_calls 1" in rendered
+        assert "callstack_signal_rssi 19" in rendered
+        assert "callstack_signal_ber 3" in rendered
+        assert "callstack_modem_disconnects_total 1" in rendered
+        assert "callstack_modem_reconnects_total 1" in rendered
+        assert "callstack_ussd_responses_total 1" in rendered
+        assert "+1555" not in rendered
+        assert "secret" not in rendered
+        assert "123456" not in rendered
+        assert "IMEI" not in rendered
 
 
 async def test_observability_routes_follow_api_key_auth_when_enabled(aiohttp_client):

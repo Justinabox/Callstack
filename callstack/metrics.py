@@ -138,29 +138,29 @@ class CallstackMetrics:
         bus.subscribe(ModemReconnectedEvent, self._on_modem_reconnected)
         bus.subscribe(USSDResponseEvent, self._on_ussd_response)
 
-    async def _on_sms_received(self, _event: IncomingSMSEvent) -> None:
+    def _on_sms_received(self, _event: IncomingSMSEvent) -> None:
         self.sms_received_total += 1
 
-    async def _on_sms_sent(self, _event: SMSSentEvent) -> None:
+    def _on_sms_sent(self, _event: SMSSentEvent) -> None:
         self.sms_sent_total += 1
 
-    async def _on_delivery_report(self, event: SMSDeliveryReportEvent) -> None:
+    def _on_delivery_report(self, event: SMSDeliveryReportEvent) -> None:
         self.delivery_reports_total[_safe_delivery_status(event.status)] += 1
 
-    async def _on_call_state(self, event: CallStateEvent) -> None:
+    def _on_call_state(self, event: CallStateEvent) -> None:
         self.active_calls = int(event.state in {CallState.DIALING, CallState.RINGING, CallState.ACTIVE, CallState.HELD})
 
-    async def _on_signal_quality(self, event: SignalQualityEvent) -> None:
+    def _on_signal_quality(self, event: SignalQualityEvent) -> None:
         self.signal_rssi = event.rssi
         self.signal_ber = event.ber
 
-    async def _on_modem_disconnected(self, _event: ModemDisconnectedEvent) -> None:
+    def _on_modem_disconnected(self, _event: ModemDisconnectedEvent) -> None:
         self.modem_disconnects_total += 1
 
-    async def _on_modem_reconnected(self, _event: ModemReconnectedEvent) -> None:
+    def _on_modem_reconnected(self, _event: ModemReconnectedEvent) -> None:
         self.modem_reconnects_total += 1
 
-    async def _on_ussd_response(self, _event: USSDResponseEvent) -> None:
+    def _on_ussd_response(self, _event: USSDResponseEvent) -> None:
         self.ussd_responses_total += 1
 
 
