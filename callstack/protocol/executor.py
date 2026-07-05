@@ -7,9 +7,10 @@ are dispatched as URCs.
 
 import asyncio
 import logging
+from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from callstack.errors import ATTimeoutError, TransportError
 from callstack.transport.base import Transport
@@ -83,6 +84,8 @@ def _response_line_for_log(command: str, raw_line: str) -> str:
         return f"{family}:<redacted>"
     if command.startswith(("AT+CMGR", "AT+CMGL")) and not _is_final_result_line(raw_line):
         return "<redacted SMS read response>"
+    if control_line.startswith(("+CMT:", "+CMTI:")):
+        return f"{control_line.split(':', 1)[0]}:<redacted>"
     return raw_line
 
 
@@ -124,6 +127,8 @@ class ATCommandExecutor:
         # Reader loop state
         self._reader_task: Optional[asyncio.Task] = None
         self._line_queue: asyncio.Queue = asyncio.Queue()
+        self._pending_idle_lines: deque[str] = deque()
+        self._idle_followup_lock = asyncio.Lock()
         self._command_in_flight = False
         self._shutdown = asyncio.Event()
         self._transport_error: Optional[Exception] = None
@@ -169,31 +174,35 @@ class ATCommandExecutor:
         consecutive_errors = 0
         try:
             while not self._shutdown.is_set():
-                try:
-                    raw = await self._transport.readline()
-                    if raw == b"":
-                        raise TransportError("Transport closed (EOF)")
-                except asyncio.CancelledError:
-                    break
-                except (TransportError, OSError) as exc:
-                    if self._shutdown.is_set():
+                if self._pending_idle_lines:
+                    raw_line = self._pending_idle_lines.popleft()
+                else:
+                    try:
+                        raw = await self._transport.readline()
+                        if raw == b"":
+                            raise TransportError("Transport closed (EOF)")
+                    except asyncio.CancelledError:
                         break
-                    logger.error("Transport error in reader: %s", exc)
-                    self._transport_error = exc
-                    # Wake up any waiting command
-                    await self._line_queue.put(_TRANSPORT_ERROR)
-                    raise
-                except Exception as exc:
-                    consecutive_errors += 1
-                    logger.exception("Unexpected error in reader: %s", exc)
-                    if consecutive_errors >= self._MAX_CONSECUTIVE_ERRORS:
-                        logger.error("Too many consecutive reader errors, stopping reader")
+                    except (TransportError, OSError) as exc:
+                        if self._shutdown.is_set():
+                            break
+                        logger.error("Transport error in reader: %s", exc)
+                        self._transport_error = exc
+                        # Wake up any waiting command
+                        await self._line_queue.put(_TRANSPORT_ERROR)
                         raise
-                    await asyncio.sleep(0.1)
-                    continue
+                    except Exception as exc:
+                        consecutive_errors += 1
+                        logger.exception("Unexpected error in reader: %s", exc)
+                        if consecutive_errors >= self._MAX_CONSECUTIVE_ERRORS:
+                            logger.error("Too many consecutive reader errors, stopping reader")
+                            raise
+                        await asyncio.sleep(0.1)
+                        continue
+
+                    raw_line = _decode_transport_line(raw)
 
                 consecutive_errors = 0
-                raw_line = _decode_transport_line(raw)
 
                 if self._command_in_flight:
                     await self._line_queue.put(raw_line)
@@ -209,12 +218,9 @@ class ATCommandExecutor:
                     followup = ""
                     if self._urc.needs_followup(control_line):
                         try:
-                            raw_f = await asyncio.wait_for(
-                                self._transport.readline(), timeout=2.0
+                            followup = await self._read_urc_followup_from_transport(
+                                control_line
                             )
-                            if raw_f == b"":
-                                raise TransportError("Transport closed (EOF)")
-                            followup = _decode_transport_line(raw_f)
                         except asyncio.TimeoutError:
                             pass
                     await self._urc.dispatch(control_line, followup)
@@ -257,15 +263,16 @@ class ATCommandExecutor:
         result codes is found, or success=False on ERROR.
         """
         async with self._lock:
-            if self._reader_active:
-                self._drain_queue()
-                self._command_in_flight = True
-            try:
-                logger.debug("TX: %s", _command_for_log(command))
-                await self._transport.write(f"{command}\r\n".encode())
-                return await self._collect_response(command, expect, timeout)
-            finally:
-                self._command_in_flight = False
+            async with self._idle_followup_lock:
+                if self._reader_active:
+                    self._drain_queue()
+                    self._command_in_flight = True
+                try:
+                    logger.debug("TX: %s", _command_for_log(command))
+                    await self._transport.write(f"{command}\r\n".encode())
+                    return await self._collect_response(command, expect, timeout)
+                finally:
+                    self._command_in_flight = False
 
     async def send_data(
         self,
@@ -279,15 +286,16 @@ class ATCommandExecutor:
         wrapped in line terminators.
         """
         async with self._lock:
-            if self._reader_active:
-                self._drain_queue()
-                self._command_in_flight = True
-            try:
-                logger.debug("TX (raw): %d bytes", len(data))
-                await self._transport.write(data)
-                return await self._collect_response("<raw-data>", expect, timeout)
-            finally:
-                self._command_in_flight = False
+            async with self._idle_followup_lock:
+                if self._reader_active:
+                    self._drain_queue()
+                    self._command_in_flight = True
+                try:
+                    logger.debug("TX (raw): %d bytes", len(data))
+                    await self._transport.write(data)
+                    return await self._collect_response("<raw-data>", expect, timeout)
+                finally:
+                    self._command_in_flight = False
 
     def _drain_queue(self) -> None:
         """Discard stale lines left in the queue from a prior command."""
@@ -296,6 +304,53 @@ class ATCommandExecutor:
                 self._line_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+
+    async def _read_idle_line(self, timeout: float) -> str:
+        """Read and decode one idle transport line with EOF classification."""
+        raw = await asyncio.wait_for(self._transport.readline(), timeout=timeout)
+        if raw == b"":
+            raise TransportError("Transport closed (EOF)")
+        return _decode_transport_line(raw)
+
+    async def _read_urc_followup_from_transport(self, control_line: str) -> str:
+        """Read follow-up payload for an idle multiline URC."""
+        async with self._idle_followup_lock:
+            followup = await self._read_idle_line(timeout=2.0)
+            if control_line.startswith("+CMT:"):
+                followup = await self._collect_cmt_followup_continuation(
+                    followup,
+                    self._read_idle_line,
+                    self._pending_idle_lines.appendleft,
+                )
+        return followup
+
+    async def _collect_cmt_followup_continuation(
+        self,
+        first_line: str,
+        read_line: Callable[[float], Awaitable[str]],
+        pushback_line: Callable[[str], None],
+    ) -> str:
+        """Collect immediately available direct +CMT body lines.
+
+        Direct text-mode +CMT URCs are framed as a header followed by message
+        body text, but multiline bodies can arrive as multiple line-framed
+        reads.  Preserve contiguous non-URC continuation lines and stop at the
+        next URC boundary so unrelated idle modem events are not appended to the
+        SMS body.
+        """
+        lines = [first_line]
+        while True:
+            try:
+                line = await read_line(0.02)
+            except asyncio.TimeoutError:
+                break
+
+            control_line = _normalize_control_line(line)
+            if control_line and self._urc.is_urc(control_line):
+                pushback_line(line)
+                break
+            lines.append(line)
+        return "\n".join(lines)
 
     async def _next_line(self, timeout: float) -> str:
         """Get the next response line, from queue or direct transport read."""
@@ -376,6 +431,7 @@ class ATCommandExecutor:
         self, command: str, expect: list[str] | tuple[str, ...], timeout: float
     ) -> ATResponse:
         lines: list[str] = []
+        suppress_direct_cmt_continuation = False
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         display_command = _command_for_log(command)
@@ -397,6 +453,17 @@ class ATCommandExecutor:
             control_line = _normalize_control_line(raw_line)
             if not control_line and not self._command_preserves_urc_like_payload(command):
                 continue
+
+            if (
+                suppress_direct_cmt_continuation
+                and not self._urc.is_urc(control_line)
+                and not self._line_matches_success(command, raw_line, control_line, expect)
+                and not self._line_matches_error(command, raw_line, control_line)
+                and not self._line_matches_dial_failure(command, control_line)
+            ):
+                logger.debug("RX: <redacted direct SMS continuation>")
+                continue
+            suppress_direct_cmt_continuation = False
 
             logger.debug("RX: %s", _response_line_for_log(command, raw_line))
 
@@ -437,6 +504,8 @@ class ATCommandExecutor:
                     except asyncio.TimeoutError:
                         pass
                 await self._urc.dispatch(control_line, followup)
+                if control_line.startswith("+CMT:"):
+                    suppress_direct_cmt_continuation = True
                 continue
 
             lines.append(
