@@ -7,6 +7,7 @@ import math
 import secrets
 import time
 from collections import defaultdict
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,20 @@ from aiohttp import web
 
 from callstack import Modem, ModemConfig, CallSession, IncomingSMSEvent
 from callstack.errors import ATTimeoutError, SMSSendError, TransportError
-from callstack.events.types import SMSDeliveryReportEvent
+from callstack.events.serialize import serialize_event
+from callstack.events.types import (
+    CallerIDEvent,
+    CallStateEvent,
+    DTMFEvent,
+    Event,
+    ModemDisconnectedEvent,
+    ModemReconnectedEvent,
+    RingEvent,
+    SMSDeliveryReportEvent,
+    SMSSentEvent,
+    SignalQualityEvent,
+    USSDResponseEvent,
+)
 from callstack.metrics import CallstackMetrics
 from callstack.privacy import redact_phone_number, redact_url_for_log
 from callstack.protocol.commands import ATCommand
@@ -25,6 +39,27 @@ logger = logging.getLogger("server")
 AUDIO_GREET = str(Path(__file__).parent / "audio" / "greet.wav")
 HTTP_HOST = "0.0.0.0"
 HTTP_PORT = 8080
+WEBSOCKET_PROTOCOL_VERSION = 1
+_WEBSOCKET_QUEUE_MAXSIZE = 32
+_WEBSOCKET_EVENT_SPECS: tuple[tuple[type[Event], str], ...] = (
+    (IncomingSMSEvent, "sms.received"),
+    (SMSDeliveryReportEvent, "sms.delivery_report"),
+    (SMSSentEvent, "sms.sent"),
+    (CallStateEvent, "call.state"),
+    (RingEvent, "call.ring"),
+    (CallerIDEvent, "call.caller_id"),
+    (DTMFEvent, "call.dtmf"),
+    (ModemDisconnectedEvent, "modem.state"),
+    (ModemReconnectedEvent, "modem.state"),
+    (SignalQualityEvent, "signal.quality"),
+    (USSDResponseEvent, "ussd.response"),
+)
+_WEBSOCKET_EVENT_TYPES: tuple[type[Event], ...] = tuple(
+    event_type for event_type, _event_name in _WEBSOCKET_EVENT_SPECS
+)
+SUPPORTED_WEBSOCKET_EVENTS: tuple[str, ...] = tuple(
+    dict.fromkeys(event_name for _event_type, event_name in _WEBSOCKET_EVENT_SPECS)
+)
 
 # Webhook subscribers and received messages store
 webhook_urls: list[str] = []
@@ -181,6 +216,26 @@ def _is_sms_body_encoding_error(exc: SMSSendError) -> bool:
     return "SMS body cannot be encoded" in exc.detail
 
 
+def _enqueue_websocket_envelope(queue: asyncio.Queue[dict[str, Any]], envelope: dict[str, Any]) -> None:
+    """Queue a WebSocket envelope without allowing unbounded client backlog."""
+    try:
+        queue.put_nowait(envelope)
+        return
+    except asyncio.QueueFull:
+        pass
+
+    with suppress(asyncio.QueueEmpty):
+        queue.get_nowait()
+
+    overflow = {
+        "type": "overflow",
+        "version": WEBSOCKET_PROTOCOL_VERSION,
+        "dropped": 1,
+    }
+    with suppress(asyncio.QueueFull):
+        queue.put_nowait(overflow)
+
+
 def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Application:
     auth = APIKeyAuth(api_keys=api_keys)
     app = web.Application(middlewares=[auth.middleware])
@@ -192,6 +247,43 @@ def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Applicati
 
     async def render_metrics(request: web.Request) -> web.Response:
         return web.Response(text=metrics.render_prometheus(), content_type="text/plain")
+
+    async def websocket_feed(request: web.Request) -> web.WebSocketResponse:
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        queue_size = int(request.app.get("callstack_ws_queue_size", _WEBSOCKET_QUEUE_MAXSIZE))
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=queue_size)
+
+        async def send_loop() -> None:
+            await ws.send_json({
+                "type": "hello",
+                "version": WEBSOCKET_PROTOCOL_VERSION,
+                "events": list(SUPPORTED_WEBSOCKET_EVENTS),
+            })
+            while not ws.closed:
+                envelope = await queue.get()
+                await ws.send_json(envelope)
+
+        def on_event(event: Event) -> None:
+            try:
+                envelope = serialize_event(event)
+            except ValueError:
+                return
+            _enqueue_websocket_envelope(queue, envelope)
+
+        for event_type in _WEBSOCKET_EVENT_TYPES:
+            modem.bus.subscribe(event_type, on_event)
+        sender = asyncio.create_task(send_loop())
+        try:
+            async for _ in ws:
+                pass
+        finally:
+            for event_type in _WEBSOCKET_EVENT_TYPES:
+                modem.bus.unsubscribe(event_type, on_event)
+            sender.cancel()
+            with suppress(asyncio.CancelledError):
+                await sender
+        return ws
 
     async def send_sms(request: web.Request) -> web.Response:
         data, error = await _json_body(request)
@@ -291,6 +383,7 @@ def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Applicati
 
     app.router.add_get("/healthz", healthz)
     app.router.add_get("/metrics", render_metrics)
+    app.router.add_get("/ws", websocket_feed)
     app.router.add_post("/sms/send", send_sms)
     app.router.add_post("/sms/subscribe", subscribe)
     app.router.add_get("/sms/messages", list_messages)
