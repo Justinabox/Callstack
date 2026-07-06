@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import math
 from contextlib import asynccontextmanager
 from typing import Awaitable, Callable, Optional
 
@@ -11,6 +12,13 @@ from callstack.protocol.commands import ATCommand
 from callstack.protocol.executor import ATCommandExecutor
 
 logger = logging.getLogger("callstack.ussd")
+
+
+def _validate_positive_timeout(timeout: float) -> float:
+    """Validate public USSD response wait timeouts before modem writes."""
+    if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("Invalid USSD timeout")
+    return float(timeout)
 
 
 class USSDService:
@@ -48,6 +56,7 @@ class USSDService:
         Returns:
             USSDResponseEvent with status, message, and encoding.
         """
+        timeout = _validate_positive_timeout(timeout)
         response_future: asyncio.Future[USSDResponseEvent] = asyncio.get_running_loop().create_future()
 
         async def capture(event: USSDResponseEvent) -> None:
