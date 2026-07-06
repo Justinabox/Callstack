@@ -46,6 +46,7 @@ HTTP_HOST = "0.0.0.0"
 HTTP_PORT = 8080
 WEBSOCKET_PROTOCOL_VERSION = 1
 _WEBSOCKET_QUEUE_MAXSIZE = 32
+_WEBSOCKET_REPLAY_MAXLEN = 128
 _WEBSOCKET_EVENT_SPECS: tuple[tuple[type[Event], str], ...] = (
     (IncomingSMSEvent, "sms.received"),
     (SMSDeliveryReportEvent, "sms.delivery_report"),
@@ -241,11 +242,91 @@ def _enqueue_websocket_envelope(queue: asyncio.Queue[dict[str, Any]], envelope: 
         queue.put_nowait(overflow)
 
 
+def _positive_int_app_setting(app: web.Application, key: str, default: int) -> int:
+    try:
+        value = int(app.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    return max(1, value)
+
+
+def _parse_websocket_since(request: web.Request) -> tuple[int | None, web.Response | None]:
+    raw_since = request.query.get("since")
+    if raw_since is None:
+        return None, None
+    try:
+        since = int(raw_since)
+    except (TypeError, ValueError):
+        return None, web.json_response({"error": "invalid 'since' cursor"}, status=400)
+    if since < 0:
+        return None, web.json_response({"error": "invalid 'since' cursor"}, status=400)
+    return since, None
+
+
+def _record_websocket_envelope(app: web.Application, envelope: dict[str, Any]) -> dict[str, Any]:
+    state = app["callstack_ws_state"]
+    cursor = int(state["cursor"]) + 1
+    state["cursor"] = cursor
+    replay_envelope = {"id": cursor, **envelope}
+
+    replay = state["replay"]
+    replay.append(replay_envelope)
+    replay_size = _positive_int_app_setting(app, "callstack_ws_replay_size", _WEBSOCKET_REPLAY_MAXLEN)
+    del replay[:-replay_size]
+    return replay_envelope
+
+
+def _websocket_replay_snapshot(
+    app: web.Application,
+    since: int | None,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    if since is None:
+        return None, []
+
+    replay = list(app["callstack_ws_state"]["replay"])
+    if not replay:
+        return None, []
+
+    oldest = int(replay[0]["id"])
+    gap = None
+    if since < oldest - 1:
+        gap = {
+            "type": "replay_gap",
+            "version": WEBSOCKET_PROTOCOL_VERSION,
+            "oldest": oldest,
+            "requested": since,
+        }
+    return gap, [envelope for envelope in replay if int(envelope["id"]) > since]
+
+
 def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Application:
     auth = APIKeyAuth(api_keys=api_keys)
     app = web.Application(middlewares=[auth.middleware])
     metrics = CallstackMetrics(modem)
     app["callstack_metrics"] = metrics
+    app["callstack_ws_state"] = {"cursor": 0, "replay": [], "queues": set()}
+
+    def record_websocket_event(event: Event) -> None:
+        try:
+            envelope = serialize_event(event)
+        except ValueError:
+            return
+        replay_envelope = _record_websocket_envelope(app, envelope)
+        for queue in list(app["callstack_ws_state"]["queues"]):
+            _enqueue_websocket_envelope(queue, replay_envelope)
+
+    bus = getattr(modem, "bus", None)
+    subscribed_websocket_event_types: list[type[Event]] = []
+    if bus is not None:
+        for event_type in _WEBSOCKET_EVENT_TYPES:
+            bus.subscribe(event_type, record_websocket_event)
+            subscribed_websocket_event_types.append(event_type)
+
+        async def cleanup_websocket_recorder(_app: web.Application) -> None:
+            for event_type in subscribed_websocket_event_types:
+                bus.unsubscribe(event_type, record_websocket_event)
+
+        app.on_cleanup.append(cleanup_websocket_recorder)
 
     async def healthz(request: web.Request) -> web.Response:
         return web.json_response(metrics.health_payload(), status=metrics.health_status())
@@ -253,38 +334,45 @@ def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Applicati
     async def render_metrics(request: web.Request) -> web.Response:
         return web.Response(text=metrics.render_prometheus(), content_type="text/plain")
 
-    async def websocket_feed(request: web.Request) -> web.WebSocketResponse:
+    async def websocket_feed(request: web.Request) -> web.StreamResponse:
+        since, error = _parse_websocket_since(request)
+        if error is not None:
+            return error
+
         ws = web.WebSocketResponse()
         await ws.prepare(request)
-        queue_size = int(request.app.get("callstack_ws_queue_size", _WEBSOCKET_QUEUE_MAXSIZE))
+        queue_size = _positive_int_app_setting(request.app, "callstack_ws_queue_size", _WEBSOCKET_QUEUE_MAXSIZE)
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=queue_size)
+        request.app["callstack_ws_state"]["queues"].add(queue)
+        snapshot_cursor = int(request.app["callstack_ws_state"]["cursor"])
+        replay_gap, replay_envelopes = _websocket_replay_snapshot(request.app, since)
 
         async def send_loop() -> None:
             await ws.send_json({
                 "type": "hello",
                 "version": WEBSOCKET_PROTOCOL_VERSION,
                 "events": list(SUPPORTED_WEBSOCKET_EVENTS),
+                "cursor": snapshot_cursor,
+                "replay_window": _positive_int_app_setting(
+                    request.app,
+                    "callstack_ws_replay_size",
+                    _WEBSOCKET_REPLAY_MAXLEN,
+                ),
             })
+            if replay_gap is not None:
+                await ws.send_json(replay_gap)
+            for envelope in replay_envelopes:
+                await ws.send_json(envelope)
             while not ws.closed:
                 envelope = await queue.get()
                 await ws.send_json(envelope)
 
-        def on_event(event: Event) -> None:
-            try:
-                envelope = serialize_event(event)
-            except ValueError:
-                return
-            _enqueue_websocket_envelope(queue, envelope)
-
-        for event_type in _WEBSOCKET_EVENT_TYPES:
-            modem.bus.subscribe(event_type, on_event)
         sender = asyncio.create_task(send_loop())
         try:
             async for _ in ws:
                 pass
         finally:
-            for event_type in _WEBSOCKET_EVENT_TYPES:
-                modem.bus.unsubscribe(event_type, on_event)
+            request.app["callstack_ws_state"]["queues"].discard(queue)
             sender.cancel()
             with suppress(asyncio.CancelledError):
                 await sender

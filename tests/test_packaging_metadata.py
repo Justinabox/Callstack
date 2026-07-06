@@ -85,6 +85,8 @@ def test_readme_websocket_hello_example_matches_supported_event_names():
         "type": "hello",
         "version": 1,
         "events": list(SUPPORTED_WEBSOCKET_EVENTS),
+        "cursor": 0,
+        "replay_window": 128,
     }
 
 

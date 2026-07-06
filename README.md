@@ -138,10 +138,12 @@ If `create_app(..., api_keys=[...])` is configured, HTTP requests must include a
 
 `GET /ws` uses the same bearer-token protection as the HTTP endpoints when API keys are configured. It is intended for PII-safe typed events, not raw AT/modem traffic, raw SMS body streaming, raw USSD responses, or durable replay.
 
+Clients may reconnect with `GET /ws?since=<cursor>` to request the bounded in-memory replay window advertised by `replay_window`. Replayed events are the same sanitized envelopes used for live streaming, include a monotonic `id`, and too-old cursors receive a PII-safe `replay_gap` notice rather than raw history.
+
 The connection starts with a public-safe `hello` envelope that lists supported event types:
 
 ```json
-{"type": "hello", "version": 1, "events": ["sms.received", "sms.delivery_report", "sms.sent", "call.state", "call.ring", "call.caller_id", "call.dtmf", "modem.state", "signal.quality", "ussd.response"]}
+{"type": "hello", "version": 1, "events": ["sms.received", "sms.delivery_report", "sms.sent", "call.state", "call.ring", "call.caller_id", "call.dtmf", "modem.state", "signal.quality", "ussd.response"], "cursor": 0, "replay_window": 128}
 ```
 
 Representative event envelopes redact private payloads while preserving useful metadata for dashboards and integrations:
