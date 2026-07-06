@@ -24,6 +24,7 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "SIMUnlockError": ("callstack.errors", "SIMUnlockError"),
     "SMSError": ("callstack.errors", "SMSError"),
     "SMSSendError": ("callstack.errors", "SMSSendError"),
+    "SMSPersistenceError": ("callstack.errors", "SMSPersistenceError"),
     "SMSReadError": ("callstack.errors", "SMSReadError"),
     # Events
     "Event": ("callstack.events.types", "Event"),

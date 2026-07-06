@@ -13,7 +13,7 @@ from callstack.events.types import (
     _RawDeliveryReport,
     _RawSMSNotification,
 )
-from callstack.errors import SMSSendError
+from callstack.errors import SMSPersistenceError, SMSSendError
 from callstack.protocol.executor import ATCommandExecutor, ATResponse
 from callstack.protocol.urc import URCDispatcher
 from callstack.transport.mock import MockTransport
@@ -328,6 +328,39 @@ async def test_send_stores_message(sms_service, transport, store):
     assert await store.count() == 1
     msg = await store.get(1)
     assert msg.body == "Test"
+
+
+async def test_send_store_failure_after_cmgs_reports_partial_success_and_emits_event(
+    executor, transport, bus, caplog
+):
+    """A post-+CMGS store failure is submitted-but-not-persisted, not send failure."""
+    service = SMSService(executor, bus, FailingSMSStore())
+    sent_events = []
+    recipient = "5551234"
+
+    async def on_sent(event):
+        sent_events.append(event)
+
+    bus.subscribe(SMSSentEvent, on_sent)
+    transport.feed("> ")
+    transport.feed("+CMGS: 42", "OK")
+
+    with caplog.at_level(logging.WARNING, logger="callstack.sms"):
+        with pytest.raises(SMSPersistenceError) as excinfo:
+            await service.send(recipient, "private code 123456")
+
+    await asyncio.sleep(0.01)
+    assert excinfo.value.reference == 42
+    assert excinfo.value.recipient == recipient
+    assert excinfo.value.sms.reference == 42
+    assert excinfo.value.sms.body == "private code 123456"
+    assert len(sent_events) == 1
+    assert sent_events[0].reference == 42
+    assert sent_events[0].recipient == recipient
+    assert "accepted by modem but was not persisted" in caplog.text
+    assert recipient not in caplog.text
+    assert "123456" not in caplog.text
+    assert "simulated durable store failure" not in caplog.text
 
 
 # -- Receiving via CMTI --

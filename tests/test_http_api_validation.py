@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from callstack.errors import ATTimeoutError, SMSSendError, TransportError
+from callstack.errors import ATTimeoutError, SMSPersistenceError, SMSSendError, TransportError
 from server import create_app
 
 
@@ -138,6 +138,32 @@ async def test_sms_backend_failures_return_redacted_json(aiohttp_client, excepti
     assert "private-recipient" not in response_text
     assert "123456" not in response_text
     assert "AT+CMGS" not in response_text
+
+
+async def test_sms_partial_persistence_failure_returns_non_retryable_acceptance(
+    aiohttp_client,
+):
+    modem = _FakeModem()
+    modem.sms.send.side_effect = SMSPersistenceError(
+        reference=42,
+        recipient="5551234",
+        sms=SimpleNamespace(recipient="5551234", reference=42),
+        detail="sqlite secret path for 5551234 failed",
+    )
+    client = await aiohttp_client(create_app(modem))
+
+    response = await client.post("/sms/send", json={"to": "5551234", "body": "hello"})
+
+    assert response.status == 202
+    assert response.content_type == "application/json"
+    body = await response.json()
+    assert body == {
+        "status": "submitted_not_persisted",
+        "to": "5551234",
+        "reference": 42,
+        "persisted": False,
+    }
+    assert "sqlite" not in str(body)
 
 
 async def test_sms_body_encoding_errors_return_client_error(aiohttp_client):
