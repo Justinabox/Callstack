@@ -1,6 +1,8 @@
 """Tests for the NetworkService."""
 
 import asyncio
+import math
+
 import pytest
 
 from callstack.errors import ATTimeoutError
@@ -455,6 +457,40 @@ class TestOperator:
 
 
 class TestWaitForRegistration:
+    @pytest.mark.parametrize("poll_interval", [0, -0.1, math.inf, math.nan, "fast"])
+    async def test_invalid_poll_interval_rejected_before_query(self, poll_interval):
+        class CountingNetwork(NetworkService):
+            def __init__(self):
+                self.calls = 0
+
+            async def registration(self):
+                self.calls += 1
+                raise AssertionError("registration query should not be called")
+
+        svc = CountingNetwork()
+
+        with pytest.raises(ValueError, match="poll_interval"):
+            await svc.wait_for_registration(timeout=1.0, poll_interval=poll_interval)
+
+        assert svc.calls == 0
+
+    @pytest.mark.parametrize("timeout", [0, -0.1, math.inf, math.nan, "slow"])
+    async def test_invalid_timeout_rejected_before_query(self, timeout):
+        class CountingNetwork(NetworkService):
+            def __init__(self):
+                self.calls = 0
+
+            async def registration(self):
+                self.calls += 1
+                raise AssertionError("registration query should not be called")
+
+        svc = CountingNetwork()
+
+        with pytest.raises(ValueError, match="timeout"):
+            await svc.wait_for_registration(timeout=timeout, poll_interval=0.1)
+
+        assert svc.calls == 0
+
     async def test_already_registered(self):
         svc, transport, _ = _make_service()
         await transport.open()

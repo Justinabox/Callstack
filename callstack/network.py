@@ -2,8 +2,10 @@
 
 import asyncio
 import logging
+import math
 import re
 from dataclasses import dataclass
+from numbers import Real
 from typing import Optional
 
 from callstack.errors import ATTimeoutError
@@ -54,6 +56,12 @@ class RegistrationInfo:
             4: "unknown",
             5: "registered (roaming)",
         }.get(self.status, f"unknown ({self.status})")
+
+
+def _validate_positive_finite(name: str, value: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real) or not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a finite positive number, got {value!r}")
+    return float(value)
 
 
 class NetworkService:
@@ -150,6 +158,8 @@ class NetworkService:
 
         Returns True if registered, False on timeout.
         """
+        timeout = _validate_positive_finite("timeout", timeout)
+        poll_interval = _validate_positive_finite("poll_interval", poll_interval)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while loop.time() < deadline:
