@@ -74,6 +74,7 @@ class Modem:
             self._executor,
             self.bus,
             SMSStore(self.config.sms_db_path) if self.config.sms_db_path else None,
+            sms_storage=self.config.sms_storage,
             command_timeout=self.config.command_timeout,
             sms_prompt_timeout=self.config.sms_prompt_timeout,
             sms_submit_timeout=self.config.sms_submit_timeout,
