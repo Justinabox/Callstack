@@ -106,11 +106,54 @@ async def test_collect_one_honors_explicit_zero_timeout(bus):
     assert result is None
 
 
-async def test_collect_keeps_zero_and_negative_timeout_immediate(bus):
+async def test_collect_keeps_zero_timeout_immediate(bus):
     collector = DTMFCollector(bus, max_digits=10, timeout=10.0)
 
     assert await asyncio.wait_for(collector.collect(timeout=0), timeout=0.1) == ""
-    assert await asyncio.wait_for(collector.collect(timeout=-1.0), timeout=0.1) == ""
+
+
+@pytest.mark.parametrize("bad_max_digits", [0, -1, False])
+async def test_collect_rejects_invalid_max_digits_before_opening_stream(
+    bus, bad_max_digits
+):
+    collector = DTMFCollector(bus, max_digits=10, timeout=10.0)
+
+    with pytest.raises(ValueError, match="max_digits"):
+        await asyncio.wait_for(
+            collector.collect(max_digits=bad_max_digits, timeout=0.01), timeout=0.1
+        )
+
+    assert bus._queues.get(DTMFEvent) is None
+
+
+async def test_collect_rejects_negative_timeout_before_opening_stream(bus):
+    collector = DTMFCollector(bus, max_digits=10, timeout=10.0)
+
+    with pytest.raises(ValueError, match="timeout"):
+        await asyncio.wait_for(collector.collect(timeout=-1.0), timeout=0.1)
+
+    assert bus._queues.get(DTMFEvent) is None
+
+
+async def test_collect_rejects_negative_inter_digit_timeout_before_opening_stream(bus):
+    collector = DTMFCollector(bus, max_digits=10, timeout=10.0)
+
+    with pytest.raises(ValueError, match="inter_digit_timeout"):
+        await asyncio.wait_for(
+            collector.collect(inter_digit_timeout=-1.0), timeout=0.1
+        )
+
+    assert bus._queues.get(DTMFEvent) is None
+
+
+@pytest.mark.parametrize("bad_timeout", [False, True])
+async def test_collect_rejects_bool_timeout_before_opening_stream(bus, bad_timeout):
+    collector = DTMFCollector(bus, max_digits=10, timeout=10.0)
+
+    with pytest.raises(ValueError, match="timeout"):
+        await asyncio.wait_for(collector.collect(timeout=bad_timeout), timeout=0.1)
+
+    assert bus._queues.get(DTMFEvent) is None
 
 
 @pytest.mark.parametrize("bad_timeout", [math.nan, math.inf, -math.inf])
@@ -150,6 +193,20 @@ async def test_collect_one_from_stream_honors_explicit_zero_timeout(bus):
     assert result is None
 
 
+@pytest.mark.parametrize("bad_max_digits", [0, -1, False])
+async def test_collect_from_stream_rejects_invalid_max_digits(bus, bad_max_digits):
+    collector = DTMFCollector(bus, max_digits=10, timeout=10.0)
+
+    async with bus.stream(DTMFEvent) as events:
+        with pytest.raises(ValueError, match="max_digits"):
+            await asyncio.wait_for(
+                collector.collect_from_stream(
+                    events, max_digits=bad_max_digits, timeout=0.01
+                ),
+                timeout=0.1,
+            )
+
+
 @pytest.mark.parametrize("bad_timeout", [math.nan, math.inf, -math.inf])
 async def test_collect_from_stream_rejects_non_finite_timeout(bus, bad_timeout: float):
     collector = DTMFCollector(bus, max_digits=10, timeout=10.0)
@@ -158,6 +215,16 @@ async def test_collect_from_stream_rejects_non_finite_timeout(bus, bad_timeout: 
         with pytest.raises(ValueError, match="timeout"):
             await asyncio.wait_for(
                 collector.collect_from_stream(events, timeout=bad_timeout), timeout=0.1
+            )
+
+
+async def test_collect_from_stream_rejects_negative_timeout(bus):
+    collector = DTMFCollector(bus, max_digits=10, timeout=10.0)
+
+    async with bus.stream(DTMFEvent) as events:
+        with pytest.raises(ValueError, match="timeout"):
+            await asyncio.wait_for(
+                collector.collect_from_stream(events, timeout=-1.0), timeout=0.1
             )
 
 
@@ -171,6 +238,17 @@ async def test_collect_from_stream_rejects_non_finite_inter_digit_timeout(
         with pytest.raises(ValueError, match="inter_digit_timeout"):
             await asyncio.wait_for(
                 collector.collect_from_stream(events, inter_digit_timeout=bad_timeout),
+                timeout=0.1,
+            )
+
+
+async def test_collect_from_stream_rejects_negative_inter_digit_timeout(bus):
+    collector = DTMFCollector(bus, max_digits=10, timeout=10.0)
+
+    async with bus.stream(DTMFEvent) as events:
+        with pytest.raises(ValueError, match="inter_digit_timeout"):
+            await asyncio.wait_for(
+                collector.collect_from_stream(events, inter_digit_timeout=-1.0),
                 timeout=0.1,
             )
 
