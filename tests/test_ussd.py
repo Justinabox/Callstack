@@ -78,7 +78,7 @@ class TestUSSDServiceValidation:
         with pytest.raises(ValueError, match="Invalid USSD code"):
             await service.send("*100#\rAT+CMGD=1,4", timeout=0.01)
 
-    @pytest.mark.parametrize("timeout", [0, -1, math.nan, math.inf, True])
+    @pytest.mark.parametrize("timeout", [0, -1, math.nan, math.inf, True, 10**309])
     async def test_invalid_timeout_fails_before_modem_write(self, bus, timeout):
         class RecordingExecutor:
             def __init__(self):

@@ -174,9 +174,15 @@ def _optional_positive_timeout(
     default: float = 15.0,
 ) -> tuple[float | None, web.Response | None]:
     value = data.get(field, default)
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None, web.json_response({"error": f"invalid '{field}'"}, status=400)
-    return float(value), None
+    try:
+        timeout = float(value)
+    except OverflowError:
+        return None, web.json_response({"error": f"invalid '{field}'"}, status=400)
+    if not math.isfinite(timeout) or timeout <= 0:
+        return None, web.json_response({"error": f"invalid '{field}'"}, status=400)
+    return timeout, None
 
 
 def _bounded_query_limit(request: web.Request, default: int = 50, maximum: int = 500) -> tuple[int | None, web.Response | None]:

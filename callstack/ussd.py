@@ -16,9 +16,15 @@ logger = logging.getLogger("callstack.ussd")
 
 def _validate_positive_timeout(timeout: float) -> float:
     """Validate public USSD response wait timeouts before modem writes."""
-    if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+    if type(timeout) not in (int, float):
         raise ValueError("Invalid USSD timeout")
-    return float(timeout)
+    try:
+        timeout_value = float(timeout)
+    except OverflowError:
+        raise ValueError("Invalid USSD timeout") from None
+    if not math.isfinite(timeout_value) or timeout_value <= 0:
+        raise ValueError("Invalid USSD timeout")
+    return timeout_value
 
 
 class USSDService:

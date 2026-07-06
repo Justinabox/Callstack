@@ -72,7 +72,7 @@ async def test_ussd_send_rejects_invalid_timeout_before_service_call(aiohttp_cli
     modem.ussd.send.assert_not_awaited()
 
 
-@pytest.mark.parametrize("timeout", [float("nan"), float("inf")])
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf"), 10**309])
 async def test_ussd_send_rejects_non_finite_timeout_before_service_call(aiohttp_client, timeout):
     modem = _FakeModem()
     client = await aiohttp_client(create_app(modem))
