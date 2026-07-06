@@ -44,3 +44,25 @@ def test_send_sms_rejects_invalid_recipient_strings(recipient):
 )
 def test_send_sms_accepts_documented_recipient_formats(recipient, expected):
     assert ATCommand.send_sms(recipient) == expected
+
+
+@pytest.mark.parametrize("index", [True, False])
+def test_sms_storage_commands_reject_boolean_indexes(index):
+    with pytest.raises(ValueError):
+        ATCommand.read_sms(index)
+    with pytest.raises(ValueError):
+        ATCommand.delete_sms(index)
+
+
+@pytest.mark.parametrize(
+    ("index", "read_command", "delete_command"),
+    [
+        (0, "AT+CMGR=0", "AT+CMGD=0"),
+        (1, "AT+CMGR=1", "AT+CMGD=1"),
+    ],
+)
+def test_sms_storage_commands_accept_non_negative_integer_indexes(
+    index, read_command, delete_command
+):
+    assert ATCommand.read_sms(index) == read_command
+    assert ATCommand.delete_sms(index) == delete_command
