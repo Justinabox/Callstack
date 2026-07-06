@@ -198,22 +198,6 @@ Voice-call DTMF sends use `AT+VTS`; `CallSession.send_dtmf(..., duration_ms=...)
 └─────────────────────────────────────────────────────────┘
 ```
 
----
-
-## 📡 Real-World Integration: Duo MFA Automation
-
-Callstack shines when paired with browser automation for MFA flows. See [CourseXScrapper](https://github.com/Justinabox/CourseXScrapper) for a complete example that uses Callstack to automatically receive Duo SMS verification codes for USC SSO authentication.
-
-**The flow:**
-1. Browser automation hits USC SSO → Duo challenge
-2. Selects "Text message passcode" on Duo
-3. Duo sends SMS to Pi's modem number
-4. Callstack receives it via HTTP API
-5. Code is extracted and auto-submitted
-6. **Zero manual steps, fully automated**
-
----
-
 ## 🛠️ Configuration
 
 ```python
@@ -269,8 +253,6 @@ class CallstackSMSClient:
         ...
 ```
 
-See `modules/auth/_sms_otp.py` in CourseXScrapper for production implementation.
-
 ---
 
 ## 📚 Documentation
@@ -305,9 +287,6 @@ before sharing transcripts.
 - Check USB ports: `ls /dev/ttyUSB*`
 - Verify dialout group: `groups $USER`
 - Try minicom: `minicom -D /dev/ttyUSB2`
-
-### SMS prompt hangs
-Fixed in v0.1.1: Modems send `> ` without newline — `readline()` now handles this.
 
 ### Port permissions
 ```bash
