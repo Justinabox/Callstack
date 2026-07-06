@@ -11,6 +11,13 @@ from callstack.sms.types import DeliveryReport, SMS
 
 logger = logging.getLogger("callstack.sms.store")
 
+
+def _validate_list_limit(limit: int) -> int:
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        raise ValueError("limit must be a positive integer")
+    return limit
+
+
 # SQL for creating the messages table
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -369,6 +376,7 @@ class SMSStore:
 
     async def list_delivery_reports(self, limit: int = 100) -> list[DeliveryReport]:
         """List saved delivery reports, newest last, with a bounded result size."""
+        limit = _validate_list_limit(limit)
         async with self._lock:
             return self._delivery_reports[-limit:]
 
@@ -388,6 +396,7 @@ class SMSStore:
         limit: int = 100,
     ) -> list[SMS]:
         """List messages with optional filters."""
+        limit = _validate_list_limit(limit)
         async with self._lock:
             results = self._messages
             if sender:

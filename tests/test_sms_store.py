@@ -175,6 +175,65 @@ async def test_list_limit(store):
     assert results[0].body == "7"
 
 
+@pytest.mark.parametrize("limit", [0, -1, False, True])
+async def test_list_rejects_non_positive_and_bool_limits(store, limit):
+    await store.save(SMS(body="one"))
+    await store.save(SMS(body="two"))
+
+    with pytest.raises(ValueError):
+        await store.list(limit=limit)
+
+
+@pytest.mark.parametrize("limit", [0, -1, False, True])
+async def test_list_delivery_reports_rejects_non_positive_and_bool_limits(store, limit):
+    await store.save_delivery_report(DeliveryReport(reference=1, status="delivered"))
+    await store.save_delivery_report(DeliveryReport(reference=2, status="failed"))
+
+    with pytest.raises(ValueError):
+        await store.list_delivery_reports(limit=limit)
+
+
+async def test_sqlite_list_limits_preserve_newest_last_order(tmp_path):
+    pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await store.initialize()
+        for i in range(5):
+            await store.save(SMS(body=str(i)))
+        await store.save_delivery_report(DeliveryReport(reference=1, status="pending"))
+        await store.save_delivery_report(DeliveryReport(reference=2, status="delivered"))
+        await store.save_delivery_report(DeliveryReport(reference=3, status="failed"))
+
+        messages = await store.list(limit=2)
+        reports = await store.list_delivery_reports(limit=2)
+    finally:
+        await store.close()
+
+    assert [message.body for message in messages] == ["3", "4"]
+    assert [(report.reference, report.status) for report in reports] == [
+        (2, "delivered"),
+        (3, "failed"),
+    ]
+
+
+async def test_list_methods_accept_positive_int_subclass_limits(store):
+    class StoreLimit(int):
+        pass
+
+    for i in range(3):
+        await store.save(SMS(body=str(i)))
+    await store.save_delivery_report(DeliveryReport(reference=1, status="pending"))
+    await store.save_delivery_report(DeliveryReport(reference=2, status="delivered"))
+
+    messages = await store.list(limit=StoreLimit(2))
+    reports = await store.list_delivery_reports(limit=StoreLimit(1))
+
+    assert [message.body for message in messages] == ["1", "2"]
+    assert [(report.reference, report.status) for report in reports] == [
+        (2, "delivered")
+    ]
+
+
 async def test_delete(store):
     await store.save(SMS(body="delete me"))
     assert await store.delete(1)
