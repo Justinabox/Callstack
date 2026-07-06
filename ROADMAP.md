@@ -13,7 +13,7 @@
 - ✅ Signal-quality polish: BER values now have human-readable descriptions.
 - ✅ Multipart SMS groundwork: concatenated-message UDH metadata parser for 8-bit and 16-bit references.
 - ✅ HTTP observability: `/healthz` and PII-safe Prometheus `/metrics` expose aggregate readiness and runtime counters.
-- ✅ Realtime feed: authenticated WebSocket `/ws` streams sanitized typed event envelopes for SMS, delivery reports, signal quality, USSD responses, call state, and DTMF without raw modem payloads.
+- ✅ Realtime feed: authenticated WebSocket `/ws` streams sanitized typed event envelopes for SMS, delivery reports, signal quality, USSD responses, call state, and DTMF without raw modem payloads; optional `events=` filters let subscribers request focused public event types.
 - ✅ CLI groundwork: `callstack status`, `callstack send`, safe `callstack doctor` with opt-in scan/config preview, and PII-safe `callstack monitor` support local Pi operations, hardware bring-up, and sanitized event tailing.
 - ✅ Conservative modem profile helpers classify known modem identities without mutating hardware state.
 
@@ -26,8 +26,8 @@
 - Next step: reassemble long messages in `SMSService`, persist grouped parts, and emit one public incoming-message event when complete.
 
 ### WebSocket Real-Time Feed
-- The authenticated WebSocket realtime feed at `/ws` is shipped for PII-safe typed events backed by the same public serializers used by `callstack monitor`.
-- Keep follow-up realtime work scoped to durable replay/cursors, event filters, dashboard integration, and privileged raw streams only after explicit privacy/security review.
+- The authenticated WebSocket realtime feed at `/ws` is shipped for PII-safe typed events backed by the same public serializers used by `callstack monitor`. Clients may add `?events=` with supported public event names to avoid queueing unrelated sanitized envelopes.
+- Keep follow-up realtime work scoped to durable replay/cursors, dashboard integration, and privileged raw streams only after explicit privacy/security review.
 - Continue keeping broadcast metadata free of raw SMS bodies, phone numbers, USSD text, SIM identifiers, modem serials, and raw AT payloads unless a future authenticated privileged mode is designed and reviewed.
 
 ### Observability Follow-Ups
@@ -76,7 +76,7 @@ Prefer these small, reviewable slices before broad realtime/dashboard expansion:
 3. Modem safety: SIM-readiness fail-closed behavior (#142), safe doctor scan follow-ups for audio-port assignment, and clear profile evidence before unattended deployments.
 4. Webhook safety: URL admission and dispatch hardening (#47), signed delivery with retry/backoff (#21), and bounded error logs.
 5. Operator DX: keep shipped `callstack doctor`, `callstack monitor`, and `callstack serve` docs aligned with code, then add production-safe health/metrics deployment notes.
-6. Realtime and PBX: durable WebSocket replay/filtering and dashboard work (#197 follow-ups), scheduled SMS (#49), pre-answer routing (#40), voicemail helpers (#41), and IVR/DTMF hardening once SMS/security foundations stay green.
+6. Realtime and PBX: durable WebSocket replay/cursors and dashboard work (#197 follow-ups), scheduled SMS (#49), pre-answer routing (#40), voicemail helpers (#41), and IVR/DTMF hardening once SMS/security foundations stay green.
 
 ### Plugin/Middleware System
 - Hook into event pipeline: auto-reply, spam filtering, message transforms.
