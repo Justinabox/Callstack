@@ -170,6 +170,12 @@ class Modem:
             with suppress(asyncio.CancelledError):
                 await self._reconnect_task
 
+        await self._drain_background_tasks()
+        try:
+            await self.call.handle_modem_disconnected()
+        except Exception as exc:
+            logger.debug("Call cleanup during shutdown failed: %s", exc)
+
         # Stop services
         self.bus.unsubscribe(RingEvent, self._on_ring)
         self.call.close()
@@ -193,6 +199,25 @@ class Modem:
             logger.debug("AT transport close during shutdown: %s", exc)
 
         logger.info("Modem shutdown complete")
+
+    async def _drain_background_tasks(self) -> None:
+        """Cancel and await internally-owned background tasks during shutdown."""
+        current_task = asyncio.current_task()
+        pending_tasks = {
+            task for task in self._tasks if task is not current_task and not task.done()
+        }
+        completed_tasks = {
+            task for task in self._tasks if task is not current_task and task.done()
+        }
+        self._tasks.difference_update(completed_tasks)
+
+        if not pending_tasks:
+            return
+
+        for task in pending_tasks:
+            task.cancel()
+        await asyncio.gather(*pending_tasks, return_exceptions=True)
+        self._tasks.difference_update(pending_tasks)
 
     async def _initialize_modem(self) -> None:
         """Send initialization AT commands."""
