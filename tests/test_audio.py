@@ -9,6 +9,7 @@ import os
 from typing import cast
 
 import pytest
+from callstack.transport.base import Transport
 from callstack.transport.mock import MockTransport
 from callstack.events.bus import EventBus
 from callstack.events.types import DTMFEvent, CallState
@@ -55,6 +56,49 @@ def pipeline(transport, bus):
 @pytest.fixture
 def valid_wav(tmp_path):
     return _make_wav(str(tmp_path / "test.wav"))
+
+
+class SilentTimeoutTransport:
+    """Audio transport that stays open but never yields PCM before deadlines."""
+
+    def __init__(self):
+        self.reads = 0
+        self._open = False
+
+    async def open(self):
+        self._open = True
+
+    async def close(self):
+        self._open = False
+
+    async def write(self, data):
+        pass
+
+    async def read(self, size=-1) -> bytes:
+        self.reads += 1
+        await asyncio.sleep(10)
+        return b"unreachable"
+
+    async def readline(self):
+        return b""
+
+    def in_waiting(self):
+        return 0
+
+
+class ChunkThenTimeoutTransport(SilentTimeoutTransport):
+    """Audio transport that returns preset chunks before going silent."""
+
+    def __init__(self, chunks: list[bytes]):
+        super().__init__()
+        self._chunks = list(chunks)
+
+    async def read(self, size=-1) -> bytes:
+        self.reads += 1
+        if self._chunks:
+            return self._chunks.pop(0)
+        await asyncio.sleep(10)
+        return b"unreachable"
 
 
 @pytest.fixture
@@ -255,6 +299,75 @@ class TestAudioPipeline:
             await pipeline.record(str(output), max_duration=0.1)
 
         assert not output.exists()
+
+    async def test_record_fails_closed_when_transport_produces_no_frames(
+        self, tmp_path
+    ):
+        transport = SilentTimeoutTransport()
+        pipeline = AudioPipeline(cast(Transport, transport), EventBus())
+        output = tmp_path / "silent-recording.wav"
+        await pipeline.start()
+
+        with pytest.raises(AudioPipelineError, match="Audio transport produced no audio frames"):
+            await pipeline.record(str(output), max_duration=0.03)
+
+        assert transport.reads > 0
+        assert not output.exists()
+        assert pipeline.running
+
+        await pipeline.stop()
+
+    async def test_record_no_frames_preserves_existing_output_file(
+        self, tmp_path
+    ):
+        transport = SilentTimeoutTransport()
+        pipeline = AudioPipeline(cast(Transport, transport), EventBus())
+        output = tmp_path / "existing-silent-recording.wav"
+        original = b"existing recording should survive silent timeout"
+        output.write_bytes(original)
+        await pipeline.start()
+
+        with pytest.raises(AudioPipelineError, match="Audio transport produced no audio frames"):
+            await pipeline.record(str(output), max_duration=0.03)
+
+        assert output.read_bytes() == original
+
+        await pipeline.stop()
+
+    async def test_record_counts_pcm_frames_split_across_transport_reads(
+        self, tmp_path
+    ):
+        transport = ChunkThenTimeoutTransport([b"\x00", b"\x80"])
+        pipeline = AudioPipeline(cast(Transport, transport), EventBus())
+        output = tmp_path / "split-frame-recording.wav"
+        await pipeline.start()
+
+        recorded = await pipeline.record(str(output), max_duration=0.03)
+
+        assert recorded == str(output)
+        with wave.open(str(output), "rb") as wf:
+            assert wf.getnframes() == 1
+
+        await pipeline.stop()
+
+    async def test_session_record_propagates_no_audio_frames_failure(
+        self, tmp_path
+    ):
+        transport = SilentTimeoutTransport()
+        pipeline = AudioPipeline(cast(Transport, transport), EventBus())
+        await pipeline.start()
+        service = cast(CallService, type(
+            "Service",
+            (),
+            {"_audio": pipeline, "state": CallState.ACTIVE, "active_call": None},
+        )())
+        session = CallSession(number="5551234", direction="inbound", service=service)
+        setattr(service, "active_call", session)
+
+        with pytest.raises(AudioPipelineError, match="Audio transport produced no audio frames"):
+            await session.record(str(tmp_path / "session-silent-recording.wav"), max_duration=0.03)
+
+        await pipeline.stop()
 
     async def test_record_eof_closes_audio_transport(
         self, pipeline, transport, tmp_path
