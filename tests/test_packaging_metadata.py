@@ -85,7 +85,19 @@ def test_readme_websocket_hello_example_matches_supported_event_names():
         "type": "hello",
         "version": 1,
         "events": list(SUPPORTED_WEBSOCKET_EVENTS),
+        "selected_events": list(SUPPORTED_WEBSOCKET_EVENTS),
     }
+
+
+def test_readme_websocket_filter_example_uses_supported_event_names():
+    from server import SUPPORTED_WEBSOCKET_EVENTS
+
+    readme = (ROOT / "README.md").read_text()
+
+    assert "GET /ws?events=sms.received,sms.delivery_report" in readme
+    assert "selected_events" in readme
+    assert "raw.at" not in readme
+    assert {"sms.received", "sms.delivery_report"}.issubset(SUPPORTED_WEBSOCKET_EVENTS)
 
 
 def test_roadmap_lists_websocket_feed_as_shipped_not_planned():
@@ -97,6 +109,7 @@ def test_roadmap_lists_websocket_feed_as_shipped_not_planned():
     assert "planned after SMS/security foundations" not in roadmap
     assert "durable replay" in roadmap
     assert "dashboard" in roadmap
+    assert "replay/filtering" not in roadmap
 
 
 def test_packaged_console_script_includes_server_helper_module():

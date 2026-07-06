@@ -138,11 +138,13 @@ If `create_app(..., api_keys=[...])` is configured, HTTP requests must include a
 
 `GET /ws` uses the same bearer-token protection as the HTTP endpoints when API keys are configured. It is intended for PII-safe typed events, not raw AT/modem traffic, raw SMS body streaming, raw USSD responses, or durable replay.
 
-The connection starts with a public-safe `hello` envelope that lists supported event types:
+The connection starts with a public-safe `hello` envelope that lists supported event types and the names selected for that socket. With no `events` query, the selected list defaults to every supported event:
 
 ```json
-{"type": "hello", "version": 1, "events": ["sms.received", "sms.delivery_report", "sms.sent", "call.state", "call.ring", "call.caller_id", "call.dtmf", "modem.state", "signal.quality", "ussd.response"]}
+{"type": "hello", "version": 1, "events": ["sms.received", "sms.delivery_report", "sms.sent", "call.state", "call.ring", "call.caller_id", "call.dtmf", "modem.state", "signal.quality", "ussd.response"], "selected_events": ["sms.received", "sms.delivery_report", "sms.sent", "call.state", "call.ring", "call.caller_id", "call.dtmf", "modem.state", "signal.quality", "ussd.response"]}
 ```
+
+Focused integrations can request a comma-separated subset, for example `GET /ws?events=sms.received,sms.delivery_report`. Unsupported names fail closed before subscription, and valid filters are normalized by trimming whitespace, dropping empty segments, and de-duplicating names in request order.
 
 Representative event envelopes redact private payloads while preserving useful metadata for dashboards and integrations:
 

@@ -59,12 +59,10 @@ _WEBSOCKET_EVENT_SPECS: tuple[tuple[type[Event], str], ...] = (
     (SignalQualityEvent, "signal.quality"),
     (USSDResponseEvent, "ussd.response"),
 )
-_WEBSOCKET_EVENT_TYPES: tuple[type[Event], ...] = tuple(
-    event_type for event_type, _event_name in _WEBSOCKET_EVENT_SPECS
-)
 SUPPORTED_WEBSOCKET_EVENTS: tuple[str, ...] = tuple(
     dict.fromkeys(event_name for _event_type, event_name in _WEBSOCKET_EVENT_SPECS)
 )
+_SUPPORTED_WEBSOCKET_EVENT_SET = frozenset(SUPPORTED_WEBSOCKET_EVENTS)
 
 # Webhook subscribers and received messages store
 webhook_urls: list[str] = []
@@ -241,6 +239,35 @@ def _enqueue_websocket_envelope(queue: asyncio.Queue[dict[str, Any]], envelope: 
         queue.put_nowait(overflow)
 
 
+def _selected_websocket_event_names(request: web.Request) -> tuple[str, ...] | None:
+    """Return normalized requested public WebSocket event names, or None if invalid."""
+    raw_events = request.query.get("events")
+    if raw_events is None:
+        return SUPPORTED_WEBSOCKET_EVENTS
+
+    selected = tuple(
+        dict.fromkeys(
+            event_name.strip()
+            for event_name in raw_events.split(",")
+            if event_name.strip()
+        )
+    )
+    if not selected:
+        return SUPPORTED_WEBSOCKET_EVENTS
+    if any(event_name not in _SUPPORTED_WEBSOCKET_EVENT_SET for event_name in selected):
+        return None
+    return selected
+
+
+def _websocket_event_specs_for_names(selected_events: tuple[str, ...]) -> tuple[tuple[type[Event], str], ...]:
+    selected = set(selected_events)
+    return tuple(
+        (event_type, event_name)
+        for event_type, event_name in _WEBSOCKET_EVENT_SPECS
+        if event_name in selected
+    )
+
+
 def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Application:
     auth = APIKeyAuth(api_keys=api_keys)
     app = web.Application(middlewares=[auth.middleware])
@@ -253,7 +280,19 @@ def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Applicati
     async def render_metrics(request: web.Request) -> web.Response:
         return web.Response(text=metrics.render_prometheus(), content_type="text/plain")
 
-    async def websocket_feed(request: web.Request) -> web.WebSocketResponse:
+    async def websocket_feed(request: web.Request) -> web.StreamResponse:
+        selected_events = _selected_websocket_event_names(request)
+        if selected_events is None:
+            return web.json_response(
+                {
+                    "error": "unsupported WebSocket event filter",
+                    "supported_events": list(SUPPORTED_WEBSOCKET_EVENTS),
+                },
+                status=400,
+            )
+        selected_event_specs = _websocket_event_specs_for_names(selected_events)
+        selected_event_types = tuple(event_type for event_type, _event_name in selected_event_specs)
+
         ws = web.WebSocketResponse()
         await ws.prepare(request)
         queue_size = int(request.app.get("callstack_ws_queue_size", _WEBSOCKET_QUEUE_MAXSIZE))
@@ -264,6 +303,7 @@ def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Applicati
                 "type": "hello",
                 "version": WEBSOCKET_PROTOCOL_VERSION,
                 "events": list(SUPPORTED_WEBSOCKET_EVENTS),
+                "selected_events": list(selected_events),
             })
             while not ws.closed:
                 envelope = await queue.get()
@@ -276,14 +316,14 @@ def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Applicati
                 return
             _enqueue_websocket_envelope(queue, envelope)
 
-        for event_type in _WEBSOCKET_EVENT_TYPES:
+        for event_type in selected_event_types:
             modem.bus.subscribe(event_type, on_event)
         sender = asyncio.create_task(send_loop())
         try:
             async for _ in ws:
                 pass
         finally:
-            for event_type in _WEBSOCKET_EVENT_TYPES:
+            for event_type in selected_event_types:
                 modem.bus.unsubscribe(event_type, on_event)
             sender.cancel()
             with suppress(asyncio.CancelledError):
