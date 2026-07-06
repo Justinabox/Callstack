@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import math
 from typing import cast
 
 import pytest
@@ -76,6 +77,26 @@ class TestUSSDServiceValidation:
 
         with pytest.raises(ValueError, match="Invalid USSD code"):
             await service.send("*100#\rAT+CMGD=1,4", timeout=0.01)
+
+    @pytest.mark.parametrize("timeout", [0, -1, math.nan, math.inf, True, 10**309])
+    async def test_invalid_timeout_fails_before_modem_write(self, bus, timeout):
+        class RecordingExecutor:
+            def __init__(self):
+                self.calls = []
+
+            async def execute(self, command, expect=("OK",), timeout=5.0):
+                self.calls.append((command, timeout))
+                return type("Response", (), {"success": True, "lines": ["OK"]})()
+
+        executor = RecordingExecutor()
+        service = USSDService(cast(ATCommandExecutor, executor), bus)
+        private_code = "*123*9999#"
+
+        with pytest.raises(ValueError, match="Invalid USSD timeout") as excinfo:
+            await asyncio.wait_for(service.send(private_code, timeout=timeout), timeout=0.05)
+
+        assert executor.calls == []
+        assert private_code not in str(excinfo.value)
 
     async def test_ussd_timeout_error_does_not_echo_code(self, bus):
         class SuccessfulExecutor:
