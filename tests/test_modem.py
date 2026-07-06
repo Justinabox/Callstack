@@ -393,6 +393,104 @@ class TestModemOnCall:
         assert slow_at.calls.count(ATCommand.ANSWER) == 1
         assert len(sessions) == 1
 
+    async def test_close_cancels_pending_call_handler_tasks(self):
+        modem = MockModem()
+        slow_at = SlowAnswerAT()
+        slow_at.gate.set()
+        modem.call = CallService(slow_at, FakeAudio(), modem.bus)  # type: ignore[arg-type]
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+        unblock = asyncio.Event()
+        sessions = []
+
+        @modem.on_call
+        async def handler(session):
+            sessions.append(session)
+            started.set()
+            try:
+                await unblock.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        await modem.call._on_ring(RingEvent())
+        await modem._on_ring(RingEvent())
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        assert len(modem._tasks) == 1
+
+        try:
+            await modem.close()
+            await asyncio.wait_for(cancelled.wait(), timeout=1.0)
+            assert modem._tasks == set()
+            assert sessions[0].is_active is False
+            assert sessions[0]._ended.is_set()
+            assert modem.call.active_call is None
+            assert modem.call.state == CallState.IDLE
+        finally:
+            unblock.set()
+            for task in list(modem._tasks):
+                task.cancel()
+            if modem._tasks:
+                await asyncio.gather(*modem._tasks, return_exceptions=True)
+
+    async def test_close_marks_call_inactive_before_cancelling_handlers(self):
+        modem = MockModem()
+        slow_at = SlowAnswerAT()
+        slow_at.gate.set()
+        modem.call = CallService(slow_at, FakeAudio(), modem.bus)  # type: ignore[arg-type]
+        started = asyncio.Event()
+        unblock = asyncio.Event()
+
+        @modem.on_call
+        async def handler(session):
+            started.set()
+            try:
+                await unblock.wait()
+            finally:
+                if session.is_active:
+                    await session.hangup()
+
+        await modem.call._on_ring(RingEvent())
+        await modem._on_ring(RingEvent())
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+
+        try:
+            await modem.close()
+            assert ATCommand.HANGUP not in slow_at.calls
+            assert ATCommand.CPCMREG_OFF not in slow_at.calls
+            assert modem.call.active_call is None
+            assert modem.call.state == CallState.IDLE
+        finally:
+            unblock.set()
+            for task in list(modem._tasks):
+                task.cancel()
+            if modem._tasks:
+                await asyncio.gather(*modem._tasks, return_exceptions=True)
+
+    async def test_close_ignores_queued_ring_events_before_they_answer(self):
+        modem = MockModem()
+        slow_at = SlowAnswerAT()
+        slow_at.gate.set()
+        modem.call = CallService(slow_at, FakeAudio(), modem.bus)  # type: ignore[arg-type]
+        modem.bus.subscribe(RingEvent, modem._on_ring)
+        handler_called = asyncio.Event()
+
+        @modem.on_call
+        async def handler(session):
+            handler_called.set()
+
+        await modem.call._on_ring(RingEvent())
+        await modem.bus.emit(RingEvent())
+
+        await modem.close()
+        await asyncio.sleep(0)
+
+        assert ATCommand.ANSWER not in slow_at.calls
+        assert handler_called.is_set() is False
+        assert modem._tasks == set()
+        assert modem.call.active_call is None
+        assert modem.call.state == CallState.IDLE
+
 
 class TestModemRunForever:
     async def test_shutdown_stops_run_forever(self):

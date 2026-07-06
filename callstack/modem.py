@@ -170,6 +170,15 @@ class Modem:
             with suppress(asyncio.CancelledError):
                 await self._reconnect_task
 
+        await self._drain_event_bus_tasks()
+        async with self._ring_answer_lock:
+            pass
+        try:
+            await self.call.handle_modem_disconnected()
+        except Exception as exc:
+            logger.debug("Call cleanup during shutdown failed: %s", exc)
+        await self._drain_background_tasks()
+
         # Stop services
         self.bus.unsubscribe(RingEvent, self._on_ring)
         self.call.close()
@@ -193,6 +202,38 @@ class Modem:
             logger.debug("AT transport close during shutdown: %s", exc)
 
         logger.info("Modem shutdown complete")
+
+    async def _drain_background_tasks(self) -> None:
+        """Cancel and await internally-owned background tasks during shutdown."""
+        current_task = asyncio.current_task()
+        pending_tasks = {
+            task for task in self._tasks if task is not current_task and not task.done()
+        }
+        completed_tasks = {
+            task for task in self._tasks if task is not current_task and task.done()
+        }
+        self._tasks.difference_update(completed_tasks)
+
+        if not pending_tasks:
+            return
+
+        for task in pending_tasks:
+            task.cancel()
+        await asyncio.gather(*pending_tasks, return_exceptions=True)
+        self._tasks.difference_update(pending_tasks)
+
+    async def _drain_event_bus_tasks(self) -> None:
+        """Cancel queued async event subscribers during shutdown."""
+        current_task = asyncio.current_task()
+        pending_tasks = {
+            task for task in self.bus._tasks if task is not current_task and not task.done()
+        }
+        if not pending_tasks:
+            return
+
+        for task in pending_tasks:
+            task.cancel()
+        await asyncio.gather(*pending_tasks, return_exceptions=True)
 
     async def _initialize_modem(self) -> None:
         """Send initialization AT commands."""
@@ -347,17 +388,22 @@ class Modem:
 
     async def _on_ring(self, event: RingEvent) -> None:
         """Handle RING events by answering and dispatching to registered handlers."""
+        if self._shutdown.is_set():
+            return
         if not self._call_handlers:
             return
         if self._ring_answer_lock.locked():
             return
 
         async with self._ring_answer_lock:
-            if self.call.state != CallState.RINGING:
+            if self._shutdown.is_set() or self.call.state != CallState.RINGING:
                 return
 
             try:
                 session = await self.call.answer()
+                if self._shutdown.is_set():
+                    await self.call.handle_modem_disconnected()
+                    return
                 for handler in self._call_handlers:
                     task = asyncio.create_task(self._safe_call_handler(handler, session))
                     self._tasks.add(task)
