@@ -99,13 +99,13 @@ class ATCommand:
 
     @staticmethod
     def read_sms(index: int) -> str:
-        if not isinstance(index, int) or index < 0:
+        if type(index) is not int or index < 0:
             raise ValueError(f"Invalid SMS index: {index!r} (must be non-negative integer)")
         return f"AT+CMGR={index}"
 
     @staticmethod
     def delete_sms(index: int) -> str:
-        if not isinstance(index, int) or index < 0:
+        if type(index) is not int or index < 0:
             raise ValueError(f"Invalid SMS index: {index!r} (must be non-negative integer)")
         return f"AT+CMGD={index}"
 
