@@ -12,8 +12,15 @@ logger = logging.getLogger("callstack.voice.dtmf")
 
 
 def _validate_timeout(value: Optional[float], name: str = "timeout") -> None:
-    if value is not None and (type(value) is bool or not math.isfinite(value)):
-        raise ValueError(f"DTMF {name} must be finite")
+    if value is not None and (
+        type(value) is bool or not math.isfinite(value) or value < 0
+    ):
+        raise ValueError(f"DTMF {name} must be finite and non-negative")
+
+
+def _validate_max_digits(value: int) -> None:
+    if type(value) is not int or value < 1:
+        raise ValueError("DTMF max_digits must be a positive integer")
 
 
 class DTMFCollector:
@@ -61,6 +68,7 @@ class DTMFCollector:
         max_d = max_digits if max_digits is not None else self.max_digits
         overall_timeout = timeout if timeout is not None else self.timeout
         idt = inter_digit_timeout if inter_digit_timeout is not None else self.inter_digit_timeout
+        _validate_max_digits(max_d)
         _validate_timeout(overall_timeout, "timeout")
         _validate_timeout(idt, "inter_digit_timeout")
         digits: list[str] = []
@@ -122,6 +130,7 @@ class DTMFCollector:
         max_d = max_digits if max_digits is not None else self.max_digits
         overall_timeout = timeout if timeout is not None else self.timeout
         idt = inter_digit_timeout if inter_digit_timeout is not None else self.inter_digit_timeout
+        _validate_max_digits(max_d)
         _validate_timeout(overall_timeout, "timeout")
         _validate_timeout(idt, "inter_digit_timeout")
         digits: list[str] = []

@@ -373,8 +373,10 @@ class CallSession:
 
     @staticmethod
     def _validate_timeout(value: Optional[float], name: str = "timeout") -> None:
-        if value is not None and (type(value) is bool or not math.isfinite(value)):
-            raise ValueError(f"DTMF {name} must be finite")
+        if value is not None and (
+            type(value) is bool or not math.isfinite(value) or value < 0
+        ):
+            raise ValueError(f"DTMF {name} must be finite and non-negative")
 
     async def _next_dtmf_event_while_active(
         self, events, timeout: float | None
