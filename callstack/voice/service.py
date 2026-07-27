@@ -165,9 +165,11 @@ class CallService:
     async def reject(self) -> None:
         """Reject an incoming call without answering."""
         logger.info("Rejecting call")
-        await self._at.execute(
+        resp = await self._at.execute(
             ATCommand.HANGUP, expect=["OK"], timeout=self._command_timeout
         )
+        if not resp.success:
+            raise ATCommandError(ATCommand.HANGUP, resp.lines)
         if self._fsm.state not in (CallState.ENDED, CallState.IDLE):
             await self._fsm.transition(CallState.ENDED)
         await self._cleanup()
