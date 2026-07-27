@@ -253,7 +253,12 @@ class SMSService:
                 status="unread",
                 timestamp=datetime.now(),
             )
-            await self._store.save(sms)
+            try:
+                await self._store.save(sms)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to persist direct SMS delivery (%s)", type(exc).__name__
+                )
             await self._bus.emit(
                 IncomingSMSEvent(sender=sender, body=event.body)
             )
