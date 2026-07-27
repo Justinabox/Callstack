@@ -89,10 +89,10 @@ class DTMFCollector:
                     break  # timeout
 
                 digit = event.digit
-                logger.debug("DTMF received: %s", digit)
+                logger.debug("DTMF digit received (count=%d)", len(digits) + 1)
 
                 if digit == self.terminator:
-                    logger.debug("Terminator '%s' received", self.terminator)
+                    logger.debug("DTMF terminator received")
                     break
 
                 digits.append(digit)
@@ -102,7 +102,7 @@ class DTMFCollector:
                     deadline = min(overall_deadline, now() + idt)
 
         result = "".join(digits)
-        logger.debug("DTMF collected: '%s'", result)
+        logger.debug("DTMF collection complete (count=%d)", len(result))
         return result
 
     async def collect_one(self, timeout: Optional[float] = None) -> Optional[str]:
@@ -149,10 +149,10 @@ class DTMFCollector:
                 break
 
             digit = event.digit
-            logger.debug("DTMF received: %s", digit)
+            logger.debug("DTMF digit received (count=%d)", len(digits) + 1)
 
             if digit == self.terminator:
-                logger.debug("Terminator '%s' received", self.terminator)
+                logger.debug("DTMF terminator received")
                 break
 
             digits.append(digit)
@@ -162,7 +162,7 @@ class DTMFCollector:
                 deadline = min(overall_deadline, now() + idt)
 
         result = "".join(digits)
-        logger.debug("DTMF collected: '%s'", result)
+        logger.debug("DTMF collection complete (count=%d)", len(result))
         return result
 
     async def collect_one_from_stream(
