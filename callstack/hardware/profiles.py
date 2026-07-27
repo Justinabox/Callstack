@@ -6,7 +6,10 @@ probe hardware, open serial ports, or execute AT commands.
 
 from callstack.hardware.discovery import AudioPortHint, ModemCapabilities, ModemIdentity
 
-_QUECTEL_MODEL_HINTS = (
+# Two-letter Quectel model-family prefixes are only recognised when immediately
+# followed by a numeric family suffix (e.g. "EC25"), so unrelated devices that
+# merely share the leading letters (e.g. "ECONET-1") stay unknown.
+_QUECTEL_FAMILY_PREFIXES = (
     "BC",
     "BG",
     "EC",
@@ -15,12 +18,16 @@ _QUECTEL_MODEL_HINTS = (
     "EP",
     "FC",
     "MC",
-    "M95",
-    "M66",
     "RG",
     "RM",
     "UC",
     "UG",
+)
+
+# Fully-specified Quectel model names that already carry their numeric family.
+_QUECTEL_FULL_MODELS = (
+    "M95",
+    "M66",
 )
 
 
@@ -33,10 +40,21 @@ def _looks_like_simcom(identity: ModemIdentity) -> bool:
     return "SIMCOM" in text or "SIM7600" in text or "SIM868" in text
 
 
+def _has_quectel_family_prefix(model: str) -> bool:
+    for prefix in _QUECTEL_FAMILY_PREFIXES:
+        if model.startswith(prefix) and len(model) > len(prefix) and model[len(prefix)].isdigit():
+            return True
+    return False
+
+
 def _looks_like_quectel(identity: ModemIdentity) -> bool:
     text = _identity_text(identity)
     model = identity.model.strip().upper()
-    return "QUECTEL" in text or any(model.startswith(prefix) for prefix in _QUECTEL_MODEL_HINTS)
+    return (
+        "QUECTEL" in text
+        or any(model.startswith(full) for full in _QUECTEL_FULL_MODELS)
+        or _has_quectel_family_prefix(model)
+    )
 
 
 def classify_capabilities(identity: ModemIdentity) -> ModemCapabilities:
