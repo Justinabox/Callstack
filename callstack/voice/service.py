@@ -194,16 +194,22 @@ class CallService:
         except TransportError:
             raise
         except Exception as exc:
-            logger.warning("Audio bridge registration failed: %s — call may have no audio", exc)
+            logger.warning(
+                "Audio bridge registration failed (%s) — call may have no audio",
+                type(exc).__name__,
+            )
             return
         if resp.success:
             self._audio_bridge_registered = True
             try:
                 await self._audio.start()
             except Exception as exc:
-                logger.warning("Audio pipeline start failed: %s — call may have no audio", exc)
+                logger.warning(
+                    "Audio pipeline start failed (%s) — call may have no audio",
+                    type(exc).__name__,
+                )
         else:
-            logger.warning("Audio bridge registration failed: %s — call may have no audio", resp.lines)
+            logger.warning("Audio bridge registration failed — call may have no audio")
 
     async def _disable_audio(self) -> None:
         """Tear down audio bridge."""

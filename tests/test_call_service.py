@@ -126,6 +126,84 @@ class TestCallService:
             ("AT+VTS=5,1", 1.75),
         ]
 
+    async def test_audio_bridge_registration_exception_warning_redacts_details(self, bus, caplog):
+        secret = "FAKE_BRIDGE_EXCEPTION_SECRET"
+
+        class FailingExecutor:
+            async def execute(self, command, expect=("OK",), timeout=5.0):
+                raise RuntimeError(secret)
+
+        class FakeAudio:
+            running = False
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+
+        service = CallService(
+            cast(ATCommandExecutor, FailingExecutor()), cast(AudioPipeline, FakeAudio()), bus
+        )
+        caplog.set_level(logging.WARNING, logger="callstack.voice.service")
+
+        await service._enable_audio()
+
+        assert "Audio bridge registration failed" in caplog.text
+        assert secret not in caplog.text
+
+    async def test_audio_pipeline_start_exception_warning_redacts_details(self, bus, caplog):
+        secret = "FAKE_AUDIO_START_EXCEPTION_SECRET"
+
+        class SuccessfulExecutor:
+            async def execute(self, command, expect=("OK",), timeout=5.0):
+                return ATResponse(success=True, lines=["OK"])
+
+        class FailingAudio:
+            running = False
+
+            async def start(self):
+                raise RuntimeError(secret)
+
+            async def stop(self):
+                self.running = False
+
+        service = CallService(
+            cast(ATCommandExecutor, SuccessfulExecutor()), cast(AudioPipeline, FailingAudio()), bus
+        )
+        caplog.set_level(logging.WARNING, logger="callstack.voice.service")
+
+        await service._enable_audio()
+
+        assert "Audio pipeline start failed" in caplog.text
+        assert secret not in caplog.text
+
+    async def test_audio_bridge_registration_failure_warning_redacts_response_lines(self, bus, caplog):
+        secret = "FAKE_RAW_AT_RESPONSE_SECRET"
+
+        class FailingExecutor:
+            async def execute(self, command, expect=("OK",), timeout=5.0):
+                return ATResponse(success=False, lines=[secret])
+
+        class FakeAudio:
+            running = False
+
+            async def start(self):
+                raise AssertionError("audio must not start after bridge registration failure")
+
+            async def stop(self):
+                self.running = False
+
+        service = CallService(
+            cast(ATCommandExecutor, FailingExecutor()), cast(AudioPipeline, FakeAudio()), bus
+        )
+        caplog.set_level(logging.WARNING, logger="callstack.voice.service")
+
+        await service._enable_audio()
+
+        assert "Audio bridge registration failed" in caplog.text
+        assert secret not in caplog.text
+
     async def test_disconnect_during_dial_command_does_not_create_stale_session(self, bus):
         command_started = asyncio.Event()
         command_can_return = asyncio.Event()
