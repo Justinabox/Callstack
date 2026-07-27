@@ -56,6 +56,8 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "IVRMenu": ("callstack.voice.ivr", "IVRMenu"),
     "IVRFlow": ("callstack.voice.ivr", "IVRFlow"),
     "MenuOption": ("callstack.voice.ivr", "MenuOption"),
+    "VoicemailBox": ("callstack.voice.voicemail", "VoicemailBox"),
+    "VoicemailMessage": ("callstack.voice.voicemail", "VoicemailMessage"),
     # SMS
     "SMS": ("callstack.sms.types", "SMS"),
     "DeliveryReport": ("callstack.sms.types", "DeliveryReport"),
