@@ -6,6 +6,7 @@ from callstack.voice.audio import AudioPipeline
 from callstack.voice.dtmf import DTMFCollector
 from callstack.voice.ivr import IVRMenu, IVRFlow, MenuOption
 from callstack.voice.service import CallService, CallSession
+from callstack.voice.voicemail import VoicemailBox, VoicemailMessage
 
 __all__ = [
     "CallStateMachine",
@@ -17,4 +18,6 @@ __all__ = [
     "MenuOption",
     "CallService",
     "CallSession",
+    "VoicemailBox",
+    "VoicemailMessage",
 ]
