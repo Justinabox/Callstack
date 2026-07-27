@@ -532,9 +532,65 @@ class TestCallService:
         assert service.state == CallState.RINGING
 
     async def test_caller_id_captured(self, service, bus):
+        await bus.emit(RingEvent())
+        await asyncio.sleep(0.01)
         await bus.emit(CallerIDEvent(number="+9876543210"))
         await asyncio.sleep(0.01)
         assert service._pending_caller == "+9876543210"
+
+    async def test_caller_id_without_active_ring_is_ignored(self, service, bus):
+        """A +CLIP with no active ring/call window must not be retained."""
+        await bus.emit(CallerIDEvent(number="+9876543210"))
+        await asyncio.sleep(0.01)
+        assert service._pending_caller is None
+
+    async def test_late_caller_id_after_call_end_does_not_leak_into_next_call(
+        self, service, bus, at_transport
+    ):
+        """A late +CLIP for a call that already cleaned up must not be
+        assigned to the next inbound call's CallSession."""
+        # Call A: ring, caller ID, answer, hangup.
+        await bus.emit(RingEvent())
+        await asyncio.sleep(0.01)
+        await bus.emit(CallerIDEvent(number="+15550000001"))
+        await asyncio.sleep(0.01)
+
+        async def answer_a_respond():
+            await asyncio.sleep(0.01)
+            at_transport.feed("OK")
+            await asyncio.sleep(0.01)
+            at_transport.feed("OK")  # CPCMREG on
+        asyncio.create_task(answer_a_respond())
+        await service.answer()
+
+        async def hangup_a_respond():
+            await asyncio.sleep(0.01)
+            at_transport.feed("OK")
+            await asyncio.sleep(0.01)
+            at_transport.feed("OK")  # CPCMREG off
+        asyncio.create_task(hangup_a_respond())
+        await service.hangup()
+
+        assert service.state == CallState.IDLE
+        assert service._pending_caller is None
+
+        # Late +CLIP for call A arrives only after cleanup has completed.
+        await bus.emit(CallerIDEvent(number="+15550000001"))
+        await asyncio.sleep(0.01)
+
+        # Call B rings and is answered before its own caller-ID URC arrives.
+        await bus.emit(RingEvent())
+        await asyncio.sleep(0.01)
+
+        async def answer_b_respond():
+            await asyncio.sleep(0.01)
+            at_transport.feed("OK")
+            await asyncio.sleep(0.01)
+            at_transport.feed("OK")  # CPCMREG on
+        asyncio.create_task(answer_b_respond())
+        session_b = await service.answer()
+
+        assert session_b.number == "unknown"
 
     async def test_answer_success(self, service, bus, at_transport):
         # Simulate incoming ring
