@@ -13,13 +13,23 @@ T = TypeVar("T", bound=Event)
 HandlerResult = Awaitable[None] | None
 EventHandler = Callable[[Event], HandlerResult]
 
+DEFAULT_STREAM_MAXSIZE = 500
+
+
+class _StreamQueue(asyncio.Queue[Event]):
+    """Bounded stream queue with payload-free overflow accounting."""
+
+    def __init__(self, maxsize: int):
+        super().__init__(maxsize=maxsize)
+        self.dropped = 0
+
 
 class EventBus:
     """Typed async event bus with pub/sub and async iteration."""
 
     def __init__(self):
         self._subscribers: dict[type, list[EventHandler]] = defaultdict(list)
-        self._queues: dict[type, list[asyncio.Queue]] = defaultdict(list)
+        self._queues: dict[type, list[_StreamQueue]] = defaultdict(list)
         self._tasks: set[asyncio.Future] = set()
 
     def on(self, event_type: type[T]):
@@ -55,7 +65,18 @@ class EventBus:
                 task.add_done_callback(self._task_done)
 
         for q in list(self._queues.get(type(event), [])):
-            await q.put(event)
+            self._put_dropping_oldest(q, event)
+
+    def _put_dropping_oldest(self, q: _StreamQueue, event: Event) -> None:
+        """Enqueue without blocking: drop the oldest item if the queue is full."""
+        if q.full():
+            try:
+                q.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            else:
+                q.dropped += 1
+        q.put_nowait(event)
 
     def _task_done(self, task: asyncio.Future) -> None:
         """Handle completed subscriber tasks: log exceptions, then discard."""
@@ -70,15 +91,22 @@ class EventBus:
         logger.error("Event subscriber raised %s", type(exc).__name__)
 
     @asynccontextmanager
-    async def stream(self, event_type: type[T]):
+    async def stream(self, event_type: type[T], *, maxsize: int = DEFAULT_STREAM_MAXSIZE):
         """Async context manager yielding an EventStream for the given type.
+
+        The stream's queue is bounded to `maxsize` (a conservative finite
+        default is used when not specified). When full, emit() drops the
+        oldest queued event rather than blocking.
 
         Usage:
             async with bus.stream(DTMFEvent) as events:
                 async for event in events:
                     print(event.digit)
         """
-        q: asyncio.Queue[Event] = asyncio.Queue()
+        if isinstance(maxsize, bool) or not isinstance(maxsize, int) or maxsize <= 0:
+            raise ValueError(f"maxsize must be a positive integer, got {maxsize!r}")
+
+        q = _StreamQueue(maxsize=maxsize)
         self._queues[event_type].append(q)
         try:
             yield EventStream(q)
@@ -92,8 +120,13 @@ class EventBus:
 class EventStream:
     """Async iterator wrapper around a queue."""
 
-    def __init__(self, queue: asyncio.Queue):
+    def __init__(self, queue: _StreamQueue):
         self._queue = queue
+
+    @property
+    def dropped(self) -> int:
+        """Count of queued events dropped due to a full stream queue."""
+        return self._queue.dropped
 
     def __aiter__(self):
         return self

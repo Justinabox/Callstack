@@ -1112,6 +1112,12 @@ async def test_messages_filtered_iterator(sms_service, bus):
     assert results[0].body == "match"
 
 
+async def test_messages_stream_exposes_dropped_event_count(sms_service):
+    """SMS message consumers can observe bounded-stream overflow safely."""
+    async with sms_service.messages(filter_sender="A") as inbox:
+        assert inbox.dropped == 0
+
+
 # -- Parsing --
 
 async def test_parse_timestamp():
