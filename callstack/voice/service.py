@@ -264,6 +264,9 @@ class CallService:
             logger.info("Incoming call (RING)")
 
     async def _on_caller_id(self, event: CallerIDEvent) -> None:
+        if self._fsm.state != CallState.RINGING:
+            logger.debug("Ignoring caller ID URC outside an active ringing window")
+            return
         self._pending_caller = event.number
         logger.info("Caller ID: %s", redact_phone_number(event.number))
 
