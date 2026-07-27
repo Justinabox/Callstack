@@ -1131,6 +1131,30 @@ class TestCallService:
         await service.reject()
         assert service.state == CallState.IDLE
 
+    async def test_failed_reject_preserves_ringing_state_until_terminal_urc(
+        self, service, bus, at_transport
+    ):
+        await bus.emit(RingEvent())
+        await bus.emit(CallerIDEvent(number="+5****34"))
+        await asyncio.sleep(0.01)
+
+        async def respond():
+            await asyncio.sleep(0.01)
+            at_transport.feed("ERROR")
+        asyncio.create_task(respond())
+
+        with pytest.raises(ATCommandError, match="ATH"):
+            await service.reject()
+
+        assert service.state == CallState.RINGING
+        assert service.active_call is None
+        assert service._pending_caller == "+5****34"
+
+        await bus.emit(CallStateEvent(state=CallState.ENDED))
+        await asyncio.sleep(0.01)
+        assert service.state == CallState.IDLE
+        assert service._pending_caller is None
+
 
 class TestCallSession:
 
