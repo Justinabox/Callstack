@@ -1,5 +1,7 @@
 """Tests for config and errors."""
 
+from typing import Any
+
 import pytest
 
 from callstack.config import ModemConfig, load_modem_config_from_env
@@ -56,9 +58,156 @@ def test_positional_constructor_preserves_existing_field_order():
     assert cfg.log_level == "DEBUG"
 
 
-@pytest.mark.parametrize("field", ["sms_prompt_timeout", "sms_submit_timeout"])
+@pytest.mark.parametrize(
+    ("field", "contract"),
+    [
+        ("command_timeout", "positive finite number"),
+        ("reconnect_interval", "positive finite number"),
+        ("baudrate", "non-boolean positive integer"),
+    ],
+)
 @pytest.mark.parametrize("bad_value", [float("nan"), float("inf")])
-def test_modem_config_rejects_non_finite_sms_send_timeouts(field, bad_value):
+def test_modem_config_rejects_non_finite_direct_constructor_values(
+    field, contract, bad_value
+):
+    with pytest.raises(ValueError) as excinfo:
+        ModemConfig(**{field: bad_value})
+
+    assert field in str(excinfo.value)
+    assert contract in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "command_timeout",
+        "sms_prompt_timeout",
+        "sms_submit_timeout",
+        "reconnect_interval",
+    ],
+)
+@pytest.mark.parametrize("bad_value", [float("nan"), float("inf"), float("-inf")])
+def test_modem_config_rejects_non_finite_timeout_and_reconnect_values(field, bad_value):
+    with pytest.raises(ValueError) as excinfo:
+        ModemConfig(**{field: bad_value})
+
+    message = str(excinfo.value)
+    assert field in message
+    assert "positive finite number" in message
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "command_timeout",
+        "sms_prompt_timeout",
+        "sms_submit_timeout",
+        "reconnect_interval",
+    ],
+)
+@pytest.mark.parametrize("bad_value", [0, -1])
+def test_modem_config_rejects_nonpositive_timeout_and_reconnect_values(
+    field, bad_value
+):
+    with pytest.raises(ValueError) as excinfo:
+        ModemConfig(**{field: bad_value})
+
+    message = str(excinfo.value)
+    assert field in message
+    assert "positive finite number" in message
+
+
+@pytest.mark.parametrize("bad_value", [0, -1, 1.5])
+def test_modem_config_rejects_nonpositive_or_noninteger_baudrate(bad_value):
+    with pytest.raises(ValueError) as excinfo:
+        ModemConfig(baudrate=bad_value)
+
+    message = str(excinfo.value)
+    assert "baudrate" in message
+    assert "non-boolean positive integer" in message
+
+
+@pytest.mark.parametrize(
+    ("field", "contract"),
+    [
+        ("command_timeout", "positive finite number"),
+        ("sms_prompt_timeout", "positive finite number"),
+        ("sms_submit_timeout", "positive finite number"),
+        ("reconnect_interval", "positive finite number"),
+        ("baudrate", "non-boolean positive integer"),
+    ],
+)
+def test_modem_config_rejects_arbitrary_object_direct_constructor_values(field, contract):
+    invalid_value: Any = object()
+    with pytest.raises(ValueError) as excinfo:
+        ModemConfig(**{field: invalid_value})
+
+    assert field in str(excinfo.value)
+    assert contract in str(excinfo.value)
+
+
+class _UnstringifiableValue:
+    def __str__(self) -> str:
+        raise RuntimeError("value stringification is unsafe")
+
+
+@pytest.mark.parametrize(
+    ("field", "contract"),
+    [
+        ("command_timeout", "positive finite number"),
+        ("baudrate", "non-boolean positive integer"),
+    ],
+)
+def test_modem_config_rejects_unstringifiable_direct_values(field, contract):
+    with pytest.raises(ValueError) as excinfo:
+        ModemConfig(**{field: _UnstringifiableValue()})
+
+    message = str(excinfo.value)
+    assert field in message
+    assert contract in message
+    assert "value stringification is unsafe" not in message
+
+
+@pytest.mark.parametrize("field", ["command_timeout", "reconnect_interval"])
+def test_modem_config_normalizes_huge_integer_timeout_overflow(field):
+    with pytest.raises(ValueError) as excinfo:
+        ModemConfig(**{field: 10**1000})
+
+    message = str(excinfo.value)
+    assert field in message
+    assert "positive finite number" in message
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("command_timeout", float.fromhex("0x0.0000000000001p-1022")),
+        ("sms_prompt_timeout", float.fromhex("0x0.0000000000001p-1022")),
+        ("sms_submit_timeout", float.fromhex("0x0.0000000000001p-1022")),
+        ("reconnect_interval", float.fromhex("0x0.0000000000001p-1022")),
+        ("baudrate", 1),
+    ],
+)
+def test_modem_config_accepts_lowest_positive_direct_constructor_values(field, value):
+    config = ModemConfig(**{field: value})
+
+    assert getattr(config, field) == value
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "command_timeout",
+        "sms_prompt_timeout",
+        "sms_submit_timeout",
+        "reconnect_interval",
+        "baudrate",
+    ],
+)
+@pytest.mark.parametrize("bad_value", [True, False, "not-a-number", None])
+def test_modem_config_rejects_boolean_and_nonnumeric_direct_constructor_values(
+    field, bad_value
+):
     with pytest.raises(ValueError, match=field):
         ModemConfig(**{field: bad_value})
 

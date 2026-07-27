@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import math
+from numbers import Real
 from typing import Any, Mapping, Optional
 
 
@@ -8,8 +9,14 @@ class ConfigError(ValueError):
 
 
 def _validate_positive_finite(name: str, value: float) -> None:
-    if not math.isfinite(value) or value <= 0:
-        raise ValueError(f"{name} must be a positive finite number, got {value}")
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError(f"{name} must be a positive finite number")
+    try:
+        is_valid = math.isfinite(value) and value > 0
+    except OverflowError:
+        is_valid = False
+    if not is_valid:
+        raise ValueError(f"{name} must be a positive finite number")
 
 
 @dataclass
@@ -32,8 +39,12 @@ class ModemConfig:
         _validate_positive_finite("sms_prompt_timeout", self.sms_prompt_timeout)
         _validate_positive_finite("sms_submit_timeout", self.sms_submit_timeout)
         _validate_positive_finite("reconnect_interval", self.reconnect_interval)
-        if self.baudrate <= 0:
-            raise ValueError(f"baudrate must be positive, got {self.baudrate}")
+        if (
+            isinstance(self.baudrate, bool)
+            or not isinstance(self.baudrate, int)
+            or self.baudrate <= 0
+        ):
+            raise ValueError("baudrate must be a non-boolean positive integer")
 
 
 def _env_name(prefix: str, suffix: str) -> str:
