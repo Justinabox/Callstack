@@ -256,7 +256,7 @@ class SMSService:
                 sender=sender,
                 body=event.body,
                 status="unread",
-                timestamp=datetime.now(),
+                timestamp=datetime.now(timezone.utc),
             )
             try:
                 await self._store.save(sms)
@@ -264,8 +264,11 @@ class SMSService:
                 logger.warning(
                     "Failed to persist direct SMS delivery (%s)", type(exc).__name__
                 )
+                persisted = False
+            else:
+                persisted = True
             await self._bus.emit(
-                IncomingSMSEvent(sender=sender, body=event.body)
+                IncomingSMSEvent(sender=sender, body=event.body, persisted=persisted)
             )
             logger.info("Incoming SMS from %s (direct)", redact_phone_number(sender))
 
@@ -440,6 +443,10 @@ class SMSService:
             yield _FilteredStream(stream, filter_sender)
 
     # -- Message Management --
+
+    async def list_persisted_messages(self, limit: int = 100) -> list[SMS]:
+        """List locally persisted inbound SMS history without reading the SIM."""
+        return await self._store.list_incoming(limit=limit)
 
     async def list_delivery_reports(self, limit: int = 100) -> list[DeliveryReport]:
         """List delivery reports persisted by the SMS store."""

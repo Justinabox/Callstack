@@ -16,8 +16,11 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from callstack.events.bus import EventBus
+from callstack.events.types import _RawSMSNotification
 from callstack.protocol.executor import ATCommandExecutor
-from callstack.sms.types import DeliveryReport
+from callstack.sms.service import SMSService
+from callstack.sms.store import SMSStore
+from callstack.sms.types import DeliveryReport, SMS
 from callstack.ussd import USSDService
 import server
 from server import APIKeyAuth, create_app
@@ -269,6 +272,443 @@ class TestServerPrivacyLogging:
         assert "notaport" not in caplog.text
         assert "super-secret" not in caplog.text
         assert "private sms body secret" not in caplog.text
+
+
+class TestServerSMSRecording:
+    @pytest.mark.parametrize("has_durable_history", [True, False])
+    async def test_run_server_records_messages_globally_only_for_legacy_sms_services(
+        self, monkeypatch, has_durable_history
+    ):
+        previous_messages = list(server.received_messages)
+        server.received_messages.clear()
+        webhook_calls = []
+
+        async def record_webhook(sender, body):
+            webhook_calls.append((sender, body))
+
+        class FakeSMS:
+            def on_message(self, callback):
+                self.callback = callback
+
+        fake_sms = FakeSMS()
+        if has_durable_history:
+            async def list_persisted_messages(limit=100):
+                return []
+
+            setattr(fake_sms, "list_persisted_messages", list_persisted_messages)
+
+        class FakeModem:
+            instance = None
+
+            def __init__(self, _config):
+                self.sms = fake_sms
+                self.bus = EventBus()
+                FakeModem.instance = self
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            def on_call(self, callback):
+                return callback
+
+            async def run_forever(self):
+                await self.sms.callback(
+                    server.IncomingSMSEvent(
+                        sender="5551234",
+                        body="inbound message",
+                        timestamp=datetime(2026, 7, 27, tzinfo=timezone.utc),
+                    )
+                )
+
+        class FakeRunner:
+            def __init__(self, _app):
+                pass
+
+            async def setup(self):
+                pass
+
+            async def cleanup(self):
+                pass
+
+        class FakeSite:
+            def __init__(self, _runner, _host, _port):
+                pass
+
+            async def start(self):
+                pass
+
+        monkeypatch.setattr(server, "Modem", FakeModem)
+        monkeypatch.setattr(server, "notify_webhooks", record_webhook)
+        monkeypatch.setattr(server, "create_app", lambda *_args, **_kwargs: object())
+        monkeypatch.setattr(server.web, "AppRunner", FakeRunner)
+        monkeypatch.setattr(server.web, "TCPSite", FakeSite)
+        try:
+            await server.run_server(cast(server.ModemConfig, SimpleNamespace()))
+        finally:
+            recorded_messages = list(server.received_messages)
+            server.received_messages[:] = previous_messages
+
+        assert webhook_calls == [("5551234", "inbound message")]
+        if has_durable_history:
+            assert recorded_messages == []
+        else:
+            assert recorded_messages == [
+                {
+                    "sender": "5551234",
+                    "body": "inbound message",
+                    "received_at": "2026-07-27T00:00:00+00:00",
+                }
+            ]
+
+    async def test_run_server_records_unpersisted_durable_sms_events_for_http_fallback(
+        self, monkeypatch
+    ):
+        previous_messages = list(server.received_messages)
+        server.received_messages.clear()
+        webhook_calls = []
+
+        async def record_webhook(sender, body):
+            webhook_calls.append((sender, body))
+
+        class FakeSMS:
+            async def list_persisted_messages(self, limit=100):
+                return []
+
+            def on_message(self, callback):
+                self.callback = callback
+
+        fake_sms = FakeSMS()
+
+        class FakeModem:
+            def __init__(self, _config):
+                self.sms = fake_sms
+                self.bus = EventBus()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return None
+
+            def on_call(self, callback):
+                return callback
+
+            async def run_forever(self):
+                await self.sms.callback(
+                    server.IncomingSMSEvent(
+                        sender="5551234",
+                        body="unpersisted direct message",
+                        timestamp=datetime(2026, 7, 27, tzinfo=timezone.utc),
+                        persisted=False,
+                    )
+                )
+
+        class FakeRunner:
+            def __init__(self, _app):
+                pass
+
+            async def setup(self):
+                pass
+
+            async def cleanup(self):
+                pass
+
+        class FakeSite:
+            def __init__(self, _runner, _host, _port):
+                pass
+
+            async def start(self):
+                pass
+
+        monkeypatch.setattr(server, "Modem", FakeModem)
+        monkeypatch.setattr(server, "notify_webhooks", record_webhook)
+        monkeypatch.setattr(server, "create_app", lambda *_args, **_kwargs: object())
+        monkeypatch.setattr(server.web, "AppRunner", FakeRunner)
+        monkeypatch.setattr(server.web, "TCPSite", FakeSite)
+        try:
+            await server.run_server(cast(server.ModemConfig, SimpleNamespace()))
+        finally:
+            recorded_messages = list(server.received_messages)
+            server.received_messages[:] = previous_messages
+
+        assert webhook_calls == [("5551234", "unpersisted direct message")]
+        assert recorded_messages == [
+            {
+                "sender": "5551234",
+                "body": "unpersisted direct message",
+                "received_at": "2026-07-27T00:00:00+00:00",
+            }
+        ]
+
+
+class TestSMSMessagesEndpoint:
+    async def test_messages_endpoint_reads_only_inbound_persisted_history_in_legacy_shape(self, aiohttp_client):
+        class FakeSMS:
+            def __init__(self):
+                self.limits = []
+
+            async def list_persisted_messages(self, limit=100):
+                self.limits.append(limit)
+                return [
+                    SMS(
+                        id=7,
+                        sender="5551234",
+                        recipient="",
+                        body="durable message",
+                        timestamp=datetime(2026, 7, 27, tzinfo=timezone.utc),
+                        status="unread",
+                        reference=0,
+                        storage_index=4,
+                    ),
+                    SMS(
+                        id=8,
+                        recipient="5556789",
+                        body="outbound message",
+                        timestamp=datetime(2026, 7, 27, tzinfo=timezone.utc),
+                        status="sent",
+                        reference=8,
+                    ),
+                ]
+
+        fake_sms = FakeSMS()
+        modem = SimpleNamespace(sms=fake_sms, ussd=SimpleNamespace(), bus=EventBus(), connected=True)
+        client = await aiohttp_client(create_app(modem))
+
+        resp = await client.get("/sms/messages?limit=2")
+
+        assert resp.status == 200
+        assert fake_sms.limits == [2]
+        assert await resp.json() == [
+            {
+                "sender": "5551234",
+                "body": "durable message",
+                "received_at": "2026-07-27T00:00:00+00:00",
+            }
+        ]
+
+    async def test_messages_endpoint_merges_interleaved_durable_and_fallback_history_chronologically(self, aiohttp_client):
+        previous_messages = list(server.received_messages)
+        server.received_messages[:] = [
+            {"sender": "111", "body": "first fallback", "received_at": "2026-07-27T00:00:00+00:00"},
+            {"sender": "222", "body": "middle fallback", "received_at": "2026-07-27T00:02:00+00:00"},
+        ]
+
+        class FakeSMS:
+            async def list_persisted_messages(self, limit=100):
+                return [
+                    SMS(
+                        sender="333",
+                        body="older durable inbound",
+                        timestamp=datetime(2026, 7, 27, 0, 1, tzinfo=timezone.utc),
+                        status="unread",
+                    ),
+                    SMS(
+                        sender="444",
+                        body="newest durable inbound",
+                        timestamp=datetime(2026, 7, 27, 0, 3, tzinfo=timezone.utc),
+                        status="unread",
+                    )
+                ]
+
+        modem = SimpleNamespace(sms=FakeSMS(), ussd=SimpleNamespace(), bus=EventBus(), connected=True)
+        client = await aiohttp_client(create_app(modem))
+        try:
+            resp = await client.get("/sms/messages?limit=1")
+            payload = await resp.json()
+        finally:
+            server.received_messages[:] = previous_messages
+
+        assert resp.status == 200
+        assert payload == [
+            {"sender": "444", "body": "newest durable inbound", "received_at": "2026-07-27T00:03:00+00:00"}
+        ]
+
+    async def test_messages_endpoint_treats_utc_overflow_legacy_fallback_timestamp_as_oldest(
+        self, aiohttp_client
+    ):
+        previous_messages = list(server.received_messages)
+        server.received_messages[:] = [
+            {
+                "sender": "111",
+                "body": "UTC overflow fallback",
+                "received_at": "0001-01-01T00:00:00+23:59",
+            }
+        ]
+
+        class FakeSMS:
+            async def list_persisted_messages(self, limit=100):
+                return [
+                    SMS(
+                        sender="222",
+                        body="newer durable inbound",
+                        timestamp=datetime(2026, 7, 27, tzinfo=timezone.utc),
+                        status="unread",
+                    )
+                ]
+
+        modem = SimpleNamespace(sms=FakeSMS(), ussd=SimpleNamespace(), bus=EventBus(), connected=True)
+        client = await aiohttp_client(create_app(modem))
+        try:
+            resp = await client.get("/sms/messages?limit=1")
+            payload = await resp.json()
+        finally:
+            server.received_messages[:] = previous_messages
+
+        assert resp.status == 200
+        assert payload == [
+            {
+                "sender": "222",
+                "body": "newer durable inbound",
+                "received_at": "2026-07-27T00:00:00+00:00",
+            }
+        ]
+
+    async def test_messages_endpoint_serializes_direct_delivery_timestamp_as_aware_utc(
+        self, aiohttp_client
+    ):
+        previous_messages = list(server.received_messages)
+        server.received_messages.clear()
+        try:
+            store = SMSStore()
+            bus = EventBus()
+            sms = SMSService(cast(ATCommandExecutor, SimpleNamespace()), bus, store)
+            await sms._on_incoming(
+                _RawSMSNotification(
+                    sender="5551234",
+                    body="direct message",
+                    raw='+CMT: "5551234","","26/07/27,00:00:00+00"',
+                )
+            )
+            modem = SimpleNamespace(sms=sms, ussd=SimpleNamespace(), bus=bus, connected=True)
+            client = await aiohttp_client(create_app(modem))
+
+            resp = await client.get("/sms/messages?limit=1")
+            payload = await resp.json()
+        finally:
+            server.received_messages[:] = previous_messages
+
+        assert resp.status == 200
+        assert payload[0]["sender"] == "5551234"
+        assert payload[0]["body"] == "direct message"
+        assert set(payload[0]) == {"sender", "body", "received_at"}
+        assert datetime.fromisoformat(payload[0]["received_at"]).tzinfo == timezone.utc
+
+    async def test_messages_endpoint_legacy_fallback_is_bounded_and_preserves_legacy_shape(self, aiohttp_client):
+        previous_messages = list(server.received_messages)
+        server.received_messages[:] = [
+            {"sender": "111", "body": "first", "received_at": "2026-07-27T00:00:00+00:00"},
+            {"sender": "222", "body": "second", "received_at": "2026-07-27T00:01:00+00:00"},
+            {"sender": "333", "body": "third", "received_at": "2026-07-27T00:02:00+00:00"},
+        ]
+        modem = SimpleNamespace(sms=SimpleNamespace(), ussd=SimpleNamespace(), bus=EventBus(), connected=True)
+        client = await aiohttp_client(create_app(modem))
+        try:
+            resp = await client.get("/sms/messages?limit=2")
+            payload = await resp.json()
+        finally:
+            server.received_messages[:] = previous_messages
+
+        assert resp.status == 200
+        assert payload == [
+            {"sender": "222", "body": "second", "received_at": "2026-07-27T00:01:00+00:00"},
+            {"sender": "333", "body": "third", "received_at": "2026-07-27T00:02:00+00:00"},
+        ]
+
+    async def test_messages_endpoint_uses_safe_default_limit_for_persisted_history(self, aiohttp_client):
+        class FakeSMS:
+            def __init__(self):
+                self.limits = []
+
+            async def list_persisted_messages(self, limit=100):
+                self.limits.append(limit)
+                return []
+
+        fake_sms = FakeSMS()
+        modem = SimpleNamespace(sms=fake_sms, ussd=SimpleNamespace(), bus=EventBus(), connected=True)
+        client = await aiohttp_client(create_app(modem))
+
+        resp = await client.get("/sms/messages")
+
+        assert resp.status == 200
+        assert fake_sms.limits == [50]
+        assert await resp.json() == []
+
+    async def test_messages_endpoint_rejects_invalid_limit_before_reading_persisted_history(self, aiohttp_client):
+        class FakeSMS:
+            def __init__(self):
+                self.limits = []
+
+            async def list_persisted_messages(self, limit=100):
+                self.limits.append(limit)
+                raise AssertionError("invalid limits must not reach persisted history")
+
+        fake_sms = FakeSMS()
+        modem = SimpleNamespace(sms=fake_sms, ussd=SimpleNamespace(), bus=EventBus(), connected=True)
+        client = await aiohttp_client(create_app(modem))
+
+        resp = await client.get("/sms/messages?limit=0")
+
+        assert resp.status == 400
+        assert await resp.json() == {"error": "invalid 'limit'"}
+        assert fake_sms.limits == []
+
+    async def test_messages_endpoint_preserves_sqlite_history_across_app_recreation(self, aiohttp_client, tmp_path):
+        db_path = str(tmp_path / "sms.db")
+        expected_history = [
+            {
+                "sender": "5551234",
+                "body": "saved before restart",
+                "received_at": "2026-07-27T00:00:00+00:00",
+            }
+        ]
+
+        store_before_restart = SMSStore(db_path=db_path)
+        try:
+            await store_before_restart.initialize()
+            await store_before_restart.save(
+                SMS(
+                    sender="5551234",
+                    body="saved before restart",
+                    timestamp=datetime(2026, 7, 27, tzinfo=timezone.utc),
+                    status="unread",
+                )
+            )
+            await store_before_restart.save(
+                SMS(recipient="5556789", body="outbound before restart", status="sent")
+            )
+            sms_before_restart = SMSService(
+                cast(ATCommandExecutor, SimpleNamespace()), EventBus(), store_before_restart
+            )
+            modem_before_restart = SimpleNamespace(
+                sms=sms_before_restart, ussd=SimpleNamespace(), bus=EventBus(), connected=True
+            )
+            client_before_restart = await aiohttp_client(create_app(modem_before_restart))
+            response_before_restart = await client_before_restart.get("/sms/messages")
+
+            assert response_before_restart.status == 200
+            assert await response_before_restart.json() == expected_history
+        finally:
+            await store_before_restart.close()
+
+        store_after_restart = SMSStore(db_path=db_path)
+        try:
+            await store_after_restart.initialize()
+            sms_after_restart = SMSService(
+                cast(ATCommandExecutor, SimpleNamespace()), EventBus(), store_after_restart
+            )
+            modem_after_restart = SimpleNamespace(
+                sms=sms_after_restart, ussd=SimpleNamespace(), bus=EventBus(), connected=True
+            )
+            client_after_restart = await aiohttp_client(create_app(modem_after_restart))
+            response_after_restart = await client_after_restart.get("/sms/messages")
+
+            assert response_after_restart.status == 200
+            assert await response_after_restart.json() == expected_history
+        finally:
+            await store_after_restart.close()
 
 
 class TestDeliveryReportEndpoint:

@@ -5,7 +5,7 @@ import importlib
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 from callstack.sms.types import DeliveryReport, SMS
 
@@ -406,6 +406,12 @@ class SMSStore:
             if status:
                 results = [m for m in results if m.status == status]
             return results[-limit:]
+
+    async def list_incoming(self, limit: int = 100) -> List[SMS]:
+        """List locally persisted inbound SMS history, newest last."""
+        limit = _validate_list_limit(limit)
+        async with self._lock:
+            return [sms for sms in self._messages if sms.is_incoming][-limit:]
 
     async def delete(self, id: int) -> bool:
         """Delete a message by internal ID."""

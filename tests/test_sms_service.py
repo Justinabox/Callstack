@@ -638,6 +638,7 @@ async def test_receive_cmt(sms_service, bus, store):
     # The re-emitted enriched event (empty raw, populated body)
     enriched = [e for e in all_events if e.body == "Direct message" and not e.raw]
     assert len(enriched) >= 1
+    assert enriched[0].persisted is True
     assert await store.count() == 1
 
 
@@ -666,6 +667,7 @@ async def test_receive_cmt_store_failure_still_emits_event(executor, bus, caplog
     assert len(received) == 1
     assert received[0].sender == sender
     assert received[0].body == body
+    assert received[0].persisted is False
     assert "RuntimeError" in caplog.text
     assert sender not in caplog.text
     assert body not in caplog.text
@@ -821,6 +823,14 @@ async def test_receive_cmt_info_log_redacts_sender_number(sms_service, bus, capl
 
 
 # -- Message Management --
+
+async def test_list_persisted_messages_returns_only_local_inbound_history(sms_service, store):
+    """Durable history stays distinct from SIM listing and excludes outbound SMS."""
+    inbound = await store.save(SMS(sender="5551234", body="received", status="unread"))
+    await store.save(SMS(recipient="5556789", body="sent", status="sent"))
+
+    assert await sms_service.list_persisted_messages(limit=1) == [inbound]
+
 
 async def test_list_messages(sms_service, transport):
     """List messages from SIM."""

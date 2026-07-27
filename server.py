@@ -8,8 +8,9 @@ import secrets
 import time
 from collections import defaultdict
 from contextlib import suppress
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable, cast
 
 import aiohttp
 from aiohttp import web
@@ -221,6 +222,39 @@ def _delivery_report_payload(report: Any) -> dict[str, Any]:
     }
 
 
+def _received_sms_payload(sms: Any) -> dict[str, Any]:
+    """Serialize durable inbound history in the legacy received-message shape."""
+    if isinstance(sms, dict):
+        return {
+            "sender": sms.get("sender", ""),
+            "body": sms.get("body", ""),
+            "received_at": sms.get("received_at"),
+        }
+    timestamp = getattr(sms, "timestamp", None)
+    return {
+        "sender": getattr(sms, "sender", ""),
+        "body": getattr(sms, "body", ""),
+        "received_at": timestamp.isoformat() if timestamp else None,
+    }
+
+
+def _received_sms_sort_key(message: dict[str, Any]) -> datetime:
+    """Return an aware UTC ordering key without rejecting legacy bad timestamps."""
+    timestamp = message.get("received_at")
+    if not isinstance(timestamp, str):
+        return datetime.min.replace(tzinfo=timezone.utc)
+    try:
+        received_at = datetime.fromisoformat(timestamp)
+    except (TypeError, ValueError):
+        return datetime.min.replace(tzinfo=timezone.utc)
+    if received_at.tzinfo is None:
+        return received_at.replace(tzinfo=timezone.utc)
+    try:
+        return received_at.astimezone(timezone.utc)
+    except OverflowError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
 def _is_sms_body_encoding_error(exc: SMSSendError) -> bool:
     return "SMS body cannot be encoded" in exc.detail
 
@@ -400,7 +434,26 @@ def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Applicati
         return web.json_response({"status": "subscribed", "url": url})
 
     async def list_messages(request: web.Request) -> web.Response:
-        return web.json_response(received_messages)
+        limit, error = _bounded_query_limit(request)
+        if error is not None:
+            return error
+        assert limit is not None
+        list_persisted_messages = cast(
+            Callable[..., Awaitable[list[Any]]] | None,
+            getattr(modem.sms, "list_persisted_messages", None),
+        )
+        if callable(list_persisted_messages):
+            messages = await list_persisted_messages(limit=limit)
+            persisted_messages = [
+                _received_sms_payload(message)
+                for message in messages
+                if getattr(message, "is_incoming", bool(getattr(message, "sender", "")))
+            ]
+            fallback_messages = [_received_sms_payload(message) for message in received_messages]
+            history = persisted_messages + fallback_messages
+            history.sort(key=_received_sms_sort_key)
+            return web.json_response(history[-limit:])
+        return web.json_response([_received_sms_payload(message) for message in received_messages[-limit:]])
 
     async def list_delivery_reports(request: web.Request) -> web.Response:
         limit, error = _bounded_query_limit(request)
@@ -491,11 +544,15 @@ async def run_server(
 
         # -- SMS handling: store + forward to webhooks --
         async def on_sms(event: IncomingSMSEvent) -> None:
-            received_messages.append({
-                "sender": event.sender,
-                "body": event.body,
-                "received_at": event.timestamp.isoformat(),
-            })
+            if (
+                not callable(getattr(modem.sms, "list_persisted_messages", None))
+                or not event.persisted
+            ):
+                received_messages.append({
+                    "sender": event.sender,
+                    "body": event.body,
+                    "received_at": event.timestamp.isoformat(),
+                })
             await notify_webhooks(event.sender, event.body)
 
         modem.sms.on_message(on_sms)
