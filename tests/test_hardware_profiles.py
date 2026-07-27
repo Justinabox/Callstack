@@ -187,6 +187,38 @@ class TestClassifyCapabilities:
         assert values["pcm_audio"] == "unknown"
         assert values["gnss"] == "unknown"
 
+    @pytest.mark.parametrize("model", ["M95", "M66"])
+    def test_supported_quectel_full_model_identities_keep_conservative_sms_ussd_profile(self, model):
+        # M95/M66 carry their numeric family inline, so with no "Quectel" vendor text to
+        # match on, they can only be classified via the full-model list (not the vendor-text
+        # or two-letter prefix path). They must still retain the same conservative
+        # SMS/USSD-supported, voice/DTMF/PCM/GNSS-unknown profile as Quectel modems matched
+        # by vendor text.
+        identity = ModemIdentity(manufacturer="", model=model)
+
+        capabilities = classify_capabilities(identity)
+
+        values = asdict(capabilities)
+        for name in QUECTEL_SMS_USSD_CAPABILITIES:
+            assert values[name] == "supported"
+        assert values["voice_calls"] == "unknown"
+        assert values["dtmf_send"] == "unknown"
+        assert values["pcm_audio"] == "unknown"
+        assert values["gnss"] == "unknown"
+
+    def test_non_quectel_model_sharing_a_broad_prefix_stays_unknown(self):
+        identity = ModemIdentity(manufacturer="EconetDevices", model="ECONET-1")
+
+        capabilities = classify_capabilities(identity)
+        notes = profile_notes(identity)
+
+        assert set(asdict(capabilities).values()) == {"unknown"}
+        # A bare "unknown" match is not enough: the Quectel-matched notes also contain the
+        # word "unknown" (e.g. "...remain unknown until..."). Assert the phrase unique to the
+        # unknown-identity path so a false-positive Quectel match could not satisfy this test.
+        assert any("unknown modem identity" in note.lower() for note in notes)
+        assert not any("quectel" in note.lower() for note in notes)
+
     def test_unknown_identity_returns_all_unknown_capabilities_and_actionable_note(self):
         identity = ModemIdentity(manufacturer="MysteryVendor", model="MysteryBox")
 
