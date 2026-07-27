@@ -81,7 +81,11 @@ class AudioPipeline:
             raise AudioPipelineError(
                 "Audio pipeline is not running; start audio before recording"
             )
-        if not math.isfinite(max_duration) or max_duration <= 0:
+        if (
+            type(max_duration) is bool
+            or not math.isfinite(max_duration)
+            or max_duration <= 0
+        ):
             raise AudioPipelineError("max_duration must be positive and finite")
 
         stop = asyncio.Event()
