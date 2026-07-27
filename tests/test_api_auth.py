@@ -209,6 +209,16 @@ class TestRateLimiting:
 
 
 class TestServerPrivacyLogging:
+    def test_incoming_call_log_redacts_session_number(self, caplog):
+        raw_session_number = "privacy-sentinel-0123456789"
+
+        with caplog.at_level(logging.INFO, logger="server"):
+            server.log_incoming_call(raw_session_number)
+
+        assert "Incoming call from ***6789 — playing greeting" in caplog.text
+        assert raw_session_number not in caplog.text
+        assert "privacy-sentinel-01234" not in caplog.text
+
     async def test_webhook_failure_log_redacts_url_and_exception_details(self, monkeypatch, caplog):
         raw_url = "https://hooks.example.test/tenant/secret-token?api_key=super-secret&phone=15551234567"
         webhook_urls_before = list(server.webhook_urls)
