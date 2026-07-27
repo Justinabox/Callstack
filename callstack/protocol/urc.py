@@ -124,7 +124,7 @@ class URCDispatcher:
                 storage, index = parsed
                 await self._bus.emit(_RawDeliveryReport(storage=storage, index=index))
             else:
-                logger.warning("Could not parse delivery report: %s", line)
+                logger.warning("Could not parse delivery report")
 
         elif line.startswith("+CUSD:"):
             parsed = ATResponseParser.parse_cusd(line)
@@ -151,6 +151,8 @@ class URCDispatcher:
     @staticmethod
     def _log_safe_urc(line: str) -> str:
         """Return a URC summary safe for diagnostic logs."""
+        if line.startswith("+CDSI:"):
+            return "+CDSI:<redacted>"
         if line.startswith("+CUSD:"):
             return "+CUSD:<redacted>"
         if line.startswith(("+CMT:", "+CMTI:")):

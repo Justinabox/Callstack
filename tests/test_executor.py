@@ -451,6 +451,22 @@ async def test_cmt_urc_during_command_debug_logs_redact_sender_and_body(
     assert "+CMT:<redacted>" in caplog.text
 
 
+async def test_malformed_cdsi_urc_during_command_debug_log_redacts_payload(
+    executor, transport, caplog
+):
+    """Malformed +CDSI URCs during commands must not expose modem payloads."""
+    raw_line = '+CDSI: "SM",7,"privacy-sentinel-private-modem-payload"'
+
+    transport.feed(raw_line, "OK")
+    with caplog.at_level(logging.DEBUG, logger="callstack.executor"):
+        resp = await executor.execute("AT")
+
+    assert resp.success is True
+    assert "RX: +CDSI:<redacted>" in caplog.text
+    assert raw_line not in caplog.text
+    assert "privacy-sentinel-private-modem-payload" not in caplog.text
+
+
 async def test_multiline_cmt_during_command_does_not_log_or_return_body_tail(
     executor, transport, caplog
 ):

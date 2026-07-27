@@ -62,6 +62,16 @@ class TestCDSIDispatch:
             assert event.storage == "SM"
             assert event.index == 5
 
+    async def test_malformed_cdsi_warning_redacts_raw_payload(self, urc, caplog):
+        raw_line = '+CDSI: "SM",7,"privacy-sentinel-private-modem-payload"'
+
+        with caplog.at_level(logging.DEBUG, logger="callstack.urc"):
+            await urc.dispatch(raw_line)
+
+        assert "Could not parse delivery report" in caplog.text
+        assert raw_line not in caplog.text
+        assert "privacy-sentinel-private-modem-payload" not in caplog.text
+
 
 class TestDeliveryReportService:
     async def test_parsed_delivery_report_is_saved_before_event_emission(self, bus, urc):
