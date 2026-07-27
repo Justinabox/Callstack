@@ -66,6 +66,11 @@ class _FilteredStream:
         self._stream = stream
         self._filter = filter_sender
 
+    @property
+    def dropped(self) -> int:
+        """Count of inbound events dropped before this stream could consume them."""
+        return self._stream.dropped
+
     def __aiter__(self):
         return self
 

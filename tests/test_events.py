@@ -2,7 +2,7 @@
 
 import asyncio
 import pytest
-from callstack.events.bus import EventBus
+from callstack.events.bus import DEFAULT_STREAM_MAXSIZE, EventBus
 from callstack.events.types import (
     DTMFEvent,
     RingEvent,
@@ -104,6 +104,32 @@ async def test_stream_cleanup(bus):
     assert len(bus._queues[DTMFEvent]) == 0
 
 
+async def test_stream_cleanup_after_task_cancellation(bus):
+    opened = asyncio.Event()
+
+    async def hold_stream():
+        async with bus.stream(DTMFEvent):
+            opened.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(hold_stream())
+    await opened.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(bus._queues[DTMFEvent]) == 0
+
+
+async def test_stream_cleanup_after_context_exception(bus):
+    with pytest.raises(RuntimeError, match="stream failure"):
+        async with bus.stream(DTMFEvent):
+            raise RuntimeError("stream failure")
+
+    assert len(bus._queues[DTMFEvent]) == 0
+
+
 async def test_multiple_subscribers(bus):
     results = {"a": [], "b": []}
 
@@ -197,3 +223,34 @@ async def test_event_frozen():
 async def test_event_has_timestamp():
     event = RingEvent()
     assert event.timestamp is not None
+
+
+async def test_stream_uses_finite_default_maxsize(bus):
+    """Default stream queue must be bounded, not unlimited (0)."""
+    async with bus.stream(DTMFEvent) as stream:
+        queue = bus._queues[DTMFEvent][0]
+        assert queue.maxsize == DEFAULT_STREAM_MAXSIZE
+
+
+@pytest.mark.parametrize("bad_maxsize", [True, False, 0, -1, 1.5, "5"])
+async def test_stream_rejects_invalid_maxsize(bus, bad_maxsize):
+    with pytest.raises(ValueError):
+        async with bus.stream(DTMFEvent, maxsize=bad_maxsize):
+            pass
+
+    assert len(bus._queues[DTMFEvent]) == 0
+
+
+async def test_emit_drops_oldest_when_queue_full(bus):
+    """emit() must never block: when full, drop the oldest queued event."""
+    async with bus.stream(DTMFEvent, maxsize=2) as stream:
+        await asyncio.wait_for(bus.emit(DTMFEvent(digit="1")), timeout=0.1)
+        await asyncio.wait_for(bus.emit(DTMFEvent(digit="2")), timeout=0.1)
+        await asyncio.wait_for(bus.emit(DTMFEvent(digit="3")), timeout=0.1)
+
+        e1 = await stream.next(timeout=0.1)
+        e2 = await stream.next(timeout=0.1)
+
+        assert e1.digit == "2"
+        assert e2.digit == "3"
+        assert stream.dropped == 1
