@@ -641,6 +641,37 @@ async def test_receive_cmt(sms_service, bus, store):
     assert await store.count() == 1
 
 
+async def test_receive_cmt_store_failure_still_emits_event(executor, bus, caplog):
+    """Direct +CMT delivery still emits IncomingSMSEvent when durable store save fails."""
+    service = SMSService(executor, bus, FailingSMSStore())
+    sender = "+155****9876"
+    body = "private code 123456"
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+
+    with caplog.at_level(logging.WARNING, logger="callstack.sms"):
+        await service._on_incoming(
+            _RawSMSNotification(
+                sender=sender,
+                body=body,
+                raw=f'+CMT: "{sender}","","24/12/25,14:30:00+04"',
+            )
+        )
+        await asyncio.sleep(0.01)
+
+    assert len(received) == 1
+    assert received[0].sender == sender
+    assert received[0].body == body
+    assert "RuntimeError" in caplog.text
+    assert sender not in caplog.text
+    assert body not in caplog.text
+    assert "simulated durable store failure" not in caplog.text
+
+
 async def test_executor_direct_cmt_preserves_multiline_body(
     executor, transport, bus, store
 ):
