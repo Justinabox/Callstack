@@ -257,6 +257,16 @@ async def test_clear(store):
     assert await store.count() == 0
 
 
+async def test_clear_also_clears_delivery_reports(store):
+    await store.save(SMS(body="one"))
+    await store.save_delivery_report(DeliveryReport(reference=1, status="delivered"))
+
+    await store.clear()
+
+    assert await store.count() == 0
+    assert await store.list_delivery_reports() == []
+
+
 async def test_sqlite_initialize_is_idempotent(tmp_path):
     pytest.importorskip("aiosqlite")
     store = SMSStore(db_path=str(tmp_path / "sms.db"))
@@ -663,6 +673,253 @@ async def test_sqlite_clear_after_close_discards_pending_saves(tmp_path):
 
         assert await store.count() == 0
         assert await store.list() == []
+    finally:
+        await store.close()
+
+
+async def test_sqlite_clear_while_open_also_clears_delivery_reports(tmp_path):
+    pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await store.initialize()
+        await store.save(SMS(body="persisted while open"))
+        await store.save_delivery_report(DeliveryReport(reference=1, status="delivered"))
+
+        await store.clear()
+        await store.close()
+        await store.initialize()
+
+        assert await store.count() == 0
+        assert await store.list_delivery_reports() == []
+    finally:
+        await store.close()
+
+
+async def test_sqlite_clear_after_close_deletes_persisted_and_pending_delivery_reports(tmp_path):
+    pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await store.initialize()
+        await store.save_delivery_report(DeliveryReport(reference=1, status="delivered"))
+        await store.close()
+        await store.save_delivery_report(DeliveryReport(reference=2, status="failed"))
+
+        await store.clear()
+        await store.initialize()
+
+        assert await store.list_delivery_reports() == []
+    finally:
+        await store.close()
+
+
+async def test_sqlite_clear_before_first_initialize_discards_pending_delivery_report(tmp_path):
+    pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await store.save_delivery_report(DeliveryReport(reference=1, status="delivered"))
+
+        await store.clear()
+        await store.initialize()
+
+        assert await store.list_delivery_reports() == []
+    finally:
+        await store.close()
+
+
+async def test_sqlite_clear_while_open_preserves_state_when_durable_delete_fails(tmp_path, monkeypatch):
+    pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await store.initialize()
+        saved = await store.save(SMS(body="keep on failed clear", status="unread"))
+        report = await store.save_delivery_report(
+            DeliveryReport(reference=1, status="delivered")
+        )
+
+        real_execute = store._db.execute
+
+        async def failing_execute(sql, *args, **kwargs):
+            if sql.strip().upper().startswith("DELETE"):
+                raise OSError("database locked")
+            return await real_execute(sql, *args, **kwargs)
+
+        monkeypatch.setattr(store._db, "execute", failing_execute)
+
+        with pytest.raises(OSError, match="database locked"):
+            await store.clear()
+
+        assert await store.count() == 1
+        assert await store.get(saved.id) is saved
+        assert await store.list_delivery_reports() == [report]
+    finally:
+        await store.close()
+
+
+async def test_sqlite_clear_while_open_rolls_back_and_preserves_state_on_cancellation(tmp_path, monkeypatch):
+    pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await store.initialize()
+        saved = await store.save(SMS(body="keep on cancelled clear", status="unread"))
+        report = await store.save_delivery_report(
+            DeliveryReport(reference=1, status="delivered")
+        )
+
+        real_execute = store._db.execute
+        real_rollback = store._db.rollback
+        rollback_calls = []
+
+        async def cancelling_execute(sql, *args, **kwargs):
+            if sql.strip().upper().startswith("DELETE"):
+                raise asyncio.CancelledError()
+            return await real_execute(sql, *args, **kwargs)
+
+        async def tracking_rollback(*args, **kwargs):
+            rollback_calls.append(True)
+            return await real_rollback(*args, **kwargs)
+
+        monkeypatch.setattr(store._db, "execute", cancelling_execute)
+        monkeypatch.setattr(store._db, "rollback", tracking_rollback)
+
+        with pytest.raises(asyncio.CancelledError):
+            await store.clear()
+
+        assert rollback_calls == [True]
+        assert await store.count() == 1
+        assert await store.get(saved.id) is saved
+        assert await store.list_delivery_reports() == [report]
+    finally:
+        await store.close()
+
+
+async def test_sqlite_clear_while_open_clears_memory_when_commit_then_cancels(tmp_path, monkeypatch):
+    pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await store.initialize()
+        await store.save(SMS(body="erased before cancellation", status="unread"))
+        await store.save_delivery_report(DeliveryReport(reference=1, status="delivered"))
+
+        real_commit = store._db.commit
+
+        async def commit_then_cancel():
+            await real_commit()
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(store._db, "commit", commit_then_cancel)
+
+        with pytest.raises(asyncio.CancelledError):
+            await store.clear()
+
+        assert store._messages == []
+        assert store._delivery_reports == []
+    finally:
+        await store.close()
+
+
+async def test_sqlite_clear_after_close_rolls_back_before_closing_on_failure(tmp_path, monkeypatch):
+    aiosqlite = pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await store.initialize()
+        saved = await store.save(SMS(body="keep on failed closed clear", status="unread"))
+        report = await store.save_delivery_report(
+            DeliveryReport(reference=1, status="delivered")
+        )
+        await store.close()
+
+        calls = []
+
+        class FailingConnection:
+            async def execute(self, sql, *_args, **_kwargs):
+                if sql.strip().upper().startswith("DELETE"):
+                    raise OSError("database locked")
+                return None
+
+            async def rollback(self):
+                calls.append("rollback")
+
+            async def commit(self):
+                raise AssertionError("commit should not run after failed delete")
+
+            async def close(self):
+                calls.append("close")
+
+        async def failing_connect(*_args, **_kwargs):
+            return FailingConnection()
+
+        monkeypatch.setattr(aiosqlite, "connect", failing_connect)
+
+        with pytest.raises(OSError, match="database locked"):
+            await store.clear()
+
+        assert calls == ["rollback", "close"]
+        assert await store.count() == 1
+        assert await store.get(saved.id) is saved
+        assert await store.list_delivery_reports() == [report]
+    finally:
+        await store.close()
+
+
+async def test_sqlite_clear_after_close_fails_closed_without_aiosqlite(tmp_path, monkeypatch):
+    pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await store.initialize()
+        saved = await store.save(SMS(body="keep without aiosqlite", status="unread"))
+        report = await store.save_delivery_report(
+            DeliveryReport(reference=1, status="delivered")
+        )
+        await store.close()
+
+        real_import_module = sms_store_module.importlib.import_module
+
+        def import_without_aiosqlite(name, *args, **kwargs):
+            if name == "aiosqlite":
+                raise ImportError("aiosqlite unavailable")
+            return real_import_module(name, *args, **kwargs)
+
+        monkeypatch.setattr(sms_store_module.importlib, "import_module", import_without_aiosqlite)
+
+        with pytest.raises(RuntimeError, match="aiosqlite"):
+            await store.clear()
+
+        assert await store.count() == 1
+        assert await store.get(saved.id) is saved
+        assert await store.list_delivery_reports() == [report]
+    finally:
+        await store.close()
+
+
+async def test_sqlite_clear_after_close_clears_memory_when_close_fails_after_commit(tmp_path, monkeypatch):
+    aiosqlite = pytest.importorskip("aiosqlite")
+    store = SMSStore(db_path=str(tmp_path / "sms.db"))
+    try:
+        await store.initialize()
+        await store.save(SMS(body="erased durably before close fails", status="unread"))
+        await store.save_delivery_report(DeliveryReport(reference=1, status="delivered"))
+        await store.close()
+
+        class ClosingFailsConnection:
+            async def execute(self, *_args, **_kwargs):
+                return None
+
+            async def commit(self):
+                return None
+
+            async def close(self):
+                raise OSError("close failed")
+
+        async def closing_fails_connect(*_args, **_kwargs):
+            return ClosingFailsConnection()
+
+        monkeypatch.setattr(aiosqlite, "connect", closing_fails_connect)
+
+        with pytest.raises(OSError, match="close failed"):
+            await store.clear()
+
+        assert store._messages == []
+        assert store._delivery_reports == []
     finally:
         await store.close()
 

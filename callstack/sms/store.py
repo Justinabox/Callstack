@@ -456,24 +456,83 @@ class SMSStore:
             return len(self._messages)
 
     async def clear(self) -> None:
-        """Delete all messages."""
+        """Delete all messages and delivery reports.
+
+        This is a full-store erase: it clears in-memory messages and
+        delivery reports along with both pending save collections, and
+        durably deletes both the messages and delivery_reports tables
+        when SQLite-backed. Durable work happens first; in-memory state
+        is only cleared after it commits successfully. If a durable
+        delete fails, the original error is propagated (after a best-
+        effort rollback) and all live/pending state is left untouched.
+        If a closed persistent store cannot import aiosqlite, this raises
+        RuntimeError instead of silently succeeding.
+        """
         async with self._lock:
-            self._messages.clear()
-            self._pending_saves.clear()
             if self._db is not None:
-                await self._db.execute("DELETE FROM messages")
-                await self._db.commit()
+                try:
+                    await self._db.execute("DELETE FROM messages")
+                    await self._db.execute("DELETE FROM delivery_reports")
+                except BaseException:
+                    try:
+                        await self._db.rollback()
+                    except BaseException:
+                        pass
+                    raise
+                try:
+                    await self._db.commit()
+                except asyncio.CancelledError:
+                    # A cancellation from commit() can arrive after SQLite has
+                    # durably applied the transaction; do not retain stale PII.
+                    self._messages.clear()
+                    self._delivery_reports.clear()
+                    self._pending_saves.clear()
+                    self._pending_delivery_reports.clear()
+                    raise
+                except BaseException:
+                    try:
+                        await self._db.rollback()
+                    except BaseException:
+                        pass
+                    raise
             elif self._db_path is not None:
                 try:
                     aiosqlite = importlib.import_module("aiosqlite")
-                except ImportError:
-                    logger.warning("aiosqlite not installed; SMS persistence disabled")
-                    return
+                except ImportError as exc:
+                    raise RuntimeError(
+                        "aiosqlite not installed; cannot clear persistent SMS store"
+                    ) from exc
 
                 db = await aiosqlite.connect(self._db_path)
                 try:
-                    await db.execute(_CREATE_TABLE)
-                    await db.execute("DELETE FROM messages")
-                    await db.commit()
-                finally:
+                    try:
+                        await db.execute(_CREATE_TABLE)
+                        await db.execute(_CREATE_DELIVERY_REPORTS_TABLE)
+                        await db.execute("DELETE FROM messages")
+                        await db.execute("DELETE FROM delivery_reports")
+                        await db.commit()
+                    except BaseException:
+                        try:
+                            await db.rollback()
+                        except BaseException:
+                            pass
+                        raise
+                except BaseException:
+                    try:
+                        await db.close()
+                    except BaseException:
+                        pass
+                    raise
+                else:
+                    # Durable delete already committed at this point, so memory
+                    # must reflect that even if close() raises below.
+                    self._messages.clear()
+                    self._delivery_reports.clear()
+                    self._pending_saves.clear()
+                    self._pending_delivery_reports.clear()
                     await db.close()
+
+            self._messages.clear()
+            self._delivery_reports.clear()
+            self._pending_saves.clear()
+            self._pending_delivery_reports.clear()
