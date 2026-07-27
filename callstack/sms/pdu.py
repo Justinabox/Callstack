@@ -88,6 +88,41 @@ def _pack_gsm7_with_udh(udh: bytes, payload_septets: list[int]) -> tuple[bytes, 
     return bytes(payload), header_septets + len(payload_septets)
 
 
+def _is_valid_udh(udh: bytes) -> bool:
+    """Return whether an exact UDH byte sequence has well-formed IEs."""
+    if not udh or len(udh) != udh[0] + 1:
+        return False
+
+    end = len(udh)
+    pos = 1
+    while pos < end:
+        if pos + 2 > end:
+            return False
+        ie_len = udh[pos + 1]
+        pos += 2
+        if pos + ie_len > end:
+            return False
+        pos += ie_len
+    return True
+
+
+def _has_malformed_concatenation_udh(udh: bytes) -> bool:
+    """Return whether a structurally valid UDH has an invalid concat IE."""
+    pos = 1
+    while pos < len(udh):
+        iei = udh[pos]
+        ie_len = udh[pos + 1]
+        ie_data = udh[pos + 2:pos + 2 + ie_len]
+        if iei == 0x00:
+            if ie_len != 3 or not ie_data[1] or not 1 <= ie_data[2] <= ie_data[1]:
+                return True
+        elif iei == 0x08:
+            if ie_len != 4 or not ie_data[2] or not 1 <= ie_data[3] <= ie_data[2]:
+                return True
+        pos += 2 + ie_len
+    return False
+
+
 def _validate_sms_recipient(recipient: str) -> str:
     """Validate a PDU-mode SMS destination address before semi-octet encoding."""
     if not isinstance(recipient, str) or not _SMS_RECIPIENT_RE.fullmatch(recipient):
@@ -392,19 +427,24 @@ class PDUDecoder:
         return None
 
     @staticmethod
-    def decode_gsm7(data: bytes, septet_count: int) -> str:
-        """Decode GSM 7-bit packed data back to text."""
-        septets = []
-        bits = 0
-        byte_val = 0
+    def decode_gsm7(data: bytes, septet_count: int, *, bit_offset: int = 0) -> str:
+        """Decode GSM 7-bit packed data back to text from a bit offset."""
+        if (
+            bit_offset < 0
+            or septet_count < 0
+            or bit_offset + (septet_count * 7) > len(data) * 8
+        ):
+            raise ValueError("GSM-7 septet range exceeds available user-data bits")
 
-        for b in data:
-            byte_val |= (b << bits)
-            bits += 8
-            while bits >= 7 and len(septets) < septet_count:
-                septets.append(byte_val & 0x7F)
-                byte_val >>= 7
-                bits -= 7
+        septets = []
+        for index in range(septet_count):
+            septet = 0
+            current_bit = bit_offset + (index * 7)
+            for shift in range(7):
+                target_bit = current_bit + shift
+                if data[target_bit // 8] & (1 << (target_bit % 8)):
+                    septet |= 1 << shift
+            septets.append(septet)
 
         decoded = []
         idx = 0
@@ -464,7 +504,9 @@ class PDUDecoder:
     def decode_deliver_pdu(pdu_hex: str) -> Optional[dict]:
         """Decode an SMS-DELIVER PDU.
 
-        Returns dict with keys: sender, body, timestamp, or None on failure.
+        Returns a dict with sender, body, and timestamp. Valid GSM-7 UDHI
+        concatenation headers additionally produce multipart metadata; returns
+        None on failure.
         """
         try:
             pos = 0
@@ -524,6 +566,7 @@ class PDUDecoder:
             udl = int(pdu_hex[pos:pos + 2], 16)
             pos += 2
             ud_hex = pdu_hex[pos:]
+            multipart: Optional[MultipartInfo] = None
 
             # Decode based on DCS
             if (dcs & 0x0C) == 0x08:
@@ -544,13 +587,38 @@ class PDUDecoder:
                 ud_hex_len = ud_octets * 2
                 if len(ud_hex) != ud_hex_len:
                     return None
-                body = PDUDecoder.decode_gsm7(bytes.fromhex(ud_hex[:ud_hex_len]), udl)
+                user_data = bytes.fromhex(ud_hex[:ud_hex_len])
+                if pdu_type & 0x40:  # TP-UDHI
+                    if not user_data:
+                        return None
+                    udh_octets = user_data[0] + 1
+                    if udh_octets > len(user_data):
+                        return None
+                    udh = user_data[:udh_octets]
+                    if not _is_valid_udh(udh):
+                        return None
+                    if _has_malformed_concatenation_udh(udh):
+                        return None
+                    header_septets = (udh_octets * 8 + 6) // 7
+                    if header_septets > udl:
+                        return None
+                    body = PDUDecoder.decode_gsm7(
+                        user_data,
+                        udl - header_septets,
+                        bit_offset=header_septets * 7,
+                    )
+                    multipart = PDUDecoder.parse_concatenation_udh(udh)
+                else:
+                    body = PDUDecoder.decode_gsm7(user_data, udl)
 
-            return {
+            decoded = {
                 "sender": sender,
                 "body": body,
                 "timestamp": timestamp,
             }
+            if multipart is not None:
+                decoded["multipart"] = multipart
+            return decoded
 
         except (ValueError, IndexError):
             return None
