@@ -68,8 +68,8 @@ class URCDispatcher:
         try:
             self._dispatch_to_capture_hooks(line)
             await self._dispatch_event(line, followup)
-        except Exception as exc:
-            logger.exception("Error dispatching URC '%s': %s", line, exc)
+        except Exception:
+            logger.error("Error dispatching URC '%s'", self._log_safe_urc(line))
 
     def _dispatch_to_capture_hooks(self, line: str) -> None:
         """Check capture hooks and collect matching lines."""
@@ -153,7 +153,7 @@ class URCDispatcher:
         """Return a URC summary safe for diagnostic logs."""
         if line.startswith("+CUSD:"):
             return "+CUSD:<redacted>"
-        if line.startswith(("+CMT:", "+CMTI:")):
+        if line.startswith(("+CMT:", "+CMTI:", "+CDSI:")):
             return f"{line.split(':', 1)[0]}:<redacted>"
         if line.startswith(("+CREG:", "+CGREG:", "+CEREG:")):
             family = line.split(":", 1)[0]
