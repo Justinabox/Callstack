@@ -56,7 +56,10 @@ def _plus_two_serial_sibling(at_port: str, candidate_ports: Sequence[str]) -> st
         return None
     prefix, suffix = match.groups()
     candidate = f"{prefix}{int(suffix) + 2:0{len(suffix)}d}"
-    return candidate if candidate in candidate_ports else None
+    # A bare string is one candidate path, not a container to search by substring:
+    # comma-separated/composite strings must never match unless passed as a real sequence.
+    ports = (candidate_ports,) if isinstance(candidate_ports, str) else candidate_ports
+    return candidate if candidate in ports else None
 
 
 def _has_quectel_family_prefix(model: str) -> bool:
