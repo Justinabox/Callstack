@@ -790,6 +790,37 @@ def test_doctor_scan_rejects_explicit_ports_before_any_probe(monkeypatch, capsys
     assert "Traceback" not in captured.err
 
 
+def test_doctor_json_preserves_profile_audio_hint_without_auto_configuring_preview(monkeypatch, capsys):
+    import callstack.cli as cli
+
+    report = ModemDiscoveryReport(
+        at_port="/dev/ttyUSB2",
+        audio_port=None,
+        audio_hint=AudioPortHint(
+            port="/dev/ttyUSB4",
+            confidence="profile-hint",
+            reason="SIM7600 profile suggests a sibling serial port; audio role is not probe-verified.",
+        ),
+    )
+
+    async def fake_probe(_ports, **_kwargs):
+        return report
+
+    monkeypatch.setattr(cli, "probe_modem_ports", fake_probe)
+
+    code = cli.main(["doctor", "--ports", "/dev/ttyUSB2", "--json"])
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["audio_port"] is None
+    assert payload["audio_hint"] == {
+        "port": "/dev/ttyUSB4",
+        "confidence": "profile-hint",
+        "reason": "SIM7600 profile suggests a sibling serial port; audio role is not probe-verified.",
+    }
+    assert payload["config_preview"]["CALLSTACK_AUDIO_PORT"] is None
+
+
 def test_doctor_json_marks_explicit_audio_port_as_configured_without_claiming_probe_verification(
     monkeypatch, capsys
 ):

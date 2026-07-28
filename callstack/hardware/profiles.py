@@ -1,8 +1,12 @@
 """Pure modem capability profile classification helpers.
 
-The helpers in this module classify already-known identity strings. They do not
-probe hardware, open serial ports, or execute AT commands.
+The helpers in this module classify already-known identity strings and explicit,
+already-enumerated serial-path metadata. They do not probe hardware, open serial
+ports, or execute AT commands.
 """
+
+import re
+from collections.abc import Sequence
 
 from callstack.hardware.discovery import AudioPortHint, ModemCapabilities, ModemIdentity
 
@@ -38,6 +42,21 @@ def _identity_text(identity: ModemIdentity) -> str:
 def _looks_like_simcom(identity: ModemIdentity) -> bool:
     text = _identity_text(identity)
     return "SIMCOM" in text or "SIM7600" in text or "SIM868" in text
+
+
+def _is_sim7600_model(identity: ModemIdentity) -> bool:
+    """Require explicit SIM7600 model evidence, not a generic SIMCom match."""
+    return bool(re.search(r"(?:^|[^A-Z0-9])SIM7600(?:[A-Z0-9]|$)", identity.model.strip().upper()))
+
+
+def _plus_two_serial_sibling(at_port: str, candidate_ports: Sequence[str]) -> str | None:
+    """Return an already-enumerated ``+2`` sibling without touching the host."""
+    match = re.fullmatch(r"(.+?)(\d+)", at_port)
+    if not match:
+        return None
+    prefix, suffix = match.groups()
+    candidate = f"{prefix}{int(suffix) + 2:0{len(suffix)}d}"
+    return candidate if candidate in candidate_ports else None
 
 
 def _has_quectel_family_prefix(model: str) -> bool:
@@ -81,8 +100,24 @@ def classify_capabilities(identity: ModemIdentity) -> ModemCapabilities:
     return ModemCapabilities()
 
 
-def audio_port_hint_for_identity(identity: ModemIdentity) -> AudioPortHint:
+def audio_port_hint_for_identity(
+    identity: ModemIdentity,
+    *,
+    at_port: str = "",
+    candidate_ports: Sequence[str] = (),
+) -> AudioPortHint:
     """Return a conservative public-safe audio-port hint for an identity."""
+
+    sibling_port = _plus_two_serial_sibling(at_port, candidate_ports) if _is_sim7600_model(identity) else None
+    if sibling_port:
+        return AudioPortHint(
+            port=sibling_port,
+            confidence="profile-hint",
+            reason=(
+                "SIM7600 profile matched an already-enumerated +2 serial sibling; "
+                "the audio role is unverified, so configure CALLSTACK_AUDIO_PORT manually after hardware validation."
+            ),
+        )
 
     if _looks_like_simcom(identity):
         return AudioPortHint(

@@ -209,10 +209,16 @@ def _sibling_serial_audio_hint() -> AudioPortHint:
     )
 
 
-def _audio_hint(identity: ModemIdentity, configured_audio_port: str | None) -> AudioPortHint:
+def _audio_hint(
+    identity: ModemIdentity,
+    configured_audio_port: str | None,
+    *,
+    at_port: str = "",
+    candidate_ports: Sequence[str] = (),
+) -> AudioPortHint:
     if configured_audio_port:
         return _configured_audio_hint(configured_audio_port)
-    return audio_port_hint_for_identity(identity)
+    return audio_port_hint_for_identity(identity, at_port=at_port, candidate_ports=candidate_ports)
 
 
 def _has_serial_siblings(candidate_ports: Sequence[str], at_port: str) -> bool:
@@ -294,7 +300,12 @@ async def probe_modem_ports(
         report = ModemDiscoveryReport(
             at_port=port,
             audio_port=configured_audio_port,
-            audio_hint=_audio_hint(identity, configured_audio_port),
+            audio_hint=_audio_hint(
+                identity,
+                configured_audio_port,
+                at_port=port,
+                candidate_ports=candidate_ports,
+            ),
             identity=identity,
             capabilities=capabilities,
             confidence=confidence,

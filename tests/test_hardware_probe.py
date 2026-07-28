@@ -413,3 +413,58 @@ async def test_discover_modems_scan_note_reflects_profile_audio_hint_without_cla
     assert "audio hint confidence: profile-hint" in scan_note
     assert "audio port remains unknown unless configured explicitly" not in scan_note
     assert report.audio_port is None
+
+
+async def test_discover_modems_surfaces_sim7600_plus_two_sibling_only_as_unconfigured_profile_hint():
+    sim7600 = ScriptedTransport(
+        {
+            "AT": ["OK"],
+            "ATI": ["SIMCOM INCORPORATED", "SIMCOM_SIM7600E-H", "OK"],
+            "AT+GMI": ["SIMCOM INCORPORATED", "OK"],
+            "AT+GMM": ["SIMCOM_SIM7600E-H", "OK"],
+            "AT+GMR": ["LE20B01SIM7600M22", "OK"],
+        }
+    )
+    quiet = ScriptedTransport({"AT": ["AT"]})
+    transports = {
+        "/dev/ttyUSB2": sim7600,
+        "/dev/ttyUSB4": quiet,
+    }
+
+    reports = await discover_modems(
+        patterns="/dev/ttyUSB*",
+        path_glob=lambda pattern: tuple(transports),
+        transport_opener=lambda port: transports[port],
+        command_timeout=0.001,
+    )
+
+    report = reports[0]
+    assert report.at_port == "/dev/ttyUSB2"
+    assert report.audio_port is None
+    assert report.audio_hint.port == "/dev/ttyUSB4"
+    assert report.audio_hint.confidence == "profile-hint"
+    assert tuple(sim7600.writes) == SAFE_PROBE_COMMANDS
+    assert tuple(quiet.writes) == ("AT",)
+
+
+async def test_sim7600_profile_hint_does_not_override_explicit_configured_audio_port():
+    sim7600 = ScriptedTransport(
+        {
+            "AT": ["OK"],
+            "ATI": ["SIMCOM INCORPORATED", "SIMCOM_SIM7600E-H", "OK"],
+            "AT+GMI": ["SIMCOM INCORPORATED", "OK"],
+            "AT+GMM": ["SIMCOM_SIM7600E-H", "OK"],
+            "AT+GMR": ["LE20B01SIM7600M22", "OK"],
+        }
+    )
+
+    report = await probe_modem_ports(
+        ["/dev/ttyUSB2", "/dev/ttyUSB4"],
+        transport_opener=lambda port: sim7600,
+        configured_audio_port="/dev/configured-audio",
+        command_timeout=0.001,
+    )
+
+    assert report.audio_port == "/dev/configured-audio"
+    assert report.audio_hint.confidence == "configured"
+    assert report.audio_hint.port == "/dev/configured-audio"
