@@ -78,3 +78,38 @@ async def test_serial_readline_raises_transport_error_on_initial_eof():
 
     with pytest.raises(TransportError, match="closed|EOF"):
         await transport.readline()
+
+
+async def test_serial_readline_rejects_partial_line_on_eof():
+    """An unterminated partial frame followed by EOF is a truncated read, not a valid line."""
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"+CSQ: 20,0")  # no trailing newline, not an SMS prompt
+    reader.feed_eof()
+    transport = SerialTransport("/dev/ttyUSB-test")
+    transport._reader = reader
+
+    with pytest.raises(TransportError, match="closed|EOF"):
+        await transport.readline()
+
+
+async def test_serial_readline_partial_eof_does_not_leak_buffer_contents():
+    """The truncated-EOF error must flag the condition without echoing buffered bytes,
+    which can hold SMS bodies, phone numbers, USSD, or SIM data that may reach logs."""
+    sentinel = b"SENTINEL-SENSITIVE-PAYLOAD-0000-DO-NOT-LOG"
+    reader = asyncio.StreamReader()
+    reader.feed_data(sentinel)  # no trailing newline, not an SMS prompt
+    reader.feed_eof()
+    transport = SerialTransport("/dev/ttyUSB-test")
+    transport._reader = reader
+
+    with pytest.raises(TransportError) as exc_info:
+        await transport.readline()
+
+    message = str(exc_info.value)
+    # Message must identify the truncated / partial EOF condition...
+    assert "partial" in message.lower() or "truncated" in message.lower()
+    # ...but must NOT include the raw buffered content in any form.
+    assert "SENTINEL" not in message
+    assert sentinel.decode() not in message
+    assert repr(sentinel) not in message
+    assert repr(bytearray(sentinel)) not in message

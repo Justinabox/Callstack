@@ -58,7 +58,10 @@ class SerialTransport(Transport):
             if not byte:
                 if not buf:
                     raise TransportError("Serial port closed (EOF)")
-                break
+                raise TransportError(
+                    f"Serial port closed (EOF) with partial line: "
+                    f"{len(buf)} unterminated byte(s) discarded"
+                )
             buf += byte
             if byte == b"\n":
                 break
