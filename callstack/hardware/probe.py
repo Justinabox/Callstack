@@ -96,6 +96,9 @@ async def _send_safe_command(transport: Transport, command: str, timeout: float)
         except asyncio.TimeoutError:
             return lines, "timeout"
 
+        if raw_line == b"":
+            return lines, "eof"
+
         line = _clean_line(raw_line)
         if not line:
             continue
@@ -270,6 +273,12 @@ async def probe_modem_ports(
                 port_responses[command] = lines
                 if command == "AT" and status == "OK":
                     attention_ok = True
+                if status == "eof":
+                    notes.append(
+                        f"Port {port}: command {command} received no response before the transport closed the "
+                        "connection (EOF); check that this is the modem AT port and that no other process is using it."
+                    )
+                    break
                 if status == "timeout":
                     notes.append(
                         f"Port {port}: command {command} timed out; check that this is the modem AT port and that no other process is using it."
