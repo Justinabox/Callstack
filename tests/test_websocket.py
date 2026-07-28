@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import aiohttp
 import pytest
 
+import server
 from callstack.events.bus import EventBus
 from callstack.events.types import (
     IncomingSMSEvent,
@@ -16,7 +17,12 @@ from callstack.events.types import (
     SMSDeliveryReportEvent,
     SignalQualityEvent,
 )
-from server import SUPPORTED_WEBSOCKET_EVENTS, _enqueue_websocket_envelope, create_app
+from server import (
+    SUPPORTED_WEBSOCKET_EVENTS,
+    _enqueue_websocket_envelope,
+    _resolve_websocket_queue_maxsize,
+    create_app,
+)
 
 
 class _FakeModem:
@@ -208,3 +214,108 @@ async def test_websocket_overflow_drops_oldest_and_queues_pii_safe_notice():
     assert overflow == {"type": "overflow", "version": 1, "dropped": 1}
     assert "secret" not in json.dumps(overflow)
     assert "123456" not in json.dumps(overflow)
+
+
+def test_resolve_websocket_queue_maxsize_returns_default_without_override():
+    app = create_app(_FakeModem())
+
+    assert _resolve_websocket_queue_maxsize(app) == 32
+
+
+def test_resolve_websocket_queue_maxsize_returns_valid_positive_override():
+    app = create_app(_FakeModem())
+    app["callstack_ws_queue_size"] = 5
+
+    assert _resolve_websocket_queue_maxsize(app) == 5
+
+
+@pytest.mark.parametrize(
+    "invalid_queue_size",
+    [0, -1, -32, True, False, 2.5, "32", "not-a-number", None, float("nan"), float("inf")],
+)
+def test_resolve_websocket_queue_maxsize_rejects_unsafe_overrides(invalid_queue_size):
+    app = create_app(_FakeModem())
+    app["callstack_ws_queue_size"] = invalid_queue_size
+
+    with pytest.raises(ValueError):
+        _resolve_websocket_queue_maxsize(app)
+
+
+@pytest.mark.parametrize(
+    "invalid_queue_size",
+    [0, -1, -32, True, False, 2.5, "32", "not-a-number", None, float("nan"), float("inf")],
+)
+async def test_ws_rejects_unsafe_queue_size_overrides_without_opening_subscription(
+    aiohttp_client, invalid_queue_size
+):
+    modem = _FakeModem()
+    app = create_app(modem, api_keys=["test-key"])
+    app["callstack_ws_queue_size"] = invalid_queue_size
+    client = await aiohttp_client(app)
+    subscriber_counts_before = {
+        event_type: len(handlers)
+        for event_type, handlers in modem.bus._subscribers.items()
+    }
+
+    with pytest.raises(aiohttp.WSServerHandshakeError) as excinfo:
+        await client.ws_connect("/ws", headers={"Authorization": "Bearer test-key"})
+
+    assert excinfo.value.status == 500
+    assert {
+        event_type: len(handlers)
+        for event_type, handlers in modem.bus._subscribers.items()
+    } == subscriber_counts_before
+
+
+async def test_ws_accepts_valid_queue_size_override_and_still_streams_events(aiohttp_client):
+    modem = _FakeModem()
+    app = create_app(modem, api_keys=["test-key"])
+    app["callstack_ws_queue_size"] = 2
+    client = await aiohttp_client(app)
+
+    ws = await client.ws_connect("/ws", headers={"Authorization": "Bearer test-key"})
+    hello = await _receive_json(ws)
+
+    await modem.bus.emit(SignalQualityEvent(rssi=19, ber=3))
+    event = await _receive_json(ws)
+    await ws.close()
+
+    assert hello["selected_events"] == list(SUPPORTED_WEBSOCKET_EVENTS)
+    assert event["type"] == "signal.quality"
+
+
+def _record_queue_construction(monkeypatch, captured_maxsizes):
+    real_queue_cls = asyncio.Queue
+
+    class _RecordingQueue(real_queue_cls):
+        def __init__(self, *args, maxsize=0, **kwargs):
+            captured_maxsizes.append(maxsize)
+            super().__init__(*args, maxsize=maxsize, **kwargs)
+
+    monkeypatch.setattr(server.asyncio, "Queue", _RecordingQueue)
+
+
+async def test_ws_endpoint_constructs_queue_with_default_maxsize_of_32(aiohttp_client, monkeypatch):
+    captured_maxsizes = []
+    _record_queue_construction(monkeypatch, captured_maxsizes)
+    client = await aiohttp_client(create_app(_FakeModem(), api_keys=["test-key"]))
+
+    ws = await client.ws_connect("/ws", headers={"Authorization": "Bearer test-key"})
+    await _receive_json(ws)  # hello
+    await ws.close()
+
+    assert captured_maxsizes == [32]
+
+
+async def test_ws_endpoint_constructs_queue_with_configured_override_maxsize(aiohttp_client, monkeypatch):
+    captured_maxsizes = []
+    _record_queue_construction(monkeypatch, captured_maxsizes)
+    app = create_app(_FakeModem(), api_keys=["test-key"])
+    app["callstack_ws_queue_size"] = 7
+    client = await aiohttp_client(app)
+
+    ws = await client.ws_connect("/ws", headers={"Authorization": "Bearer test-key"})
+    await _receive_json(ws)  # hello
+    await ws.close()
+
+    assert captured_maxsizes == [7]
