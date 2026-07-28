@@ -2,7 +2,7 @@
 
 import pytest
 
-from callstack.sms.pdu import PDUEncoder, PDUDecoder, GSM7_BASIC
+from callstack.sms.pdu import MultipartInfo, PDUEncoder, PDUDecoder, GSM7_BASIC
 
 
 def _submit_pdu_fields(pdu: str) -> dict:
@@ -63,6 +63,12 @@ class TestGSM7Encoding:
 
         assert decoded == text
         assert count == len(text) + sum(1 for ch in text if ch in "{}[]€~^|\\")
+
+    def test_decode_gsm7_rejects_unavailable_requested_bits(self):
+        with pytest.raises(ValueError):
+            PDUDecoder.decode_gsm7(b"\x00", 2)
+
+        assert PDUDecoder.decode_gsm7(b"", 0) == ""
 
     def test_nbsp_falls_back_without_becoming_extension_escape(self):
         packed, count = PDUEncoder.encode_gsm7("\xa0(")
@@ -281,6 +287,56 @@ class TestDeliverPDU:
             f"{body_packed.hex().upper()}"
         )
 
+    @staticmethod
+    def _pack_gsm7_user_data_with_udh(udh: bytes, body: str) -> tuple[bytes, int]:
+        """Pack GSM-7 user data with a byte-aligned UDH for inbound PDU tests."""
+        header_septets = (len(udh) * 8 + 6) // 7
+        payload, payload_septets = PDUEncoder.encode_gsm7(body)
+        packed = bytearray((header_septets * 7 + payload_septets * 7 + 7) // 8)
+        packed[:len(udh)] = udh
+        for bit in range(payload_septets * 7):
+            if payload[bit // 8] & (1 << (bit % 8)):
+                target_bit = header_septets * 7 + bit
+                packed[target_bit // 8] |= 1 << (target_bit % 8)
+        return bytes(packed), header_septets + payload_septets
+
+    @classmethod
+    def _numeric_deliver_pdu_with_udh(cls, udh: bytes, body: str) -> str:
+        sender = "5550123"
+        sender_encoded, toa = PDUEncoder.encode_phone_number(sender)
+        user_data, user_data_length = cls._pack_gsm7_user_data_with_udh(udh, body)
+        return (
+            "00"  # SCA: use default SMSC
+            "44"  # SMS-DELIVER with UDHI
+            f"{len(sender):02X}"
+            f"{toa:02X}"
+            f"{sender_encoded}"
+            "00"  # PID
+            "00"  # DCS: GSM 7-bit default alphabet
+            "42215241030040"  # SCTS
+            f"{user_data_length:02X}"
+            f"{user_data.hex().upper()}"
+        )
+
+    @classmethod
+    def _numeric_deliver_pdu_with_raw_user_data(
+        cls, user_data: bytes, user_data_length: int
+    ) -> str:
+        sender = "5550123"
+        sender_encoded, toa = PDUEncoder.encode_phone_number(sender)
+        return (
+            "00"  # SCA: use default SMSC
+            "44"  # SMS-DELIVER with UDHI
+            f"{len(sender):02X}"
+            f"{toa:02X}"
+            f"{sender_encoded}"
+            "00"  # PID
+            "00"  # DCS: GSM 7-bit default alphabet
+            "42215241030040"  # SCTS
+            f"{user_data_length:02X}"
+            f"{user_data.hex().upper()}"
+        )
+
     def test_decode_timestamp(self):
         # 24/12/25 14:30:00 +04 (quarter hours)
         # Swapped BCD: 42 21 52 41 03 00 40
@@ -292,6 +348,85 @@ class TestDeliverPDU:
     def test_decode_timestamp_invalid(self):
         assert PDUDecoder.decode_timestamp("") is None
         assert PDUDecoder.decode_timestamp("short") is None
+
+    def test_decode_deliver_pdu_decodes_8bit_concatenation_udh(self):
+        decoded = PDUDecoder.decode_deliver_pdu(
+            self._numeric_deliver_pdu_with_udh(bytes.fromhex("0500037A0201"), "Part A")
+        )
+
+        assert decoded is not None
+        assert decoded["multipart"] == MultipartInfo(
+            reference=0x7A, total_parts=2, sequence=1
+        )
+        assert decoded["sender"] == "5550123"
+        assert decoded["body"] == "Part A"
+        assert decoded["timestamp"] is not None
+
+    def test_decode_deliver_pdu_decodes_extension_body_with_concatenation_udh(self):
+        decoded = PDUDecoder.decode_deliver_pdu(
+            self._numeric_deliver_pdu_with_udh(bytes.fromhex("0500037A0201"), "€{}")
+        )
+
+        assert decoded is not None
+        assert decoded["multipart"] == MultipartInfo(
+            reference=0x7A, total_parts=2, sequence=1
+        )
+        assert decoded["body"] == "€{}"
+
+    def test_decode_deliver_pdu_decodes_16bit_concatenation_udh(self):
+        decoded = PDUDecoder.decode_deliver_pdu(
+            self._numeric_deliver_pdu_with_udh(bytes.fromhex("06080412340302"), "Part B")
+        )
+
+        assert decoded is not None
+        assert decoded["multipart"] == MultipartInfo(
+            reference=0x1234, total_parts=3, sequence=2, is_16bit=True
+        )
+        assert decoded["sender"] == "5550123"
+        assert decoded["body"] == "Part B"
+        assert decoded["timestamp"] is not None
+
+    def test_decode_deliver_pdu_strips_valid_nonconcatenation_udh_without_multipart(self):
+        decoded = PDUDecoder.decode_deliver_pdu(
+            self._numeric_deliver_pdu_with_udh(bytes.fromhex("0301010B"), "Hi")
+        )
+
+        assert decoded is not None
+        assert "multipart" not in decoded
+        assert decoded["body"] == "Hi"
+
+    def test_decode_deliver_pdu_decodes_empty_nonconcatenation_udh_body(self):
+        decoded = PDUDecoder.decode_deliver_pdu(
+            self._numeric_deliver_pdu_with_udh(bytes.fromhex("0301010B"), "")
+        )
+
+        assert decoded is not None
+        assert "multipart" not in decoded
+        assert decoded["body"] == ""
+
+    @pytest.mark.parametrize(
+        "udh",
+        [
+            bytes.fromhex("0500037A0001"),  # 8-bit concat: total_parts is zero.
+            bytes.fromhex("06080412340203"),  # 16-bit concat: sequence exceeds total.
+        ],
+    )
+    def test_decode_deliver_pdu_rejects_semantically_malformed_concatenation_udh(self, udh):
+        pdu = self._numeric_deliver_pdu_with_udh(udh, "Hi")
+
+        assert PDUDecoder.decode_deliver_pdu(pdu) is None
+
+    def test_decode_deliver_pdu_rejects_truncated_udh(self):
+        pdu = self._numeric_deliver_pdu_with_raw_user_data(b"\x05", user_data_length=1)
+
+        assert PDUDecoder.decode_deliver_pdu(pdu) is None
+
+    def test_decode_deliver_pdu_rejects_malformed_udh_ie(self):
+        pdu = self._numeric_deliver_pdu_with_raw_user_data(
+            bytes.fromhex("0300027A00"), user_data_length=5
+        )
+
+        assert PDUDecoder.decode_deliver_pdu(pdu) is None
 
     def test_decode_deliver_pdu_preserves_alphanumeric_sender_and_body(self):
         decoded = PDUDecoder.decode_deliver_pdu(self._deliver_pdu())
