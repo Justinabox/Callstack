@@ -192,6 +192,45 @@ class TestAPIKeyManagement:
         assert auth.enabled is True
 
 
+class TestConstructorRatePolicy:
+    """Constructor must reject nonsensical rate_limit / rate_window values.
+
+    rate_limit is a count of requests: it must be a positive, non-bool integer.
+    rate_window is a duration in seconds: it must be a positive, finite,
+    non-bool number.
+    """
+
+    @pytest.mark.parametrize(
+        "rate_limit",
+        [0, -1, -60, True, False, 1.5, "60", None],
+        ids=["zero", "negative", "large-negative", "bool-true", "bool-false",
+             "float", "string", "none"],
+    )
+    def test_rejects_invalid_rate_limit(self, rate_limit):
+        with pytest.raises(ValueError):
+            APIKeyAuth(api_keys=["key"], rate_limit=rate_limit)
+
+    @pytest.mark.parametrize(
+        "rate_window",
+        [0, -1, -60, True, False, "60", None,
+         float("nan"), float("inf"), float("-inf")],
+        ids=["zero", "negative", "large-negative", "bool-true", "bool-false",
+             "string", "none", "nan", "inf", "neg-inf"],
+    )
+    def test_rejects_invalid_rate_window(self, rate_window):
+        with pytest.raises(ValueError):
+            APIKeyAuth(api_keys=["key"], rate_window=rate_window)
+
+    def test_preserves_valid_positive_configuration(self):
+        auth = APIKeyAuth(api_keys=["key"], rate_limit=30, rate_window=120)
+        assert auth._rate_limit == 30
+        assert auth._rate_window == 120
+
+    def test_accepts_finite_positive_float_rate_window(self):
+        auth = APIKeyAuth(api_keys=["key"], rate_limit=30, rate_window=1.5)
+        assert auth._rate_window == 1.5
+
+
 class TestRateLimiting:
     async def test_rate_limit_exceeded(self, aiohttp_client):
         auth = APIKeyAuth(api_keys=["key"], rate_limit=3, rate_window=60)
