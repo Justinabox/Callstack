@@ -41,6 +41,8 @@ class SMSScheduler:
             for job in self._jobs:
                 if job.send_at.tzinfo is None or job.send_at.utcoffset() is None:
                     raise ValueError("send_at must be timezone-aware")
+
+            for job in self._jobs:
                 if job.status != "pending" or job.send_at.astimezone(timezone.utc) > now_utc:
                     continue
 
