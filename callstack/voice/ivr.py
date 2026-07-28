@@ -10,6 +10,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("callstack.voice.ivr")
 
+_VALID_DTMF = frozenset("0123456789*#ABCD")
+
 
 @dataclass
 class MenuOption:
@@ -63,7 +65,13 @@ class IVRMenu:
 
         Returns:
             self, for fluent chaining.
+
+        Raises:
+            ValueError: If digit is not exactly one valid DTMF character
+                (0-9, *, #, A-D).
         """
+        if type(digit) is not str or digit not in _VALID_DTMF:
+            raise ValueError
         self._options[digit] = MenuOption(digit=digit, description=description, handler=handler)
         return self
 
