@@ -1,6 +1,7 @@
 """Tests for DTMFCollector."""
 
 import asyncio
+import logging
 import math
 import pytest
 from callstack.events.bus import EventBus
@@ -287,6 +288,45 @@ async def test_inter_digit_timeout(bus):
     asyncio.create_task(emit_with_gap())
     result = await collector.collect()
     assert result == "12"
+
+
+async def test_collect_debug_logs_do_not_leak_digits(bus, caplog):
+    # Exercise a multi-digit secret and terminator without logging either raw value.
+    collector = DTMFCollector(bus, max_digits=10, timeout=2.0, terminator="*")
+    asyncio.create_task(_emit_digits(bus, "ABC*"))
+
+    with caplog.at_level(logging.DEBUG, logger="callstack.voice.dtmf"):
+        result = await collector.collect()
+
+    assert result == "ABC"
+    log_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "ABC" not in log_text
+    assert "*" not in log_text
+    for digit in "ABC":
+        assert digit not in log_text
+        assert f"DTMF received: {digit}" not in log_text
+    assert "received" in log_text.lower()
+    assert "terminator" in log_text.lower()
+
+
+async def test_collect_from_stream_debug_logs_do_not_leak_digits(bus, caplog):
+    # Exercise a multi-digit secret and terminator without logging either raw value.
+    collector = DTMFCollector(bus, max_digits=10, timeout=2.0, terminator="*")
+    asyncio.create_task(_emit_digits(bus, "ABC*"))
+
+    with caplog.at_level(logging.DEBUG, logger="callstack.voice.dtmf"):
+        async with bus.stream(DTMFEvent) as events:
+            result = await collector.collect_from_stream(events)
+
+    assert result == "ABC"
+    log_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "ABC" not in log_text
+    assert "*" not in log_text
+    for digit in "ABC":
+        assert digit not in log_text
+        assert f"DTMF received: {digit}" not in log_text
+    assert "received" in log_text.lower()
+    assert "terminator" in log_text.lower()
 
 
 async def test_multiple_independent_collections(bus):
