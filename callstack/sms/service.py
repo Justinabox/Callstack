@@ -107,6 +107,7 @@ class SMSService:
         self._sms_submit_timeout = sms_submit_timeout
         self._initialized = False
         self._pending_cmt_header: Optional[str] = None
+        self._cmti_lock = asyncio.Lock()
         self._accepted_uncleared_cmti_slots: dict[tuple[str, int], tuple[str, str, str]] = {}
         self._accepted_uncleared_delivery_report_slots: dict[
             tuple[str, int], tuple[int, str, str]
@@ -219,37 +220,38 @@ class SMSService:
 
         if raw.startswith("+CMTI:"):
             # Notification mode: fetch the message from storage
-            parsed = ATResponseParser.parse_cmti(raw)
-            if parsed:
-                storage, index = parsed
-                logger.debug("CMTI notification: storage=%s, index=%d", storage, index)
-                slot_key = (storage, index)
-                sms = await self.read_message(index)
-                if sms:
-                    fingerprint = self._cmti_sms_fingerprint(sms)
-                    already_accepted = (
-                        self._accepted_uncleared_cmti_slots.get(slot_key) == fingerprint
-                    )
-                    if already_accepted:
-                        deleted = await self._delete_accepted_cmti_slot(
-                            storage, index, retry=True
+            async with self._cmti_lock:
+                parsed = ATResponseParser.parse_cmti(raw)
+                if parsed:
+                    storage, index = parsed
+                    logger.debug("CMTI notification: storage=%s, index=%d", storage, index)
+                    slot_key = (storage, index)
+                    sms = await self.read_message(index)
+                    if sms:
+                        fingerprint = self._cmti_sms_fingerprint(sms)
+                        already_accepted = (
+                            self._accepted_uncleared_cmti_slots.get(slot_key) == fingerprint
                         )
-                        if deleted:
-                            self._accepted_uncleared_cmti_slots.pop(slot_key, None)
-                        return
+                        if already_accepted:
+                            deleted = await self._delete_accepted_cmti_slot(
+                                storage, index, retry=True
+                            )
+                            if deleted:
+                                self._accepted_uncleared_cmti_slots.pop(slot_key, None)
+                            return
 
-                    sms.status = "unread"
-                    await self._store.save(sms)
-                    # Delete from SIM storage after durable/local acceptance to prevent +SMS FULL.
-                    deleted = await self._delete_accepted_cmti_slot(storage, index)
-                    if not deleted:
-                        self._accepted_uncleared_cmti_slots[slot_key] = fingerprint
-                    else:
-                        self._accepted_uncleared_cmti_slots.pop(slot_key, None)
-                    await self._bus.emit(
-                        IncomingSMSEvent(sender=sms.sender, body=sms.body)
-                    )
-                    logger.info("Incoming SMS from %s (index %d)", redact_phone_number(sms.sender), index)
+                        sms.status = "unread"
+                        await self._store.save(sms)
+                        # Delete from SIM storage after durable/local acceptance to prevent +SMS FULL.
+                        deleted = await self._delete_accepted_cmti_slot(storage, index)
+                        if not deleted:
+                            self._accepted_uncleared_cmti_slots[slot_key] = fingerprint
+                        else:
+                            self._accepted_uncleared_cmti_slots.pop(slot_key, None)
+                        await self._bus.emit(
+                            IncomingSMSEvent(sender=sms.sender, body=sms.body)
+                        )
+                        logger.info("Incoming SMS from %s (index %d)", redact_phone_number(sms.sender), index)
 
         elif raw.startswith("+CMT:"):
             # Direct delivery mode: sender is in the header, body follows

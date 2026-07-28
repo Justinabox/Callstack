@@ -396,6 +396,59 @@ async def test_receive_cmti(sms_service, transport, bus, store):
     ]
 
 
+async def test_receive_cmti_serializes_concurrent_handlers(sms_service, bus, store, monkeypatch):
+    """Concurrent notifications for one SIM slot accept the SMS only once."""
+    first_read_started = asyncio.Event()
+    release_first_read = asyncio.Event()
+    concurrent_read_started = asyncio.Event()
+    slot_deleted = False
+    received = []
+    read_calls = 0
+    delete_calls = 0
+    sms = SMS(sender="+155****9876", body="one message")
+
+    async def read_message(index):
+        nonlocal read_calls
+        read_calls += 1
+        if read_calls == 1:
+            first_read_started.set()
+            await release_first_read.wait()
+            return sms
+        if not slot_deleted:
+            concurrent_read_started.set()
+            return sms
+        return None
+
+    async def delete_message(index):
+        nonlocal slot_deleted, delete_calls
+        delete_calls += 1
+        slot_deleted = True
+        return True
+
+    bus.subscribe(IncomingSMSEvent, received.append)
+    monkeypatch.setattr(sms_service, "read_message", read_message)
+    monkeypatch.setattr(sms_service, "delete_message", delete_message)
+
+    first = asyncio.create_task(
+        sms_service._on_incoming(_RawSMSNotification(raw='+CMTI: "SM",3'))
+    )
+    await first_read_started.wait()
+    second = asyncio.create_task(
+        sms_service._on_incoming(_RawSMSNotification(raw='+CMTI: "SM",3'))
+    )
+
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(concurrent_read_started.wait(), timeout=0.05)
+    finally:
+        release_first_read.set()
+        await asyncio.gather(first, second)
+
+    assert await store.count() == 1
+    assert len(received) == 1
+    assert delete_calls == 1
+
+
 async def test_receive_cmti_accepts_optional_comma_whitespace(sms_service, transport, bus):
     """Spaced +CMTI notifications still fetch and emit the stored SMS."""
     received = []
