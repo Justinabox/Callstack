@@ -511,6 +511,36 @@ async def test_probe_handles_transport_eof_without_hanging_and_prefers_later_res
     assert "Traceback" not in combined_notes
 
 
+async def test_probe_modem_ports_accepts_bare_string_as_single_candidate_port():
+    transport = ScriptedTransport(
+        {
+            "AT": ["OK"],
+            "ATI": ["Quectel", "EC25", "OK"],
+            "AT+GMI": ["Quectel", "OK"],
+            "AT+GMM": ["EC25", "OK"],
+            "AT+GMR": ["EC25EFAR06A08M4G", "OK"],
+        }
+    )
+    opener_calls = []
+
+    def opener(port: str) -> Transport:
+        opener_calls.append(port)
+        return transport
+
+    report = await probe_modem_ports(
+        "/dev/ttyUSB2",
+        transport_opener=opener,
+        command_timeout=0.01,
+    )
+
+    assert opener_calls == ["/dev/ttyUSB2"]
+    assert report.at_port == "/dev/ttyUSB2"
+    assert report.identity.manufacturer == "Quectel"
+    assert report.identity.model == "EC25"
+    assert report.confidence == "profile-match"
+    assert tuple(transport.writes) == SAFE_PROBE_COMMANDS
+
+
 async def test_sim7600_profile_hint_does_not_override_explicit_configured_audio_port():
     sim7600 = ScriptedTransport(
         {

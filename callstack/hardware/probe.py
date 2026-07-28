@@ -257,10 +257,11 @@ async def probe_modem_ports(
     """
 
     opener = transport_opener or _default_transport_opener(baudrate)
+    ports: tuple[str, ...] = (candidate_ports,) if isinstance(candidate_ports, str) else tuple(candidate_ports)
     notes: list[str] = []
     best_report: ModemDiscoveryReport | None = None
 
-    for port in candidate_ports:
+    for port in ports:
         transport = opener(port)
         port_responses: dict[str, list[str]] = {}
         attention_ok = False
@@ -313,7 +314,7 @@ async def probe_modem_ports(
                 identity,
                 configured_audio_port,
                 at_port=port,
-                candidate_ports=candidate_ports,
+                candidate_ports=ports,
             ),
             identity=identity,
             capabilities=capabilities,
