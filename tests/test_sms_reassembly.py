@@ -167,6 +167,64 @@ def test_bool_reference_raises_without_mutating_state():
     assert acc.pending_group_count == 0
 
 
+@pytest.mark.parametrize(
+    ("reference", "is_16bit", "is_valid"),
+    [
+        pytest.param(-1, False, False, id="negative-8bit"),
+        pytest.param(256, False, False, id="8bit-overflow"),
+        pytest.param(65536, True, False, id="16bit-overflow"),
+        pytest.param(255, False, True, id="8bit-maximum"),
+        pytest.param(65535, True, True, id="16bit-maximum"),
+    ],
+)
+def test_multipart_reference_requires_width_specific_protocol_range(
+    reference: int, is_16bit: bool, is_valid: bool
+):
+    acc = MultipartAccumulator(max_age=60, max_groups=10)
+    info = MultipartInfo(
+        reference=reference, total_parts=2, sequence=1, is_16bit=is_16bit
+    )
+
+    if is_valid:
+        assert acc.add_part("source", info, "fragment", now=0) is None
+        assert acc.pending_group_count == 1
+    else:
+        with pytest.raises(ValueError) as exc_info:
+            acc.add_part("source", info, "fragment", now=0)
+
+        assert "source" not in str(exc_info.value)
+        assert "fragment" not in str(exc_info.value)
+        assert acc.pending_group_count == 0
+
+
+@pytest.mark.parametrize("is_16bit", [False, True], ids=["8bit", "16bit"])
+def test_zero_multipart_reference_starts_a_pending_group(is_16bit: bool):
+    acc = MultipartAccumulator(max_age=60, max_groups=10)
+    info = MultipartInfo(
+        reference=0, total_parts=2, sequence=1, is_16bit=is_16bit
+    )
+
+    assert acc.add_part("source", info, "fragment", now=0) is None
+    assert acc.pending_group_count == 1
+
+
+def test_invalid_reference_does_not_expire_existing_pending_group():
+    acc = MultipartAccumulator(max_age=1, max_groups=10)
+    valid_info = MultipartInfo(reference=1, total_parts=2, sequence=1)
+    invalid_info = MultipartInfo(reference=256, total_parts=2, sequence=1)
+    sender = "safe-sender-token"
+    body = "safe-body-token"
+
+    assert acc.add_part(sender, valid_info, body, now=0) is None
+    with pytest.raises(ValueError) as exc_info:
+        acc.add_part(sender, invalid_info, body, now=2)
+
+    message = str(exc_info.value)
+    assert sender not in message
+    assert body not in message
+    assert acc.pending_group_count == 1
+
+
 def test_bool_total_parts_raises_without_mutating_state():
     acc = MultipartAccumulator(max_age=60, max_groups=10)
     bad_info = MultipartInfo(reference=1, total_parts=True, sequence=1)

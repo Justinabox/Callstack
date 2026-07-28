@@ -48,6 +48,9 @@ def _validate_multipart_info(info: MultipartInfo) -> None:
         raise ValueError("multipart info sequence out of range")
     if not isinstance(info.is_16bit, bool):
         raise ValueError("multipart info field 'is_16bit' must be a bool")
+    max_reference = 65535 if info.is_16bit else 255
+    if not 0 <= info.reference <= max_reference:
+        raise ValueError("multipart info reference out of range")
 
 
 @dataclass
