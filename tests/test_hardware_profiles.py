@@ -275,6 +275,17 @@ class TestAudioPortHints:
 
         assert hint.port is None
 
+    def test_bare_string_candidate_ports_is_not_searched_by_substring(self):
+        identity = ModemIdentity(manufacturer="SIMCOM INCORPORATED", model="SIMCOM_SIM7600E-H")
+
+        hint = audio_port_hint_for_identity(
+            identity,
+            at_port="/dev/ttyUSB2",
+            candidate_ports="/dev/ttyUSB2,/dev/ttyUSB4",
+        )
+
+        assert hint.port is None
+
     def test_simcom_profile_reports_manual_audio_hint_without_selecting_a_port(self):
         identity = ModemIdentity(manufacturer="SIMCOM INCORPORATED", model="SIMCOM_SIM7600E-H")
 
