@@ -402,6 +402,18 @@ class TestRegistration:
             ("AT+CEREG?", 2.5),
         ]
 
+    @pytest.mark.parametrize("command_timeout", [0, -0.1, True, math.nan, math.inf])
+    async def test_invalid_command_timeout_rejected_before_construction_completes(self, command_timeout):
+        class NoOpExecutor:
+            def capture_urcs(self, *prefixes):
+                raise AssertionError("no modem I/O should occur")
+
+            async def execute(self, command, expect=("OK",), timeout=5.0):
+                raise AssertionError("no modem I/O should occur")
+
+        with pytest.raises(ValueError, match="command_timeout"):
+            NetworkService(NoOpExecutor(), EventBus(), command_timeout=command_timeout)
+
     async def test_optional_registration_query_timeout_preserves_captured_status(self):
         class Capture:
             lines = ["+CREG: 0,1"]

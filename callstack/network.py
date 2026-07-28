@@ -75,7 +75,7 @@ class NetworkService:
     ):
         self._at = executor
         self._bus = bus
-        self._command_timeout = command_timeout
+        self._command_timeout = _validate_positive_finite("command_timeout", command_timeout)
 
     async def signal_quality(self) -> SignalInfo:
         """Query current signal quality (AT+CSQ).
