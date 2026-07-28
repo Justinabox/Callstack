@@ -315,6 +315,32 @@ class TestAudioPipeline:
         asyncio.create_task(emit_dtmf())
         recorded = await pipeline.record(output, max_duration=5.0, stop_on_dtmf=True)
         assert recorded == output
+        assert len(bus._subscribers[DTMFEvent]) == 0
+
+    async def test_record_removes_dtmf_subscription_when_output_setup_fails(
+        self, pipeline, bus, tmp_path
+    ):
+        pipeline._running = True
+        output = tmp_path / "missing-parent" / "recording.wav"
+
+        with pytest.raises(FileNotFoundError):
+            await pipeline.record(str(output), stop_on_dtmf=True)
+
+        assert len(bus._subscribers[DTMFEvent]) == 0
+
+    async def test_record_removes_dtmf_subscription_when_path_conversion_fails(
+        self, pipeline, bus
+    ):
+        class FailingPath:
+            def __fspath__(self):
+                raise TypeError("path conversion failed")
+
+        pipeline._running = True
+
+        with pytest.raises(TypeError, match="path conversion failed"):
+            await pipeline.record(FailingPath(), stop_on_dtmf=True)
+
+        assert len(bus._subscribers[DTMFEvent]) == 0
 
     async def test_record_respects_max_duration(self, pipeline, transport, tmp_path):
         output = str(tmp_path / "recording.wav")

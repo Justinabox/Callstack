@@ -96,15 +96,17 @@ class AudioPipeline:
                 stop.set()
             self._bus.subscribe(DTMFEvent, _on_dtmf)
 
-        output_path_str = os.fspath(output_path)
-        output_dir = os.path.dirname(os.path.abspath(output_path_str))
-        output_name = os.path.basename(output_path_str)
-        fd, recording_path = tempfile.mkstemp(
-            prefix=f".{output_name}.", suffix=".tmp", dir=output_dir
-        )
-        os.close(fd)
+        recording_path: str | None = None
         recording_succeeded = False
         try:
+            output_path_str = os.fspath(output_path)
+            output_dir = os.path.dirname(os.path.abspath(output_path_str))
+            output_name = os.path.basename(output_path_str)
+            fd, recording_path = tempfile.mkstemp(
+                prefix=f".{output_name}.", suffix=".tmp", dir=output_dir
+            )
+            os.close(fd)
+
             frame_size = self.CHANNELS * self.SAMPLE_WIDTH
             audio_bytes_written = 0
             pending = b""
@@ -160,7 +162,7 @@ class AudioPipeline:
             recording_succeeded = True
             logger.info("Recording complete: %s", output_path)
         finally:
-            if not recording_succeeded:
+            if not recording_succeeded and recording_path is not None:
                 try:
                     os.remove(recording_path)
                 except OSError:
