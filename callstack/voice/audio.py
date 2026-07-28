@@ -83,6 +83,7 @@ class AudioPipeline:
             )
         if (
             type(max_duration) is bool
+            or not isinstance(max_duration, (int, float))
             or not math.isfinite(max_duration)
             or max_duration <= 0
         ):
