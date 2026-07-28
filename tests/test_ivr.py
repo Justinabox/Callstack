@@ -150,6 +150,47 @@ async def test_menu_valid_digits():
     assert menu.valid_digits == {"1", "2", "0"}
 
 
+async def test_menu_option_accepts_every_valid_dtmf_char():
+    menu = IVRMenu(prompt="menu.wav")
+    for digit in "0123456789*#ABCD":
+        menu.option(digit, "desc", AsyncMock())
+    assert menu.valid_digits == set("0123456789*#ABCD")
+
+
+@pytest.mark.parametrize(
+    "bad_digit",
+    ["", "12", "x", " ", "!", "ab", 1, 1.0, None, [], {}],
+)
+async def test_menu_option_rejects_invalid_digit(bad_digit):
+    menu = IVRMenu(prompt="menu.wav")
+    with pytest.raises(ValueError) as exc_info:
+        menu.option(bad_digit, "desc", AsyncMock())
+    assert exc_info.value.args == ()
+    assert menu.valid_digits == set()
+
+
+@pytest.mark.parametrize("bad_digit", [True, False])
+async def test_menu_option_rejects_bool_digit(bad_digit):
+    menu = IVRMenu(prompt="menu.wav")
+    with pytest.raises(ValueError) as exc_info:
+        menu.option(bad_digit, "desc", AsyncMock())
+    assert exc_info.value.args == ()
+    assert menu.valid_digits == set()
+
+
+async def test_menu_option_failed_registration_preserves_existing_option():
+    handler = AsyncMock()
+    menu = IVRMenu(prompt="menu.wav")
+    menu.option("1", "Sales", handler)
+
+    with pytest.raises(ValueError):
+        menu.option("12", "Bogus", AsyncMock())
+
+    assert menu.valid_digits == {"1"}
+    assert menu._options["1"].handler is handler
+    assert menu._options["1"].description == "Sales"
+
+
 async def test_menu_valid_selection_log_omits_choice_and_description(caplog):
     """The valid-selection INFO log must not leak the raw DTMF digit or the
     MenuOption description, while still recording that a selection was routed."""
