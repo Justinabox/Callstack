@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import glob
+import math
 import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import fields, replace
-from typing import Protocol
+from numbers import Number
+from typing import Any, Protocol, cast
 
 from callstack.hardware.discovery import AudioPortHint, ModemCapabilities, ModemDiscoveryReport, ModemIdentity
 from callstack.hardware.profiles import audio_port_hint_for_identity, classify_capabilities, profile_notes
@@ -47,6 +49,19 @@ class TransportOpener(Protocol):
 
 
 PathGlobber = Callable[[str], Iterable[str]]
+
+
+def _validate_command_timeout(command_timeout: object) -> None:
+    """Reject timeout values that cannot safely bound probe I/O."""
+    if isinstance(command_timeout, bool) or not isinstance(command_timeout, Number):
+        raise ValueError("command timeout must be a finite positive number")
+    numeric_timeout = cast(Any, command_timeout)
+    try:
+        valid = math.isfinite(numeric_timeout) and numeric_timeout > 0
+    except (TypeError, ValueError, OverflowError):
+        valid = False
+    if not valid:
+        raise ValueError("command timeout must be a finite positive number")
 
 
 def _default_transport_opener(baudrate: int) -> TransportOpener:
@@ -256,6 +271,7 @@ async def probe_modem_ports(
         represented as actionable notes instead of tracebacks.
     """
 
+    _validate_command_timeout(command_timeout)
     opener = transport_opener or _default_transport_opener(baudrate)
     notes: list[str] = []
     best_report: ModemDiscoveryReport | None = None
@@ -357,6 +373,7 @@ async def discover_modems(
     defaults used by ``callstack doctor --scan``). Candidate enumeration is
     injectable so tests and callers can avoid touching real ``/dev`` paths.
     """
+    _validate_command_timeout(command_timeout)
     candidate_ports = _candidate_ports_from_patterns(patterns, path_glob=path_glob)
     if not candidate_ports:
         return [

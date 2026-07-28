@@ -7,10 +7,16 @@ sensitive identity commands.
 from __future__ import annotations
 
 import asyncio
+from typing import Any
+
+import pytest
 
 from callstack.hardware.discovery import AudioPortHint
 from callstack.hardware.probe import SAFE_PROBE_COMMANDS, discover_modems, probe_modem_ports
 from callstack.transport.base import Transport
+
+
+_INVALID_COMMAND_TIMEOUTS = (True, "0.5", None, float("nan"), float("inf"), float("-inf"), 0, -0.01)
 
 
 class ScriptedTransport(Transport):
@@ -47,6 +53,45 @@ class ScriptedTransport(Transport):
 
     def in_waiting(self) -> int:
         return len(self._pending)
+
+
+@pytest.mark.parametrize("command_timeout", _INVALID_COMMAND_TIMEOUTS)
+async def test_probe_rejects_invalid_command_timeout_before_opening_transport(command_timeout: Any):
+    opener_calls: list[str] = []
+
+    def opener(port: str) -> Transport:
+        opener_calls.append(port)
+        raise AssertionError("invalid timeout must not open a transport")
+
+    with pytest.raises(ValueError):
+        await probe_modem_ports(["/dev/fake-at"], transport_opener=opener, command_timeout=command_timeout)
+
+    assert opener_calls == []
+
+
+@pytest.mark.parametrize("command_timeout", _INVALID_COMMAND_TIMEOUTS)
+async def test_discovery_rejects_invalid_command_timeout_before_enumerating_candidates(command_timeout: Any):
+    glob_calls: list[str] = []
+    opener_calls: list[str] = []
+
+    def globber(pattern: str) -> list[str]:
+        glob_calls.append(pattern)
+        raise AssertionError("invalid timeout must not enumerate candidates")
+
+    def opener(port: str) -> Transport:
+        opener_calls.append(port)
+        raise AssertionError("invalid timeout must not open a transport")
+
+    with pytest.raises(ValueError):
+        await discover_modems(
+            patterns="/dev/fake*",
+            path_glob=globber,
+            transport_opener=opener,
+            command_timeout=command_timeout,
+        )
+
+    assert glob_calls == []
+    assert opener_calls == []
 
 
 async def test_probe_sends_only_safe_commands_returns_simcom_report_and_closes_transport():
