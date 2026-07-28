@@ -214,8 +214,12 @@ class CallService:
     async def _disable_audio(self) -> None:
         """Tear down audio bridge."""
         logger.debug("Disabling audio bridge")
+        audio_stop_error: Exception | None = None
         if self._audio.running:
-            await self._audio.stop()
+            try:
+                await self._audio.stop()
+            except Exception as exc:
+                audio_stop_error = exc
         if self._audio_bridge_registered:
             try:
                 await self._at.execute(
@@ -225,6 +229,8 @@ class CallService:
                 )
             finally:
                 self._audio_bridge_registered = False
+        if audio_stop_error is not None:
+            raise audio_stop_error
 
     async def handle_modem_disconnected(self) -> None:
         """Fail closed locally after the AT reader/modem transport disconnects.
@@ -289,26 +295,48 @@ class CallService:
         ):
             # "VOICE CALL: END" or "NO CARRIER" URC — remote hangup
             await self._fsm.transition(CallState.ENDED)
+            try:
+                async with self._audio_enable_lock:
+                    await self._disable_audio()
+            except Exception as exc:
+                logger.warning(
+                    "Audio teardown during remote hangup failed (%s); "
+                    "completing call-state cleanup",
+                    type(exc).__name__,
+                )
+            finally:
+                self._audio_bridge_registered = False
+                if self._active_call:
+                    self._active_call._ended.set()
+                self._active_call = None
+                self._pending_caller = None
+                await self._reset_to_idle()
+
+    # -- Cleanup --
+
+    async def _cleanup(self) -> None:
+        """Clean up after a call ends while preserving teardown failures."""
+        audio_cleanup_error: Exception | None = None
+        try:
             async with self._audio_enable_lock:
-                await self._disable_audio()
+                if self._audio.running or self._audio_bridge_registered:
+                    await self._disable_audio()
+        except Exception as exc:
+            audio_cleanup_error = exc
+            logger.warning(
+                "Audio teardown during local call cleanup failed (%s); "
+                "completing call-state cleanup",
+                type(exc).__name__,
+            )
+        finally:
+            self._audio_bridge_registered = False
             if self._active_call:
                 self._active_call._ended.set()
             self._active_call = None
             self._pending_caller = None
             await self._reset_to_idle()
-
-    # -- Cleanup --
-
-    async def _cleanup(self) -> None:
-        """Clean up after a call ends."""
-        async with self._audio_enable_lock:
-            if self._audio.running or self._audio_bridge_registered:
-                await self._disable_audio()
-        if self._active_call:
-            self._active_call._ended.set()
-        self._active_call = None
-        self._pending_caller = None
-        await self._reset_to_idle()
+        if audio_cleanup_error is not None:
+            raise audio_cleanup_error
 
     async def _cleanup_failed_dial(self, *, transport_disconnected: bool = False) -> None:
         """Clean up an outbound dial attempt that failed before a session existed."""

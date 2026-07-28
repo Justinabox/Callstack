@@ -1069,6 +1069,143 @@ class TestCallService:
         assert service.active_call is session
         assert await session.wait_for_end(timeout=0.01) is False
 
+    @pytest.mark.parametrize("stop_error", [OSError, TransportError])
+    async def test_remote_hangup_completes_cleanup_when_audio_stop_raises(
+        self, bus, caplog, stop_error
+    ):
+        """A terminal URC must not strand call state after local audio close fails."""
+
+        class RecordingExecutor:
+            def __init__(self):
+                self.calls: list[str] = []
+
+            async def execute(self, command, expect=("OK",), timeout=5.0):
+                self.calls.append(command)
+                return ATResponse(success=True, lines=["OK"])
+
+        class FailingStopAudio:
+            running = True
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+                raise stop_error("AUDIO_STOP_PRIVATE_DETAIL")
+
+        executor = RecordingExecutor()
+        audio = FailingStopAudio()
+        service = CallService(
+            cast(ATCommandExecutor, executor), cast(AudioPipeline, audio), bus
+        )
+        await service._fsm.transition(CallState.RINGING)
+        await service._fsm.transition(CallState.ACTIVE)
+        service._pending_caller = "caller"
+        service._audio_bridge_registered = True
+        session = CallSession(number="caller", direction="inbound", service=service)
+        service._active_call = session
+
+        caplog.set_level(logging.WARNING, logger="callstack.voice.service")
+        await bus.emit(CallStateEvent(state=CallState.ENDED))
+
+        assert await session.wait_for_end(timeout=1.0) is True
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
+        assert service._pending_caller is None
+        assert service._audio_bridge_registered is False
+        assert "AT+CPCMREG=0" in executor.calls
+        assert "AUDIO_STOP_PRIVATE_DETAIL" not in caplog.text
+
+    @pytest.mark.parametrize("stop_error", [OSError, TransportError])
+    @pytest.mark.parametrize("operation", ["hangup", "reject"])
+    async def test_successful_local_call_end_cleans_up_when_audio_stop_raises(
+        self, bus, caplog, stop_error, operation
+    ):
+        """A completed local end must not retain state if local audio close fails."""
+
+        class RecordingExecutor:
+            def __init__(self):
+                self.calls: list[str] = []
+
+            async def execute(self, command, expect=("OK",), timeout=5.0):
+                self.calls.append(command)
+                return ATResponse(success=True, lines=["OK"])
+
+        class FailingStopAudio:
+            running = True
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+                raise stop_error("AUDIO_STOP_PRIVATE_DETAIL")
+
+        executor = RecordingExecutor()
+        service = CallService(
+            cast(ATCommandExecutor, executor),
+            cast(AudioPipeline, FailingStopAudio()),
+            bus,
+        )
+        await service._fsm.transition(CallState.RINGING)
+        await service._fsm.transition(CallState.ACTIVE)
+        service._pending_caller = "caller"
+        service._audio_bridge_registered = True
+        session = CallSession(number="caller", direction="inbound", service=service)
+        service._active_call = session
+
+        caplog.set_level(logging.WARNING, logger="callstack.voice.service")
+        with pytest.raises(stop_error):
+            await getattr(service, operation)()
+
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
+        assert service._pending_caller is None
+        assert service._audio_bridge_registered is False
+        assert await session.wait_for_end(timeout=0.01) is True
+        assert "AT+CPCMREG=0" in executor.calls
+        assert "AUDIO_STOP_PRIVATE_DETAIL" not in caplog.text
+
+    async def test_cancelled_local_cleanup_clears_audio_bridge_bookkeeping(self, bus):
+        class RecordingExecutor:
+            async def execute(self, command, expect=("OK",), timeout=5.0):
+                return ATResponse(success=True, lines=["OK"])
+
+        class BlockingAudio:
+            def __init__(self):
+                self.running = True
+                self.stop_started = asyncio.Event()
+                self.finish_stop = asyncio.Event()
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.stop_started.set()
+                await self.finish_stop.wait()
+                self.running = False
+
+        audio = BlockingAudio()
+        service = CallService(
+            cast(ATCommandExecutor, RecordingExecutor()), cast(AudioPipeline, audio), bus
+        )
+        await service._fsm.transition(CallState.RINGING)
+        await service._fsm.transition(CallState.ACTIVE)
+        service._audio_bridge_registered = True
+        session = CallSession(number="caller", direction="inbound", service=service)
+        service._active_call = session
+
+        hangup_task = asyncio.create_task(service.hangup())
+        await asyncio.wait_for(audio.stop_started.wait(), timeout=1.0)
+        hangup_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await hangup_task
+
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
+        assert service._audio_bridge_registered is False
+        assert await session.wait_for_end(timeout=0.01) is True
+
     async def test_remote_hangup_via_urc(self, service, bus, at_transport):
         """When remote party hangs up, VOICE CALL: END URC triggers cleanup."""
         # Set up an active call
@@ -1081,7 +1218,7 @@ class TestCallService:
             await asyncio.sleep(0.01)
             at_transport.feed("OK")  # CPCMREG
         asyncio.create_task(answer_respond())
-        await service.answer()
+        session = await service.answer()
         assert service.state == CallState.ACTIVE
 
         # Simulate remote hangup — CPCMREG off response
@@ -1091,8 +1228,8 @@ class TestCallService:
         asyncio.create_task(cpcm_respond())
 
         await bus.emit(CallStateEvent(state=CallState.ENDED))
-        await asyncio.sleep(0.05)
 
+        assert await session.wait_for_end(timeout=1.0) is True
         assert service.state == CallState.IDLE
 
     async def test_idle_no_carrier_urc_hangs_up_active_call(
