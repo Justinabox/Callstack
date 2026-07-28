@@ -1,6 +1,7 @@
 """Tests for IVRMenu and IVRFlow."""
 
 import asyncio
+import logging
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from callstack.voice.ivr import IVRMenu, IVRFlow
@@ -147,6 +148,54 @@ async def test_menu_valid_digits():
     menu.option("2", "B", AsyncMock())
     menu.option("0", "C", AsyncMock())
     assert menu.valid_digits == {"1", "2", "0"}
+
+
+async def test_menu_valid_selection_log_omits_choice_and_description(caplog):
+    """The valid-selection INFO log must not leak the raw DTMF digit or the
+    MenuOption description, while still recording that a selection was routed."""
+    handler = AsyncMock()
+    menu = IVRMenu(prompt="menu.wav")
+    menu.option("7", "TopSecretRoutingDept", handler)
+
+    session = _make_session(play_and_collect_returns="7")
+    with caplog.at_level(logging.INFO, logger="callstack.voice.ivr"):
+        result = await menu.run(session, retries=1)
+
+    # Routing/return/handler behavior preserved.
+    assert result == "7"
+    handler.assert_awaited_once_with(session)
+
+    # Raw choice and sensitive description must be absent from the logs.
+    assert "7" not in caplog.text
+    assert "TopSecretRoutingDept" not in caplog.text
+
+    # Safe operational signal remains: a selection was accepted at INFO.
+    assert any(
+        rec.levelno == logging.INFO and "selection" in rec.getMessage().lower()
+        for rec in caplog.records
+    )
+
+
+async def test_menu_invalid_selection_log_omits_choice(caplog):
+    """The invalid-selection DEBUG log must not leak the raw DTMF digit, while
+    still recording that an invalid selection occurred."""
+    menu = IVRMenu(prompt="menu.wav")
+    menu.option("1", "Sales", AsyncMock())
+
+    session = _make_session(play_and_collect_returns="9")
+    with caplog.at_level(logging.DEBUG, logger="callstack.voice.ivr"):
+        result = await menu.run(session, retries=1)
+
+    assert result is None
+
+    # Raw invalid choice must be absent from the logs.
+    assert "9" not in caplog.text
+
+    # Safe operational signal remains: an invalid selection was logged.
+    assert any(
+        rec.levelno == logging.DEBUG and "invalid" in rec.getMessage().lower()
+        for rec in caplog.records
+    )
 
 
 # -- IVRFlow --

@@ -112,7 +112,7 @@ class IVRMenu:
 
             if choice in self._options:
                 opt = self._options[choice]
-                logger.info("Menu selection: '%s' (%s)", choice, opt.description)
+                logger.info("Menu selection accepted")
                 await opt.handler(session)
                 return choice
 
@@ -124,7 +124,7 @@ class IVRMenu:
                 if not is_last and (timeout_prompt or invalid_prompt):
                     await session.play(timeout_prompt or invalid_prompt)
             else:
-                logger.debug("Invalid menu choice: '%s'", choice)
+                logger.debug("Invalid menu choice received")
                 if not is_last and invalid_prompt:
                     await session.play(invalid_prompt)
 
