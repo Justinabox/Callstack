@@ -447,6 +447,70 @@ async def test_discover_modems_surfaces_sim7600_plus_two_sibling_only_as_unconfi
     assert tuple(quiet.writes) == ("AT",)
 
 
+class EOFTransport(ScriptedTransport):
+    """Fake transport simulating a closed/disconnected stream: readline returns b"" immediately."""
+
+    def __init__(self):
+        super().__init__()
+        self.readline_calls = 0
+
+    async def readline(self) -> bytes:
+        self.readline_calls += 1
+        return b""
+
+
+async def test_probe_handles_transport_eof_without_hanging_and_prefers_later_responsive_candidate():
+    eof_transport = EOFTransport()
+    timeout_transport = ScriptedTransport({"AT": ["AT"]})
+    good_transport = ScriptedTransport(
+        {
+            "AT": ["OK"],
+            "ATI": ["Quectel", "EC25", "OK"],
+            "AT+GMI": ["Quectel", "OK"],
+            "AT+GMM": ["EC25", "OK"],
+            "AT+GMR": ["EC25EFAR06A08M4G", "OK"],
+        }
+    )
+    transports = {
+        "/dev/eof": eof_transport,
+        "/dev/timeout": timeout_transport,
+        "/dev/good": good_transport,
+    }
+
+    report = await probe_modem_ports(
+        ["/dev/eof", "/dev/timeout", "/dev/good"],
+        transport_opener=lambda port: transports[port],
+        command_timeout=0.01,
+    )
+
+    # EOF candidate: exactly one read attempt for its AT command, then closed and skipped.
+    assert eof_transport.writes == ["AT"]
+    assert eof_transport.readline_calls == 1
+    assert eof_transport.closed is True
+
+    # The later responsive candidate is still selected as the best report.
+    assert report.at_port == "/dev/good"
+    assert report.identity.manufacturer == "Quectel"
+    assert report.identity.model == "EC25"
+
+    eof_note = next(note for note in report.notes if "/dev/eof" in note)
+    timeout_note = next(note for note in report.notes if "/dev/timeout" in note)
+
+    # Generic, PII-safe EOF/disconnect note distinct from the timeout note.
+    assert "closed the connection" in eof_note.lower() or "eof" in eof_note.lower()
+    assert "timed out" not in eof_note.lower()
+
+    # Existing silent-but-open timeout behavior remains intact and distinct.
+    assert "timed out" in timeout_note.lower()
+
+    # No custom exception class names or private transport details leak into notes.
+    combined_notes = "\n".join(report.notes)
+    assert "EOFTransport" not in combined_notes
+    assert "ScriptedTransport" not in combined_notes
+    assert "Exception" not in combined_notes
+    assert "Traceback" not in combined_notes
+
+
 async def test_sim7600_profile_hint_does_not_override_explicit_configured_audio_port():
     sim7600 = ScriptedTransport(
         {
