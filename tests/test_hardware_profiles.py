@@ -242,6 +242,39 @@ class TestClassifyCapabilities:
 
 
 class TestAudioPortHints:
+    def test_sim7600_profile_selects_an_enumerated_plus_two_sibling_as_a_hint(self):
+        identity = ModemIdentity(manufacturer="SIMCOM INCORPORATED", model="SIMCOM_SIM7600E-H")
+
+        hint = audio_port_hint_for_identity(
+            identity,
+            at_port="/dev/ttyUSB2",
+            candidate_ports=("/dev/ttyUSB2", "/dev/ttyUSB4"),
+        )
+
+        assert hint == AudioPortHint(
+            port="/dev/ttyUSB4",
+            confidence="profile-hint",
+            reason=(
+                "SIM7600 profile matched an already-enumerated +2 serial sibling; "
+                "the audio role is unverified, so configure CALLSTACK_AUDIO_PORT manually after hardware validation."
+            ),
+        )
+
+    @pytest.mark.parametrize(
+        ("identity", "at_port", "candidate_ports"),
+        [
+            (ModemIdentity(manufacturer="SIMCOM INCORPORATED", model="SIMCOM_SIM7600E-H"), "/dev/ttyUSB2", ("/dev/ttyUSB2",)),
+            (ModemIdentity(manufacturer="SIMCOM INCORPORATED", model="SIMCOM_SIM7600E-H"), "/dev/modem-at", ("/dev/modem-at", "/dev/modem-audio")),
+            (ModemIdentity(manufacturer="SIMCOM INCORPORATED", model="SIMCOM_SIM800C"), "/dev/ttyUSB2", ("/dev/ttyUSB2", "/dev/ttyUSB4")),
+            (ModemIdentity(manufacturer="Quectel", model="EC25"), "/dev/ttyUSB2", ("/dev/ttyUSB2", "/dev/ttyUSB4")),
+            (ModemIdentity(manufacturer="MysteryVendor", model="MysteryBox"), "/dev/ttyUSB2", ("/dev/ttyUSB2", "/dev/ttyUSB4")),
+        ],
+    )
+    def test_unproven_or_non_sim7600_profiles_do_not_select_a_sibling_port(self, identity, at_port, candidate_ports):
+        hint = audio_port_hint_for_identity(identity, at_port=at_port, candidate_ports=candidate_ports)
+
+        assert hint.port is None
+
     def test_simcom_profile_reports_manual_audio_hint_without_selecting_a_port(self):
         identity = ModemIdentity(manufacturer="SIMCOM INCORPORATED", model="SIMCOM_SIM7600E-H")
 
