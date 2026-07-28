@@ -389,6 +389,38 @@ class TestAudioPipeline:
 
         await pipeline.stop()
 
+    async def test_record_fails_closed_on_trailing_partial_frame(
+        self, tmp_path
+    ):
+        transport = ChunkThenTimeoutTransport([b"abc"])
+        pipeline = AudioPipeline(cast(Transport, transport), EventBus())
+        output = tmp_path / "trailing-partial-frame.wav"
+        await pipeline.start()
+
+        with pytest.raises(AudioPipelineError, match="incomplete PCM frame"):
+            await pipeline.record(str(output), max_duration=0.03)
+
+        assert not output.exists()
+
+        await pipeline.stop()
+
+    async def test_record_trailing_partial_frame_preserves_existing_output_file(
+        self, tmp_path
+    ):
+        transport = ChunkThenTimeoutTransport([b"\x00\x80", b"\x01"])
+        pipeline = AudioPipeline(cast(Transport, transport), EventBus())
+        output = tmp_path / "existing-trailing-partial-frame.wav"
+        original = b"existing recording should survive trailing partial frame"
+        output.write_bytes(original)
+        await pipeline.start()
+
+        with pytest.raises(AudioPipelineError, match="incomplete PCM frame"):
+            await pipeline.record(str(output), max_duration=0.03)
+
+        assert output.read_bytes() == original
+
+        await pipeline.stop()
+
     async def test_session_record_propagates_no_audio_frames_failure(
         self, tmp_path
     ):
