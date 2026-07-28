@@ -530,7 +530,11 @@ async def run_server(
 
 
 async def main() -> None:
-    await run_server(ModemConfig(), host=HTTP_HOST, port=HTTP_PORT)
+    logger.warning(
+        "Legacy python server.py entrypoint is unauthenticated and loopback-only. "
+        "Use callstack serve with API keys for remote access."
+    )
+    await run_server(ModemConfig(), host="127.0.0.1", port=HTTP_PORT)
 
 
 if __name__ == "__main__":

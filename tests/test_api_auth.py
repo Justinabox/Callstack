@@ -209,6 +209,24 @@ class TestRateLimiting:
 
 
 class TestServerPrivacyLogging:
+    async def test_legacy_main_is_unauthenticated_and_loopback_only(self, monkeypatch, caplog):
+        called = {}
+
+        async def fake_run_server(config, **kwargs):
+            called["config"] = config
+            called["kwargs"] = kwargs
+
+        monkeypatch.setattr(server, "run_server", fake_run_server)
+
+        with caplog.at_level(logging.WARNING, logger="server"):
+            await server.main()
+
+        assert called["kwargs"]["host"] == "127.0.0.1"
+        assert called["kwargs"]["port"] == server.HTTP_PORT
+        assert called["kwargs"].get("api_keys") is None
+        assert "unauthenticated" in caplog.text.lower()
+        assert "loopback-only" in caplog.text.lower()
+
     async def test_webhook_failure_log_redacts_url_and_exception_details(self, monkeypatch, caplog):
         raw_url = "https://hooks.example.test/tenant/secret-token?api_key=super-secret&phone=15551234567"
         webhook_urls_before = list(server.webhook_urls)
