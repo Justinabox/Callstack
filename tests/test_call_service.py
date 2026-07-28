@@ -45,6 +45,20 @@ async def _wait_for_dtmf_stream(bus: EventBus) -> None:
     await asyncio.wait_for(wait_until_stream_opens(), timeout=0.1)
 
 
+async def _wait_for_write(transport: MockTransport, needle: str, timeout: float = 1.0) -> None:
+    """Wait until ``needle`` appears in a line written to the transport.
+
+    Used to drive real ATCommandExecutor ordering: the in-flight command's
+    write is the deterministic anchor after which ordered URCs can be fed. The
+    outer ``wait_for`` is only a no-hang bound, not proof of internal ordering.
+    """
+    async def wait_until_written() -> None:
+        while not any(needle in written for written in transport.all_written):
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_until_written(), timeout=timeout)
+
+
 @pytest.fixture
 def bus():
     return EventBus()
@@ -566,7 +580,7 @@ class TestCallService:
         finally:
             await executor.stop_reader()
 
-    async def test_dial_terminal_failure_cleans_up_inflight_audio_enable(self, bus):
+    async def test_dial_terminal_failure_does_not_enable_audio_before_command_success(self, bus):
         class LockedAT:
             def __init__(self):
                 self.calls: list[str] = []
@@ -602,7 +616,46 @@ class TestCallService:
         assert service.state == CallState.IDLE
         assert service.active_call is None
         assert audio.running is False
-        assert at.calls == ["ATD5551234;", "AT+CPCMREG=1", "AT+CPCMREG=0"]
+        assert at.calls == ["ATD5551234;"]
+
+    async def test_dial_active_then_terminal_urc_from_real_executor_fails_closed(
+        self, service, executor, at_transport, bus
+    ):
+        """Reproduce #274 with the REAL executor/MockTransport/URCDispatcher.
+
+        While ATD is in flight the modem emits, on the wire and in order,
+        ``VOICE CALL: BEGIN`` (ACTIVE), ``VOICE CALL: END`` (terminal ENDED),
+        then ``OK``. The executor dispatches BEGIN and END as URCs during
+        command collection, so an immediately-superseded ACTIVE must not leave a
+        stale ``AT+CPCMREG=1`` bridge enable for the already-ended call, and the
+        public ``dial`` must fail closed *promptly* with DialError rather than
+        hang on the never-answered bridge command.
+
+        Ordering is driven by the real transport: we wait for the ATD write,
+        then feed the ordered URCs and OK. The short settle bound below only
+        proves the operation does not hang; it is not used as ordering proof.
+        """
+        await executor.start_reader()
+        try:
+            dial_task = asyncio.create_task(service.dial("5551234", timeout=1.0))
+            await _wait_for_write(at_transport, "ATD5551234")
+
+            at_transport.feed("VOICE CALL: BEGIN", "VOICE CALL: END", "OK")
+
+            with pytest.raises(DialError):
+                await asyncio.wait_for(dial_task, timeout=1.0)
+
+            # No-hang bound: let any stray ACTIVE handler settle, then assert
+            # it never issued a bridge enable for the ended call.
+            await asyncio.sleep(0.05)
+
+            assert service.state == CallState.IDLE
+            assert service.active_call is None
+            assert service._audio.running is False
+            assert service._audio_bridge_registered is False
+            assert not any("AT+CPCMREG=1" in w for w in at_transport.all_written)
+        finally:
+            await executor.stop_reader()
 
     async def test_incoming_ring_transitions_to_ringing(self, service, bus):
         await bus.emit(RingEvent())
@@ -735,6 +788,48 @@ class TestCallService:
         assert service.state == CallState.ACTIVE
         assert audio.starts == 1
         assert at.calls == ["ATA", "AT+CPCMREG=1"]
+
+    async def test_answer_active_then_terminal_urc_from_real_executor_raises_answer_error(
+        self, service, executor, at_transport, bus
+    ):
+        """Reproduce #274 for answer with the REAL executor/MockTransport/URC.
+
+        While ATA is in flight the modem emits, on the wire and in order,
+        ``VOICE CALL: BEGIN`` (ACTIVE), ``VOICE CALL: END`` (terminal ENDED),
+        then ``OK``. An immediately-superseded ACTIVE must not leave a stale
+        ``AT+CPCMREG=1`` for the already-ended call, the pending caller must be
+        cleared, and ``answer`` must fail closed *promptly* with AnswerError
+        rather than hang on the never-answered bridge command.
+
+        Ordering is driven by the real transport: we wait for the ATA write,
+        then feed the ordered URCs and OK. The short settle bound below only
+        proves the operation does not hang.
+        """
+        await executor.start_reader()
+        try:
+            await service._fsm.transition(CallState.RINGING)
+            service._pending_caller = "+155****0001"
+
+            answer_task = asyncio.create_task(service.answer())
+            await _wait_for_write(at_transport, "ATA")
+
+            at_transport.feed("VOICE CALL: BEGIN", "VOICE CALL: END", "OK")
+
+            with pytest.raises(AnswerError):
+                await asyncio.wait_for(answer_task, timeout=1.0)
+
+            # No-hang bound: let any stray ACTIVE handler settle, then assert
+            # it never issued a bridge enable for the ended call.
+            await asyncio.sleep(0.05)
+
+            assert service.state == CallState.IDLE
+            assert service.active_call is None
+            assert service._pending_caller is None
+            assert service._audio.running is False
+            assert service._audio_bridge_registered is False
+            assert not any("AT+CPCMREG=1" in w for w in at_transport.all_written)
+        finally:
+            await executor.stop_reader()
 
     async def test_active_urc_and_answer_do_not_register_audio_twice_after_start_failure(self, bus):
         class FakeAT:
@@ -895,7 +990,7 @@ class TestCallService:
         await asyncio.sleep(0.01)
         assert service.state == CallState.RINGING
 
-    async def test_answer_timeout_after_active_urc_cleans_audio_and_next_ring(self, bus):
+    async def test_answer_timeout_after_active_urc_does_not_enable_audio_before_command_success(self, bus):
         class FakeAT:
             def __init__(self):
                 self.calls: list[str] = []
@@ -933,13 +1028,13 @@ class TestCallService:
         assert service.active_call is None
         assert service._pending_caller is None
         assert audio.running is False
-        assert at.calls == ["ATA", "AT+CPCMREG=1", "AT+CPCMREG=0"]
+        assert at.calls == ["ATA"]
 
         await bus.emit(RingEvent())
         await asyncio.sleep(0.01)
         assert service.state == CallState.RINGING
 
-    async def test_answer_timeout_waits_for_inflight_active_urc_audio_enable_before_cleanup(self, bus):
+    async def test_answer_timeout_after_active_urc_leaves_no_bridge_registration(self, bus):
         class LockedAT:
             def __init__(self):
                 self.calls: list[str] = []
@@ -980,7 +1075,7 @@ class TestCallService:
         assert service.active_call is None
         assert service._pending_caller is None
         assert audio.running is False
-        assert at.calls == ["ATA", "AT+CPCMREG=1", "AT+CPCMREG=0"]
+        assert at.calls == ["ATA"]
 
         await bus.emit(RingEvent())
         await asyncio.sleep(0.01)

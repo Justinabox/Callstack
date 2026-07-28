@@ -49,6 +49,13 @@ class CallService:
         self._active_call: Optional[CallSession] = None
         self._pending_caller: Optional[str] = None
         self._disconnect_generation = 0
+        self._call_command_in_flight = False
+        # Bumped synchronously each time a terminal (ENDED) call-state URC is
+        # received, in the exact order events are emitted on the bus. Because
+        # EventBus invokes plain subscriber functions synchronously before
+        # scheduling the awaitables they return, this counter is authoritative
+        # for "has this call ended?" before any async lifecycle handler runs.
+        self._terminal_generation = 0
 
         # Wire URC events to internal handlers
         self._handlers = [
@@ -79,6 +86,8 @@ class CallService:
         await self._fsm.transition(CallState.DIALING)
         logger.info("Dialing %s", redact_phone_number(number))
         disconnect_generation = self._disconnect_generation
+        terminal_generation = self._terminal_generation
+        self._call_command_in_flight = True
 
         try:
             resp = await self._at.execute(
@@ -89,6 +98,8 @@ class CallService:
                 transport_disconnected=isinstance(exc, TransportError)
             )
             raise
+        finally:
+            self._call_command_in_flight = False
 
         if not resp.success:
             await self._cleanup_failed_dial()
@@ -96,8 +107,21 @@ class CallService:
         if disconnect_generation != self._disconnect_generation:
             self._active_call = None
             raise DialError(["modem disconnected during dial"])
+        if (
+            terminal_generation != self._terminal_generation
+            or self._fsm.state not in (CallState.DIALING, CallState.ACTIVE)
+        ):
+            # A terminal call-state URC (VOICE CALL: END / NO CARRIER) was
+            # received while the ATD command was in flight — recorded
+            # synchronously in the terminal generation before its async cleanup
+            # runs. Fail closed rather than hand back a session for an
+            # already-ended call.
+            await self._cleanup_failed_dial()
+            raise DialError(["call ended before dial completed"])
         session = CallSession(number=number, direction="outbound", service=self)
         self._active_call = session
+        if self._fsm.state == CallState.ACTIVE:
+            await self._ensure_audio_enabled(terminal_generation)
         return session
 
     # -- Inbound --
@@ -106,6 +130,8 @@ class CallService:
         """Answer an incoming call. Returns a CallSession handle."""
         logger.info("Answering call from %s", redact_phone_number(self._pending_caller))
         disconnect_generation = self._disconnect_generation
+        terminal_generation = self._terminal_generation
+        self._call_command_in_flight = True
 
         try:
             resp = await self._at.execute(
@@ -116,6 +142,8 @@ class CallService:
                 transport_disconnected=isinstance(exc, TransportError)
             )
             raise
+        finally:
+            self._call_command_in_flight = False
         if not resp.success:
             await self._cleanup_failed_answer()
             raise AnswerError(resp.lines)
@@ -123,11 +151,22 @@ class CallService:
             self._active_call = None
             self._pending_caller = None
             raise AnswerError(["modem disconnected during answer"])
+        if (
+            terminal_generation != self._terminal_generation
+            or self._fsm.state not in (CallState.RINGING, CallState.ACTIVE)
+        ):
+            # A terminal call-state URC (VOICE CALL: END / NO CARRIER) was
+            # received while the ATA command was in flight — recorded
+            # synchronously in the terminal generation before its async cleanup
+            # runs. Fail closed rather than force an IDLE -> ACTIVE transition
+            # for an already-ended call.
+            await self._cleanup_failed_answer()
+            raise AnswerError(["call ended before answer completed"])
 
         if self._fsm.state != CallState.ACTIVE:
             await self._fsm.transition(CallState.ACTIVE)
         try:
-            await self._ensure_audio_enabled()
+            await self._ensure_audio_enabled(terminal_generation)
         except Exception as exc:
             await self._cleanup_failed_answer(
                 transport_disconnected=isinstance(exc, TransportError)
@@ -176,10 +215,13 @@ class CallService:
 
     # -- Audio bridge --
 
-    async def _ensure_audio_enabled(self) -> None:
+    async def _ensure_audio_enabled(self, generation: int | None = None) -> None:
         """Enable the audio bridge at most once across concurrent connect paths."""
         async with self._audio_enable_lock:
-            if self._fsm.state != CallState.ACTIVE:
+            if (
+                self._fsm.state != CallState.ACTIVE
+                or (generation is not None and generation != self._terminal_generation)
+            ):
                 return
             if not self._audio.running and not self._audio_bridge_registered:
                 await self._enable_audio()
@@ -276,26 +318,52 @@ class CallService:
         self._pending_caller = event.number
         logger.info("Caller ID: %s", redact_phone_number(event.number))
 
-    async def _on_call_state(self, event: CallStateEvent) -> None:
-        if event.state == CallState.ACTIVE and self._fsm.state in (
-            CallState.DIALING, CallState.RINGING
-        ):
-            # "VOICE CALL: BEGIN" URC — call connected
-            await self._fsm.transition(CallState.ACTIVE)
-            await self._ensure_audio_enabled()
+    def _on_call_state(self, event: CallStateEvent) -> Optional[Awaitable[None]]:
+        """Record call-lifecycle ordering synchronously, then hand off async work.
 
-        elif event.state == CallState.ENDED and self._fsm.state not in (
-            CallState.ENDED, CallState.IDLE
-        ):
-            # "VOICE CALL: END" or "NO CARRIER" URC — remote hangup
-            await self._fsm.transition(CallState.ENDED)
-            async with self._audio_enable_lock:
-                await self._disable_audio()
-            if self._active_call:
-                self._active_call._ended.set()
-            self._active_call = None
-            self._pending_caller = None
-            await self._reset_to_idle()
+        EventBus invokes plain subscriber functions synchronously during emit()
+        and only schedules the awaitable they return afterward. Bumping the
+        terminal generation here — in the exact order URCs are emitted — means an
+        immediately following terminal ENDED deterministically supersedes a
+        just-received ACTIVE, without depending on async task scheduling order.
+        The returned coroutine performs the FSM/audio work asynchronously.
+        """
+        if event.state == CallState.ENDED:
+            # "VOICE CALL: END" or "NO CARRIER" URC — remote hangup. Record the
+            # terminal event synchronously, before any handler runs.
+            self._terminal_generation += 1
+            return self._handle_call_ended()
+        if event.state == CallState.ACTIVE:
+            # "VOICE CALL: BEGIN" URC — call connected. Associate this ACTIVE
+            # with the terminal generation observed at receipt so its async
+            # handler can detect being superseded by a later terminal event.
+            return self._handle_call_active(self._terminal_generation)
+        return None
+
+    async def _handle_call_active(self, generation: int) -> None:
+        if self._fsm.state not in (CallState.DIALING, CallState.RINGING):
+            return
+        await self._fsm.transition(CallState.ACTIVE)
+        if self._call_command_in_flight:
+            return
+        # Yield so a terminal ENDED handler scheduled immediately after this one
+        # can run before audio setup. The generation recheck below is the
+        # authoritative guard: a terminal event increments it synchronously at
+        # receipt, so this ACTIVE handler cannot enable a stale PCM bridge.
+        await asyncio.sleep(0)
+        await self._ensure_audio_enabled(generation)
+
+    async def _handle_call_ended(self) -> None:
+        if self._fsm.state in (CallState.ENDED, CallState.IDLE):
+            return
+        await self._fsm.transition(CallState.ENDED)
+        async with self._audio_enable_lock:
+            await self._disable_audio()
+        if self._active_call:
+            self._active_call._ended.set()
+        self._active_call = None
+        self._pending_caller = None
+        await self._reset_to_idle()
 
     # -- Cleanup --
 
