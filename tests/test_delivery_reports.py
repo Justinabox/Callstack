@@ -1,6 +1,8 @@
 """Tests for SMS delivery report handling."""
 
+import asyncio
 import logging
+from typing import cast
 
 import pytest
 from callstack.events.bus import EventBus
@@ -10,7 +12,7 @@ from callstack.events.types import (
     _RawDeliveryReport,
     _RawSMSNotification,
 )
-from callstack.protocol.executor import ATCommandExecutor
+from callstack.protocol.executor import ATCommandExecutor, ATResponse
 from callstack.protocol.parser import ATResponseParser
 from callstack.protocol.urc import URCDispatcher
 from callstack.sms.service import SMSService
@@ -64,6 +66,80 @@ class TestCDSIDispatch:
 
 
 class TestDeliveryReportService:
+    async def test_concurrent_identical_delivery_reports_are_processed_once(self, bus, urc):
+        report_line = (
+            '+CMGR: "REC READ",16,"+155****1616",145,'
+            '"24/12/25,14:30:00+04","24/12/25,14:30:05+04",0'
+        )
+
+        class CoordinatedStore:
+            def __init__(self):
+                self.saved_reports = []
+                self.first_save_started = asyncio.Event()
+                self.release_first_save = asyncio.Event()
+
+            async def save_delivery_report(self, report):
+                self.saved_reports.append(report)
+                if len(self.saved_reports) == 1:
+                    self.first_save_started.set()
+                    await self.release_first_save.wait()
+
+        class SecondAcquireSignalingLock:
+            def __init__(self):
+                self._lock = asyncio.Lock()
+                self.acquire_count = 0
+                self.second_acquire_attempted = asyncio.Event()
+
+            async def __aenter__(self):
+                self.acquire_count += 1
+                if self.acquire_count == 2:
+                    self.second_acquire_attempted.set()
+                await self._lock.acquire()
+                return self
+
+            async def __aexit__(self, exc_type, exc_value, traceback):
+                self._lock.release()
+
+        class SlotExecutor:
+            def __init__(self):
+                self.report_available = True
+                self.commands = []
+
+            async def execute(self, command, **_kwargs):
+                self.commands.append(command)
+                if command == "AT+CMGR=16":
+                    lines = [report_line, "OK"] if self.report_available else ["OK"]
+                    return ATResponse(success=True, lines=lines)
+                if command == "AT+CMGD=16":
+                    self.report_available = False
+                return ATResponse(success=True, lines=["OK"])
+
+        store = CoordinatedStore()
+        executor = SlotExecutor()
+        service = SMSService(
+            cast(ATCommandExecutor, executor), bus, store=cast(SMSStore, store)
+        )
+        transaction_lock = SecondAcquireSignalingLock()
+        service._delivery_report_lock = cast(asyncio.Lock, transaction_lock)
+        emitted_events = []
+
+        async def record_event(event):
+            emitted_events.append(event)
+
+        bus.subscribe(SMSDeliveryReportEvent, record_event)
+        event = _RawDeliveryReport(storage="SM", index=16)
+        first = asyncio.create_task(service._on_delivery_report(event))
+        await store.first_save_started.wait()
+        second = asyncio.create_task(service._on_delivery_report(event))
+        await asyncio.wait_for(transaction_lock.second_acquire_attempted.wait(), timeout=1.0)
+        assert not store.release_first_save.is_set()
+        store.release_first_save.set()
+        await asyncio.gather(first, second)
+
+        assert len(store.saved_reports) == 1
+        assert len(emitted_events) == 1
+        assert executor.commands.count("AT+CMGD=16") == 1
+
     async def test_parsed_delivery_report_is_saved_before_event_emission(self, bus, urc):
         transport = MockTransport()
         store = SMSStore()
