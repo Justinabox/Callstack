@@ -1,5 +1,6 @@
 """Full SMS service: send, receive, subscribe, manage."""
 
+import asyncio
 import csv
 import logging
 import re
@@ -110,6 +111,7 @@ class SMSService:
         self._accepted_uncleared_delivery_report_slots: dict[
             tuple[str, int], tuple[int, str, str]
         ] = {}
+        self._delivery_report_lock = asyncio.Lock()
 
         # Wire raw SMS URC notifications from URC dispatcher
         bus.subscribe(_RawSMSNotification, self._on_incoming)
@@ -338,6 +340,11 @@ class SMSService:
 
     async def _on_delivery_report(self, event: _RawDeliveryReport) -> None:
         """Handle +CDSI delivery report notification."""
+        async with self._delivery_report_lock:
+            await self._handle_delivery_report(event)
+
+    async def _handle_delivery_report(self, event: _RawDeliveryReport) -> None:
+        """Process one delivery report while its transaction guard is held."""
         logger.debug("Delivery report: storage=%s, index=%d", event.storage, event.index)
         resp = await self._at.execute(
             ATCommand.read_sms(event.index), expect=["OK"], timeout=self._command_timeout
