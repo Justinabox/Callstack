@@ -232,9 +232,10 @@ class TestAudioPipeline:
             await session.record(str(tmp_path / "session-recording.wav"), max_duration=0.1)
 
     @pytest.mark.parametrize(
-        "max_duration", [0, -0.1, math.inf, -math.inf, math.nan, True, False]
+        "max_duration",
+        [0, -0.1, math.inf, -math.inf, math.nan, True, False, "1", None, object()],
     )
-    async def test_record_rejects_non_positive_and_non_finite_duration_before_writing(
+    async def test_record_rejects_invalid_duration_before_writing(
         self, pipeline, tmp_path, max_duration
     ):
         output = tmp_path / "invalid-duration.wav"
@@ -280,6 +281,24 @@ class TestAudioPipeline:
 
         with pytest.raises(AudioPipelineError, match="max_duration must be positive and finite"):
             await session.record(str(tmp_path / "session-invalid-duration.wav"), max_duration=0)
+
+    async def test_session_record_propagates_nonnumeric_duration_failure(
+        self, pipeline, tmp_path
+    ):
+        pipeline._running = True
+        service = cast(CallService, type(
+            "Service",
+            (),
+            {"_audio": pipeline, "state": CallState.ACTIVE, "active_call": None},
+        )())
+        session = CallSession(number="5551234", direction="inbound", service=service)
+        setattr(service, "active_call", session)
+
+        output = tmp_path / "session-nonnumeric-duration.wav"
+        with pytest.raises(AudioPipelineError, match="max_duration must be positive and finite"):
+            await session.record(str(output), max_duration="1")
+
+        assert not output.exists()
 
     async def test_record_stops_on_dtmf(self, pipeline, transport, bus, tmp_path):
         output = str(tmp_path / "recording.wav")
