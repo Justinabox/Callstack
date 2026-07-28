@@ -84,6 +84,8 @@ callstack serve --host 127.0.0.1 --port 8080 --api-key-file /etc/callstack/api-k
 
 For legacy source-tree workflows, `python server.py` remains a compatibility wrapper.
 
+For the full production Raspberry Pi deployment guide — hardened systemd unit, local paths and permissions, and production-safe health/metrics smoke checks — see [docs/deployment.md](docs/deployment.md).
+
 #### Deployment-safe Raspberry Pi server example
 
 Create the API-key file locally and keep it off GitHub, shell transcripts, logs, issues, and PRs:
@@ -110,8 +112,8 @@ Use public-safe readiness and metrics smoke checks before wiring SMS or USSD aut
 ```bash
 CALLSTACK_BEARER_HEADER="$(awk 'NF {print "Authorization: Bearer " $0; exit}' /etc/callstack/api-keys)"
 test -n "$CALLSTACK_BEARER_HEADER"
-curl -H "$CALLSTACK_BEARER_HEADER" http://127.0.0.1:8080/healthz
-curl -H "$CALLSTACK_BEARER_HEADER" http://127.0.0.1:8080/metrics
+curl -fsS -H "$CALLSTACK_BEARER_HEADER" http://127.0.0.1:8080/healthz
+curl -fsS -H "$CALLSTACK_BEARER_HEADER" http://127.0.0.1:8080/metrics
 ```
 
 For an intentional network-bound server, keep API keys enabled and place the service behind a trusted network boundary:

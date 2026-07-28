@@ -32,7 +32,7 @@
 
 ### Observability Follow-Ups
 - `/healthz`, `/metrics`, and PII-safe local event tailing through `callstack monitor` are shipped.
-- Next observability work should focus on deployment-safe auth defaults, production scrape guidance, and keeping realtime surfaces PII-bounded before WebSocket/dashboard expansion.
+- Production scrape guidance is shipped in [docs/deployment.md](docs/deployment.md); next observability work should focus on deployment-safe auth defaults and keeping realtime surfaces PII-bounded before WebSocket/dashboard expansion.
 
 ### Modem Auto-Detection
 - Safe explicit-port `callstack doctor` probing is shipped.
@@ -63,7 +63,8 @@
 
 ### CLI Tool
 - Shipped: `callstack send`, `callstack status`, safe `callstack doctor` with opt-in scan/config preview, PII-safe `callstack monitor`, and packaged `callstack serve` for HTTP server mode.
-- Planned: richer config/env loading, conservative audio-port assignment, systemd-style deployment examples, and production-safe health/metrics scrape guidance.
+- Shipped: hardened systemd deployment examples and production-safe health/metrics scrape guidance in [docs/deployment.md](docs/deployment.md).
+- Planned: richer config/env loading and conservative audio-port assignment.
 
 ---
 
@@ -75,7 +76,7 @@ Prefer these small, reviewable slices before broad realtime/dashboard expansion:
 2. SMS correctness: text-mode inbound body fidelity (#72), multipart receive/send finality (#10/#100), delivery-report cleanup (#148), and continued recipient-validation regression coverage.
 3. Modem safety: SIM-readiness fail-closed behavior (#142), safe doctor scan follow-ups for audio-port assignment, and clear profile evidence before unattended deployments.
 4. Webhook safety: URL admission and dispatch hardening (#47), signed delivery with retry/backoff (#21), and bounded error logs.
-5. Operator DX: keep shipped `callstack doctor`, `callstack monitor`, and `callstack serve` docs aligned with code, then add production-safe health/metrics deployment notes.
+5. Operator DX: keep shipped `callstack doctor`, `callstack monitor`, and `callstack serve` docs aligned with code, including the shipped production-safe health/metrics deployment notes in [docs/deployment.md](docs/deployment.md).
 6. Realtime and PBX: durable WebSocket replay/cursors and dashboard work (#197 follow-ups), scheduled SMS (#49), pre-answer routing (#40), voicemail helpers (#41), and IVR/DTMF hardening once SMS/security foundations stay green.
 
 ### Plugin/Middleware System
@@ -114,7 +115,7 @@ Prefer these small, reviewable slices before broad realtime/dashboard expansion:
 | P0 | Multi-Part SMS Reassembly | Medium | High | UDH parser done; service integration next |
 | P0 | SMS/security hardening | Small-Medium | High | Continue recipient validation, text-mode fidelity, auth, redaction, and webhook safety |
 | P1 | WebSocket Feed | Low-Medium | High | ✅ Shipped for authenticated PII-safe typed events; durable replay/dashboard follow-ups planned separately |
-| P1 | PII-safe CLI monitor + serve DX | Low-Medium | Medium | ✅ Shipped; next CLI DX is deployment examples and richer config helpers |
+| P1 | PII-safe CLI monitor + serve DX | Low-Medium | Medium | ✅ Shipped with deployment examples; next CLI DX is richer config helpers |
 | P1 | Modem Auto-Detection | Medium | High | Opt-in safe scan/config preview shipped; conservative audio-port assignment planned |
 | P2 | Voicemail System | Medium | High | Planned |
 | P2 | GPS/GNSS | Medium | High | Planned |
