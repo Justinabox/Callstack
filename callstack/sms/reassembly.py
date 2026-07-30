@@ -69,9 +69,9 @@ class _PendingGroup:
 class MultipartAccumulator:
     """Pure, in-memory accumulator for inbound concatenated SMS fragments.
 
-    Groups fragments by (sender, reference, total_parts, is_16bit) so that
-    8-bit and 16-bit concatenation references never collide, and releases
-    the joined body once every sequence number from 1..total_parts has
+    Groups fragments by sender and concatenation metadata so that 8-bit and
+    16-bit references never collide, then releases the joined body once every
+    sequence number from 1..total_parts has
     arrived. Callers supply a monotonic ``now`` value on every call; this
     class never reads the wall clock.
     """
