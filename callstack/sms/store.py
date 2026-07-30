@@ -278,7 +278,7 @@ class SMSStore:
             return sms
 
     async def save_delivery_report(self, report: DeliveryReport) -> DeliveryReport:
-        """Save a delivery report and update the latest matching outbound SMS."""
+        """Save a delivery report and update a unique matching outbound SMS."""
         async with self._lock:
             return await self._save_delivery_report_locked(report)
 
@@ -367,11 +367,17 @@ class SMSStore:
     def _latest_matching_message(self, report: DeliveryReport) -> SMS | None:
         if not report.recipient:
             return None
-        for sms in reversed(self._messages):
-            if sms.id is None or not sms.recipient:
-                continue
-            if sms.reference == report.reference and sms.recipient == report.recipient:
-                return sms
+        matches = [
+            sms
+            for sms in self._messages
+            if sms.id is not None
+            and sms.recipient
+            and not sms.is_incoming
+            and sms.reference == report.reference
+            and sms.recipient == report.recipient
+        ]
+        if len(matches) == 1:
+            return matches[0]
         return None
 
     async def list_delivery_reports(self, limit: int = 100) -> list[DeliveryReport]:
