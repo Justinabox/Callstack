@@ -245,6 +245,14 @@ def _enqueue_websocket_envelope(queue: asyncio.Queue[dict[str, Any]], envelope: 
         queue.put_nowait(overflow)
 
 
+def _resolve_websocket_queue_maxsize(app: web.Application) -> int:
+    """Return the WebSocket queue maxsize, validating any app-level override."""
+    queue_maxsize = app.get("callstack_ws_queue_size", _WEBSOCKET_QUEUE_MAXSIZE)
+    if isinstance(queue_maxsize, bool) or not isinstance(queue_maxsize, int) or queue_maxsize <= 0:
+        raise ValueError("WebSocket queue maxsize must be a positive integer")
+    return queue_maxsize
+
+
 def _selected_websocket_event_names(request: web.Request) -> tuple[str, ...] | None:
     """Return normalized requested public WebSocket event names, or None if invalid."""
     raw_events = request.query.get("events")
@@ -296,13 +304,13 @@ def create_app(modem: Modem, api_keys: list[str] | None = None) -> web.Applicati
                 },
                 status=400,
             )
+        queue_maxsize = _resolve_websocket_queue_maxsize(request.app)
         selected_event_specs = _websocket_event_specs_for_names(selected_events)
         selected_event_types = tuple(event_type for event_type, _event_name in selected_event_specs)
 
         ws = web.WebSocketResponse()
         await ws.prepare(request)
-        queue_size = int(request.app.get("callstack_ws_queue_size", _WEBSOCKET_QUEUE_MAXSIZE))
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=queue_size)
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=queue_maxsize)
 
         async def send_loop() -> None:
             await ws.send_json({
