@@ -1,6 +1,7 @@
 """Tests for the top-level Modem orchestrator."""
 
 import asyncio
+import logging
 import pytest
 from unittest.mock import AsyncMock, patch
 
@@ -699,6 +700,23 @@ class TestModemAutoReconnect:
 
             assert modem._connected is True
             assert len(reconnected) >= 1
+
+    async def test_unexpected_reconnect_error_does_not_leak_raw_payload(self, caplog):
+        marker = "AT+CMGR: PRIVATE_RAW_PAYLOAD_MARKER"
+        modem = MockModem(ModemConfig(auto_reconnect=True, reconnect_interval=0.01))
+
+        async def failing_initialize_modem():
+            modem._shutdown.set()
+            raise RuntimeError(f"boom {marker}")
+
+        modem._initialize_modem = failing_initialize_modem
+
+        with caplog.at_level(logging.ERROR, logger="callstack.modem"):
+            await modem._auto_reconnect()
+
+        assert any(record.levelno >= logging.ERROR for record in caplog.records)
+        assert marker not in caplog.text
+        assert "Traceback" not in caplog.text
 
 
 class TestRegistrationInfo:

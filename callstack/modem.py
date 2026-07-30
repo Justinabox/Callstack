@@ -365,7 +365,11 @@ class Modem:
                 delay = min(delay * 2, max_delay)
 
             except Exception as exc:
-                logger.exception("Unexpected error during reconnect: %s", exc)
+                logger.error(
+                    "Unexpected error during reconnect (attempt %d): %s",
+                    attempt,
+                    type(exc).__name__,
+                )
                 delay = min(delay * 2, max_delay)
 
     # -- Incoming call routing --
