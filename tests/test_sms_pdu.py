@@ -479,6 +479,13 @@ class TestDeliverPDU:
         assert decoded["body"] == "Hi"
         assert decoded["timestamp"] is not None
 
+    def test_decode_deliver_pdu_rejects_numeric_sender_with_invalid_timestamp(self):
+        pdu = self._numeric_deliver_pdu().replace(
+            "42215241030040", "00000000000000"
+        )
+
+        assert PDUDecoder.decode_deliver_pdu(pdu) is None
+
     @pytest.mark.parametrize(
         "sender_encoded,sender_len",
         [
