@@ -154,6 +154,23 @@ async def test_naive_send_at_raises_value_error():
         await scheduler.run_due_once(datetime(2026, 1, 1, tzinfo=timezone.utc))
 
 
+async def test_invalid_later_send_at_prevents_any_job_dispatch():
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    due_job = make_job(recipient="+1555", send_at=now)
+    naive_job = make_job(recipient="+1556", send_at=datetime(2026, 1, 1))
+    sender = RecordingSender(result=FakeResult(reference=1))
+    scheduler = SMSScheduler(sender=sender, jobs=[due_job, naive_job])
+
+    with pytest.raises(ValueError):
+        await scheduler.run_due_once(now)
+
+    assert sender.calls == []
+    assert due_job.status == "pending"
+    assert due_job.sent_at is None
+    assert naive_job.status == "pending"
+    assert naive_job.sent_at is None
+
+
 class NoneOffsetTzinfo(tzinfo):
     """tzinfo whose utcoffset() returns None, making it naive per Python semantics."""
 
