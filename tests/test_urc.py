@@ -186,3 +186,62 @@ class TestDispatch:
         assert "status=1" in caplog.text
         assert "ABCD" not in caplog.text
         assert "12345678" not in caplog.text
+
+
+class BrokenBus:
+    """Event bus stub whose emit() always fails, to exercise the dispatch() exception path."""
+
+    async def emit(self, event) -> None:
+        raise RuntimeError(f"forced emit failure: {event!r}")
+
+
+class TestDispatchExceptionPathRedaction:
+    @pytest.mark.parametrize(
+        "line,followup,sentinels,safe_summary",
+        [
+            (
+                '+CMT: "SENDER-SENTINEL-3M9P","","2024/01/15"',
+                "FOLLOWUP-BODY-SENTINEL-3M9P-PRIVATE",
+                ["SENDER-SENTINEL-3M9P", "FOLLOWUP-BODY-SENTINEL-3M9P-PRIVATE"],
+                "+CMT:<redacted>",
+            ),
+            (
+                '+CUSD: 0,"USSD-SENTINEL-7K2L",15',
+                "",
+                ["USSD-SENTINEL-7K2L"],
+                "+CUSD:<redacted>",
+            ),
+            (
+                '+CDSI: "STORAGE-SENTINEL-9F3Q",5',
+                "",
+                ["STORAGE-SENTINEL-9F3Q"],
+                "+CDSI:<redacted>",
+            ),
+        ],
+    )
+    async def test_dispatch_exception_path_redacts_urc_payload(
+        self, caplog, line, followup, sentinels, safe_summary
+    ):
+        caplog.set_level(logging.DEBUG, logger="callstack.urc")
+        broken_urc = URCDispatcher(BrokenBus())
+
+        await broken_urc.dispatch(line, followup=followup)
+
+        assert line not in caplog.text
+        for sentinel in sentinels:
+            assert sentinel not in caplog.text
+        assert safe_summary in caplog.text
+
+    async def test_dispatch_exception_path_redacts_verbose_registration_payload(self, caplog):
+        class RegistrationFailureDispatcher(URCDispatcher):
+            async def _dispatch_event(self, line: str, followup: str) -> None:
+                raise RuntimeError(f"forced registration failure: {line}")
+
+        line = '+CEREG: 2,1,"FEED1234","BEEF5678",7'
+        with caplog.at_level(logging.DEBUG, logger="callstack.urc"):
+            await RegistrationFailureDispatcher(EventBus()).dispatch(line)
+
+        assert line not in caplog.text
+        assert "FEED1234" not in caplog.text
+        assert "BEEF5678" not in caplog.text
+        assert "+CEREG: status=1" in caplog.text
