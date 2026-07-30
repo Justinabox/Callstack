@@ -91,10 +91,26 @@ class APIKeyAuth:
         self._keys: set[str] = set()
         if api_keys:
             self._keys = {self._validated_key(key) for key in api_keys}
-        self._rate_limit = rate_limit
-        self._rate_window = rate_window
+        self._rate_limit = self._validated_rate_limit(rate_limit)
+        self._rate_window = self._validated_rate_window(rate_window)
         self._request_log: dict[str, list[float]] = defaultdict(list)
         self.enabled = bool(self._keys)
+
+    @staticmethod
+    def _validated_rate_limit(rate_limit: int) -> int:
+        if isinstance(rate_limit, bool) or not isinstance(rate_limit, int):
+            raise ValueError("rate_limit must be a positive integer")
+        if rate_limit <= 0:
+            raise ValueError("rate_limit must be a positive integer")
+        return rate_limit
+
+    @staticmethod
+    def _validated_rate_window(rate_window: float) -> float:
+        if isinstance(rate_window, bool) or not isinstance(rate_window, (int, float)):
+            raise ValueError("rate_window must be a positive, finite number")
+        if not math.isfinite(rate_window) or rate_window <= 0:
+            raise ValueError("rate_window must be a positive, finite number")
+        return rate_window
 
     @web.middleware
     async def middleware(self, request: web.Request, handler) -> web.Response:
