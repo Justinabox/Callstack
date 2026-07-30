@@ -25,6 +25,19 @@ from callstack.voice.audio import AudioPipeline
 logger = logging.getLogger("callstack.voice.service")
 
 
+def _validate_dial_timeout(timeout: float) -> float:
+    """Validate outbound dial timeouts before changing call state or writing AT."""
+    if type(timeout) not in (int, float):
+        raise ValueError("Invalid dial timeout")
+    try:
+        timeout_value = float(timeout)
+    except OverflowError:
+        raise ValueError("Invalid dial timeout") from None
+    if not math.isfinite(timeout_value) or timeout_value <= 0:
+        raise ValueError("Invalid dial timeout")
+    return timeout_value
+
+
 class CallService:
     """High-level voice call operations.
 
@@ -76,6 +89,7 @@ class CallService:
 
     async def dial(self, number: str, timeout: float = 30.0) -> "CallSession":
         """Initiate an outbound call. Returns a CallSession handle."""
+        timeout = _validate_dial_timeout(timeout)
         await self._fsm.transition(CallState.DIALING)
         logger.info("Dialing %s", redact_phone_number(number))
         disconnect_generation = self._disconnect_generation
