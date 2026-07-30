@@ -14,9 +14,8 @@ def store():
     return SMSStore()
 
 
-async def test_save_delivery_report_correlates_latest_matching_outbound_sms(store):
-    older = await store.save(SMS(recipient="+15551234567", status="sent", reference=42))
-    newer = await store.save(SMS(recipient="+15551234567", status="sent", reference=42))
+async def test_save_delivery_report_correlates_unique_matching_outbound_sms(store):
+    match = await store.save(SMS(recipient="+15551234567", status="sent", reference=42))
     await store.save(SMS(recipient="+15557654321", status="sent", reference=42))
 
     report = await store.save_delivery_report(
@@ -24,13 +23,59 @@ async def test_save_delivery_report_correlates_latest_matching_outbound_sms(stor
     )
 
     assert report.id == 1
-    assert report.message_id == newer.id
-    assert (await store.get(older.id)).status == "sent"
-    assert (await store.get(newer.id)).status == "delivered"
+    assert report.message_id == match.id
+    assert (await store.get(match.id)).status == "delivered"
     listed = await store.list_delivery_reports()
     assert [(item.id, item.reference, item.message_id, item.status) for item in listed] == [
-        (1, 42, newer.id, "delivered")
+        (1, 42, match.id, "delivered")
     ]
+
+
+async def test_save_delivery_report_does_not_correlate_when_multiple_outbound_matches(store):
+    first = await store.save(SMS(recipient="+15551234567", status="sent", reference=42))
+    second = await store.save(SMS(recipient="+15551234567", status="sent", reference=42))
+
+    report = await store.save_delivery_report(
+        DeliveryReport(reference=42, recipient="+15551234567", status="delivered")
+    )
+
+    assert report.message_id is None
+    assert (await store.get(first.id)).status == "sent"
+    assert (await store.get(second.id)).status == "sent"
+
+
+async def test_sqlite_delivery_report_ambiguous_match_stays_unresolved_after_reopen(tmp_path):
+    pytest.importorskip("aiosqlite")
+    db_path = str(tmp_path / "sms.db")
+    store = SMSStore(db_path=db_path)
+    try:
+        await store.initialize()
+        first = await store.save(SMS(recipient="+15551234567", status="sent", reference=46))
+        second = await store.save(SMS(recipient="+15551234567", status="sent", reference=46))
+        saved = await store.save_delivery_report(
+            DeliveryReport(reference=46, recipient="+15551234567", status="delivered")
+        )
+        assert saved.message_id is None
+        await store.close()
+
+        reopened = SMSStore(db_path=db_path)
+        try:
+            await reopened.initialize()
+            reports = await reopened.list_delivery_reports()
+            messages = await reopened.list()
+        finally:
+            await reopened.close()
+
+        assert [
+            (report.reference, report.recipient, report.status, report.message_id)
+            for report in reports
+        ] == [(46, "+15551234567", "delivered", None)]
+        assert [(message.id, message.status) for message in messages] == [
+            (first.id, "sent"),
+            (second.id, "sent"),
+        ]
+    finally:
+        await store.close()
 
 
 async def test_sqlite_delivery_reports_survive_reopen_and_preserve_message_status(tmp_path):
@@ -70,6 +115,23 @@ async def test_save_delivery_report_does_not_correlate_inbound_message_with_same
     )
 
     assert report.message_id is None
+    assert (await store.get(incoming.id)).status == "unread"
+
+
+async def test_save_delivery_report_ignores_inbound_message_sharing_recipient_and_reference(store):
+    incoming = await store.save(
+        SMS(recipient="+15551234567", status="unread", reference=42)
+    )
+    outbound = await store.save(
+        SMS(recipient="+15551234567", status="sent", reference=42)
+    )
+
+    report = await store.save_delivery_report(
+        DeliveryReport(reference=42, recipient="+15551234567", status="delivered")
+    )
+
+    assert report.message_id == outbound.id
+    assert (await store.get(outbound.id)).status == "delivered"
     assert (await store.get(incoming.id)).status == "unread"
 
 
