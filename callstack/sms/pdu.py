@@ -593,7 +593,7 @@ class PDUDecoder:
             ts_hex = pdu_hex[pos:pos + 14]
             pos += 14
             timestamp = PDUDecoder.decode_timestamp(ts_hex)
-            if is_alphanumeric_sender and timestamp is None:
+            if timestamp is None:
                 return None
 
             # User data length
@@ -605,10 +605,12 @@ class PDUDecoder:
             # Decode based on DCS
             if (dcs & 0x0C) == 0x08:
                 # UCS2: UDL is an octet count.
+                if udl % 2:
+                    return None
                 ud_hex_len = udl * 2
                 if len(ud_hex) != ud_hex_len:
                     return None
-                body = bytes.fromhex(ud_hex[:ud_hex_len]).decode("utf-16-be", errors="replace")
+                body = bytes.fromhex(ud_hex[:ud_hex_len]).decode("utf-16-be")
             elif (dcs & 0x0C) == 0x04:
                 # 8-bit: UDL is an octet count.
                 ud_hex_len = udl * 2

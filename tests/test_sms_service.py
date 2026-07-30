@@ -17,7 +17,7 @@ from callstack.errors import SMSPersistenceError, SMSSendError
 from callstack.protocol.executor import ATCommandExecutor, ATResponse
 from callstack.protocol.urc import URCDispatcher
 from callstack.transport.mock import MockTransport
-from callstack.sms.pdu import PDUEncoder
+from callstack.sms.pdu import MultipartInfo, PDUEncoder
 from callstack.sms.service import SMSService
 from callstack.sms.store import SMSStore
 from callstack.sms.types import SMS
@@ -90,6 +90,24 @@ def _alphanumeric_deliver_pdu(sender: str = "ACME/OTP", body: str = "Hi") -> str
     )
 
 
+def _numeric_ucs2_deliver_pdu(user_data: bytes, *, udl: int | None = None) -> str:
+    """Build a numeric-originator UCS2 SMS-DELIVER PDU for reject-path tests."""
+    sender = "5550123"
+    sender_encoded, toa = PDUEncoder.encode_phone_number(sender)
+    return (
+        "00"  # SCA: use default SMSC
+        "04"  # SMS-DELIVER
+        f"{len(sender):02X}"
+        f"{toa:02X}"
+        f"{sender_encoded}"
+        "00"  # PID
+        "08"  # DCS: UCS2
+        "42215241030040"  # SCTS
+        f"{len(user_data) if udl is None else udl:02X}"
+        f"{user_data.hex().upper()}"
+    )
+
+
 @pytest.fixture
 def bus():
     return EventBus()
@@ -125,6 +143,36 @@ class FailingSMSStore(SMSStore):
 
     async def save(self, sms):
         raise RuntimeError("simulated durable store failure")
+
+
+class FailOnceSMSStore(SMSStore):
+    """Fails precisely once so a raw PDU replay can prove retry eligibility."""
+
+    def __init__(self):
+        super().__init__()
+        self._fail_next_save = True
+
+    async def save(self, sms):
+        if self._fail_next_save:
+            self._fail_next_save = False
+            raise RuntimeError("simulated durable store failure")
+        return await super().save(sms)
+
+
+class BlockingSMSStore(SMSStore):
+    """Pauses the first save, creating a deterministic concurrent-ingest race."""
+
+    def __init__(self):
+        super().__init__()
+        self.save_started = asyncio.Event()
+        self.release_save = asyncio.Event()
+        self.save_calls = 0
+
+    async def save(self, sms):
+        self.save_calls += 1
+        self.save_started.set()
+        await self.release_save.wait()
+        return await super().save(sms)
 
 
 # -- Initialization --
@@ -964,8 +1012,8 @@ async def test_ingest_pdu_single_part_persists_and_emits_event(sms_service, bus,
     assert received[0].body == "Hi"
 
 
-async def test_ingest_pdu_store_failure_still_emits_event_without_private_log(executor, bus, caplog):
-    """Direct PDU delivery cannot be retried from a SIM slot after store failure."""
+async def test_ingest_pdu_store_failure_fails_closed_without_private_log(executor, bus, caplog):
+    """Raw PDU delivery is not publicly accepted before durable persistence succeeds."""
     service = SMSService(executor, bus, FailingSMSStore())
     sender = "5550123"
     body = "private one-time code 123456"
@@ -974,17 +1022,102 @@ async def test_ingest_pdu_store_failure_still_emits_event_without_private_log(ex
     async with bus.stream(IncomingSMSEvent) as incoming:
         with caplog.at_level(logging.WARNING, logger="callstack.sms"):
             result = await service.ingest_pdu(pdu)
-            event = await incoming.next(timeout=1.0)
+            event = await incoming.next(timeout=0.01)
 
     assert result is None
-    assert event is not None
-    assert event.sender == sender
-    assert event.body == body
+    assert event is None
     assert "Failed to persist direct PDU delivery" in caplog.text
     assert "RuntimeError" in caplog.text
     assert sender not in caplog.text
     assert "123456" not in caplog.text
     assert "simulated durable store failure" not in caplog.text
+
+
+async def test_ingest_pdu_single_part_concurrent_replay_persists_and_emits_once(executor, bus):
+    """Concurrent exact single-PDU replays have one durable/public acceptance."""
+    store = BlockingSMSStore()
+    service = SMSService(executor, bus, store)
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+    pdu = _numeric_deliver_pdu(body="Race")
+    first = asyncio.create_task(service.ingest_pdu(pdu))
+    await asyncio.wait_for(store.save_started.wait(), timeout=1.0)
+    second = asyncio.create_task(service.ingest_pdu(pdu))
+    await asyncio.sleep(0)
+    store.release_save.set()
+    results = await asyncio.gather(first, second)
+    await asyncio.sleep(0.01)
+
+    assert sum(result is not None for result in results) == 1
+    assert store.save_calls == 1
+    assert await store.count() == 1
+    assert [event.body for event in received] == ["Race"]
+
+
+async def test_ingest_pdu_multipart_replay_retries_after_persistence_failure(executor, bus):
+    """A failed completed assembly is not tombstoned and can be fully replayed."""
+    store = FailOnceSMSStore()
+    service = SMSService(executor, bus, store)
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+    part_one = _numeric_deliver_pdu_with_udh(bytes.fromhex("0500037A0201"), "Hello")
+    part_two = _numeric_deliver_pdu_with_udh(bytes.fromhex("0500037A0202"), "World")
+
+    assert await service.ingest_pdu(part_one) is None
+    assert await service.ingest_pdu(part_two) is None
+    await asyncio.sleep(0.01)
+    assert received == []
+
+    assert await service.ingest_pdu(part_one) is None
+    result = await service.ingest_pdu(part_two)
+    await asyncio.sleep(0.01)
+
+    assert result is not None
+    assert result.body == "HelloWorld"
+    assert await store.count() == 1
+    assert [event.body for event in received] == ["HelloWorld"]
+
+
+@pytest.mark.parametrize("user_data,udl", [(b"\x00", 1), (bytes.fromhex("D800"), 2)])
+async def test_ingest_pdu_rejects_malformed_ucs2_without_side_effects(
+    sms_service, bus, store, user_data, udl
+):
+    """Malformed UCS2 cannot become replacement text at the raw ingress boundary."""
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+
+    assert await sms_service.ingest_pdu(_numeric_ucs2_deliver_pdu(user_data, udl=udl)) is None
+    await asyncio.sleep(0.01)
+
+    assert await store.count() == 0
+    assert received == []
+
+
+@pytest.mark.parametrize("pdu", ["not-hex", "00" + ("AA" * 188)])
+async def test_ingest_pdu_rejects_invalid_or_oversized_input_before_decoder(
+    sms_service, monkeypatch, pdu
+):
+    """Raw ingress bounds/validates input before handing it to the slicing decoder."""
+    def decoder_must_not_run(_pdu):
+        raise AssertionError("decoder must not run")
+
+    monkeypatch.setattr(
+        "callstack.sms.service.PDUDecoder.decode_deliver_pdu", decoder_must_not_run
+    )
+
+    assert await sms_service.ingest_pdu(pdu) is None
 
 
 async def test_ingest_pdu_alphanumeric_sender_is_not_logged(sms_service, caplog):
@@ -1221,6 +1354,21 @@ async def test_ingest_pdu_replay_after_completion_does_not_duplicate_delivery(sm
 
     assert await store.count() == 1
     assert [event.body for event in received] == ["HelloWorld"]
+
+
+def test_pdu_completion_tombstone_expires_after_duplicate_replay(sms_service):
+    """A duplicate cannot keep an expired tombstone hidden behind a newer entry."""
+    first_info = MultipartInfo(1, 2, 2)
+    second_info = MultipartInfo(2, 2, 2)
+    sms_service._pdu_completion_max_age = 1.0
+
+    sms_service._record_pdu_completion("first", "body-one", first_info, 0.0)
+    sms_service._record_pdu_completion("second", "body-two", second_info, 0.5)
+
+    assert sms_service._has_pdu_completion("first", "body-one", first_info, 0.5)
+    assert "first" not in repr(sms_service._recent_pdu_completions)
+    assert "body-one" not in repr(sms_service._recent_pdu_completions)
+    assert not sms_service._has_pdu_completion("first", "body-one", first_info, 1.1)
 
 
 async def test_ingest_pdu_reassembles_parts_with_distinct_segment_timestamps(sms_service, bus, store):
