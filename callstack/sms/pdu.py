@@ -477,7 +477,11 @@ class PDUDecoder:
             return None
 
         def swap_bcd(hex_pair: str) -> int:
-            return int(hex_pair[1] + hex_pair[0])
+            low_nibble = int(hex_pair[1], 16)
+            high_nibble = int(hex_pair[0], 16)
+            if low_nibble > 9 or high_nibble > 9:
+                raise ValueError("invalid BCD digit")
+            return low_nibble * 10 + high_nibble
 
         try:
             year = 2000 + swap_bcd(ts_hex[0:2])
@@ -492,7 +496,13 @@ class PDUDecoder:
             raw_tz_byte = int(ts_hex[12:14], 16)
             tz_sign = -1 if raw_tz_byte & 0x08 else 1
             raw_tz_clean = raw_tz_byte & ~0x08
-            tz_quarters = ((raw_tz_clean & 0x0F) * 10) + ((raw_tz_clean >> 4) & 0x0F)
+            tz_low_nibble = raw_tz_clean & 0x0F
+            tz_high_nibble = (raw_tz_clean >> 4) & 0x0F
+            if tz_low_nibble > 9 or tz_high_nibble > 9:
+                return None
+            tz_quarters = tz_low_nibble * 10 + tz_high_nibble
+            if tz_quarters > 56:
+                return None
             tz_offset = timedelta(minutes=tz_sign * tz_quarters * 15)
 
             return datetime(year, month, day, hour, minute, second,
@@ -518,6 +528,10 @@ class PDUDecoder:
             # PDU type
             pdu_type = int(pdu_hex[pos:pos + 2], 16)
             pos += 2
+
+            # TP-MTI: only SMS-DELIVER (00) is valid for this decoder.
+            if (pdu_type & 0x03) != 0x00:
+                return None
 
             # Sender address length (number of digits)
             oa_len = int(pdu_hex[pos:pos + 2], 16)
@@ -555,11 +569,31 @@ class PDUDecoder:
             dcs = int(pdu_hex[pos:pos + 2], 16)
             pos += 2
 
+            # Support only General Data Coding and message-class DCS groups.
+            # Other groups (including MWI) need their own semantics; fail closed.
+            is_general_dcs = (dcs & 0xC0) == 0x00
+            is_message_class_dcs = (dcs & 0xF0) == 0xF0
+            if not (is_general_dcs or is_message_class_dcs):
+                return None
+
+            alphabet = dcs & 0x0C
+            if alphabet == 0x0C:
+                return None
+
+            # TP-DCS compression is defined only for General Data Coding.
+            if is_general_dcs and dcs & 0x20:
+                return None
+
+            # This decoder only understands UDH layout for GSM 7-bit payloads.
+            # Reject other UDHI encodings rather than treating their header as body.
+            if (pdu_type & 0x40) and alphabet != 0x00:
+                return None
+
             # Timestamp (7 octets = 14 hex chars)
             ts_hex = pdu_hex[pos:pos + 14]
             pos += 14
             timestamp = PDUDecoder.decode_timestamp(ts_hex)
-            if is_alphanumeric_sender and timestamp is None:
+            if timestamp is None:
                 return None
 
             # User data length
@@ -571,10 +605,12 @@ class PDUDecoder:
             # Decode based on DCS
             if (dcs & 0x0C) == 0x08:
                 # UCS2: UDL is an octet count.
+                if udl % 2:
+                    return None
                 ud_hex_len = udl * 2
                 if len(ud_hex) != ud_hex_len:
                     return None
-                body = bytes.fromhex(ud_hex[:ud_hex_len]).decode("utf-16-be", errors="replace")
+                body = bytes.fromhex(ud_hex[:ud_hex_len]).decode("utf-16-be")
             elif (dcs & 0x0C) == 0x04:
                 # 8-bit: UDL is an octet count.
                 ud_hex_len = udl * 2

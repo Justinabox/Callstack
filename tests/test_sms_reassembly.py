@@ -18,6 +18,23 @@ def test_reassembles_8bit_parts_out_of_order():
     assert acc.pending_group_count == 0
 
 
+def test_completed_multipart_exposes_sequence_ordered_segment_identities_without_pii_repr():
+    acc = MultipartAccumulator(max_age=60, max_groups=10)
+    info_seq2 = MultipartInfo(reference=1, total_parts=2, sequence=2)
+    info_seq1 = MultipartInfo(reference=1, total_parts=2, sequence=1)
+
+    assert acc.add_part_with_identity("secret-sender", info_seq2, "World", b"two", now=0) is None
+    completed = acc.add_part_with_identity(
+        "secret-sender", info_seq1, "Hello", b"one", now=1
+    )
+
+    assert completed is not None
+    assert completed.body == "HelloWorld"
+    assert completed.segment_identities == (b"one", b"two")
+    assert "secret-sender" not in repr(completed)
+    assert "HelloWorld" not in repr(completed)
+
+
 def test_16bit_and_8bit_groups_with_same_reference_do_not_collide():
     acc = MultipartAccumulator(max_age=60, max_groups=10)
     info_8bit_seq1 = MultipartInfo(reference=5, total_parts=2, sequence=1, is_16bit=False)

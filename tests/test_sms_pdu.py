@@ -349,6 +349,34 @@ class TestDeliverPDU:
         assert PDUDecoder.decode_timestamp("") is None
         assert PDUDecoder.decode_timestamp("short") is None
 
+    @pytest.mark.parametrize("alphanumeric", [False, True])
+    def test_decode_deliver_pdu_rejects_invalid_timestamp_for_every_originator_kind(
+        self, alphanumeric
+    ):
+        pdu = self._deliver_pdu() if alphanumeric else self._numeric_deliver_pdu()
+        pdu = pdu.replace("42215241030040", "00000000000000")
+
+        assert PDUDecoder.decode_deliver_pdu(pdu) is None
+
+    @pytest.mark.parametrize("user_data,udl", [(b"\x00", 1), (bytes.fromhex("D800"), 2)])
+    def test_decode_deliver_pdu_rejects_malformed_ucs2(self, user_data, udl):
+        sender = "5550123"
+        sender_encoded, toa = PDUEncoder.encode_phone_number(sender)
+        pdu = (
+            "00"
+            "04"
+            f"{len(sender):02X}"
+            f"{toa:02X}"
+            f"{sender_encoded}"
+            "00"
+            "08"
+            "42215241030040"
+            f"{udl:02X}"
+            f"{user_data.hex().upper()}"
+        )
+
+        assert PDUDecoder.decode_deliver_pdu(pdu) is None
+
     def test_decode_deliver_pdu_decodes_8bit_concatenation_udh(self):
         decoded = PDUDecoder.decode_deliver_pdu(
             self._numeric_deliver_pdu_with_udh(bytes.fromhex("0500037A0201"), "Part A")

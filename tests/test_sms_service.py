@@ -17,9 +17,95 @@ from callstack.errors import SMSPersistenceError, SMSSendError
 from callstack.protocol.executor import ATCommandExecutor, ATResponse
 from callstack.protocol.urc import URCDispatcher
 from callstack.transport.mock import MockTransport
+from callstack.sms.pdu import PDUEncoder
 from callstack.sms.service import SMSService
 from callstack.sms.store import SMSStore
 from callstack.sms.types import SMS
+
+
+def _numeric_deliver_pdu(sender: str = "5550123", body: str = "Hi") -> str:
+    """Build a single-part numeric-originator SMS-DELIVER PDU for tests."""
+    sender_encoded, toa = PDUEncoder.encode_phone_number(sender)
+    body_packed, body_len = PDUEncoder.encode_gsm7(body)
+    return (
+        "00"  # SCA: use default SMSC
+        "04"  # SMS-DELIVER
+        f"{len(sender.lstrip('+')):02X}"
+        f"{toa:02X}"
+        f"{sender_encoded}"
+        "00"  # PID
+        "00"  # DCS: GSM 7-bit default alphabet
+        "42215241030040"  # SCTS
+        f"{body_len:02X}"
+        f"{body_packed.hex().upper()}"
+    )
+
+
+def _pack_gsm7_user_data_with_udh(udh: bytes, body: str) -> tuple:
+    """Pack GSM-7 user data with a byte-aligned UDH for inbound PDU tests."""
+    header_septets = (len(udh) * 8 + 6) // 7
+    payload, payload_septets = PDUEncoder.encode_gsm7(body)
+    packed = bytearray((header_septets * 7 + payload_septets * 7 + 7) // 8)
+    packed[:len(udh)] = udh
+    for bit in range(payload_septets * 7):
+        if payload[bit // 8] & (1 << (bit % 8)):
+            target_bit = header_septets * 7 + bit
+            packed[target_bit // 8] |= 1 << (target_bit % 8)
+    return bytes(packed), header_septets + payload_septets
+
+
+def _numeric_deliver_pdu_with_udh(udh: bytes, body: str, sender: str = "5550123") -> str:
+    """Build a concatenated-part numeric-originator SMS-DELIVER PDU for tests."""
+    sender_encoded, toa = PDUEncoder.encode_phone_number(sender)
+    user_data, user_data_length = _pack_gsm7_user_data_with_udh(udh, body)
+    return (
+        "00"  # SCA: use default SMSC
+        "44"  # SMS-DELIVER with UDHI
+        f"{len(sender):02X}"
+        f"{toa:02X}"
+        f"{sender_encoded}"
+        "00"  # PID
+        "00"  # DCS: GSM 7-bit default alphabet
+        "42215241030040"  # SCTS
+        f"{user_data_length:02X}"
+        f"{user_data.hex().upper()}"
+    )
+
+
+def _alphanumeric_deliver_pdu(sender: str = "ACME/OTP", body: str = "Hi") -> str:
+    """Build a single-part alphanumeric-originator SMS-DELIVER PDU for tests."""
+    sender_packed, sender_len = PDUEncoder.encode_gsm7(sender)
+    body_packed, body_len = PDUEncoder.encode_gsm7(body)
+    return (
+        "00"  # SCA: use default SMSC
+        "04"  # SMS-DELIVER
+        f"{sender_len:02X}"
+        "D0"  # TON: alphanumeric
+        f"{sender_packed.hex().upper()}"
+        "00"  # PID
+        "00"  # DCS: GSM 7-bit default alphabet
+        "42215241030040"  # SCTS
+        f"{body_len:02X}"
+        f"{body_packed.hex().upper()}"
+    )
+
+
+def _numeric_ucs2_deliver_pdu(user_data: bytes, *, udl: int | None = None) -> str:
+    """Build a numeric-originator UCS2 SMS-DELIVER PDU for reject-path tests."""
+    sender = "5550123"
+    sender_encoded, toa = PDUEncoder.encode_phone_number(sender)
+    return (
+        "00"  # SCA: use default SMSC
+        "04"  # SMS-DELIVER
+        f"{len(sender):02X}"
+        f"{toa:02X}"
+        f"{sender_encoded}"
+        "00"  # PID
+        "08"  # DCS: UCS2
+        "42215241030040"  # SCTS
+        f"{len(user_data) if udl is None else udl:02X}"
+        f"{user_data.hex().upper()}"
+    )
 
 
 @pytest.fixture
@@ -57,6 +143,36 @@ class FailingSMSStore(SMSStore):
 
     async def save(self, sms):
         raise RuntimeError("simulated durable store failure")
+
+
+class FailOnceSMSStore(SMSStore):
+    """Fails precisely once so a raw PDU replay can prove retry eligibility."""
+
+    def __init__(self):
+        super().__init__()
+        self._fail_next_save = True
+
+    async def save(self, sms):
+        if self._fail_next_save:
+            self._fail_next_save = False
+            raise RuntimeError("simulated durable store failure")
+        return await super().save(sms)
+
+
+class BlockingSMSStore(SMSStore):
+    """Pauses the first save, creating a deterministic concurrent-ingest race."""
+
+    def __init__(self):
+        super().__init__()
+        self.save_started = asyncio.Event()
+        self.release_save = asyncio.Event()
+        self.save_calls = 0
+
+    async def save(self, sms):
+        self.save_calls += 1
+        self.save_started.set()
+        await self.release_save.wait()
+        return await super().save(sms)
 
 
 # -- Initialization --
@@ -871,6 +987,456 @@ async def test_receive_cmt_info_log_redacts_sender_number(sms_service, bus, capl
     assert sender not in caplog.text
     assert "private one-time code" not in caplog.text
     assert "Incoming SMS from" in caplog.text
+
+
+# -- Receiving via raw PDU --
+
+async def test_ingest_pdu_single_part_persists_and_emits_event(sms_service, bus, store):
+    """A valid single-part SMS-DELIVER PDU is persisted and emitted once."""
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+
+    sms = await sms_service.ingest_pdu(_numeric_deliver_pdu(sender="5550123", body="Hi"))
+
+    await asyncio.sleep(0.01)
+    assert sms is not None
+    assert sms.sender == "5550123"
+    assert sms.body == "Hi"
+    assert await store.count() == 1
+    assert len(received) == 1
+    assert received[0].sender == "5550123"
+    assert received[0].body == "Hi"
+
+
+async def test_ingest_pdu_store_failure_fails_closed_without_private_log(executor, bus, caplog):
+    """Raw PDU delivery is not publicly accepted before durable persistence succeeds."""
+    service = SMSService(executor, bus, FailingSMSStore())
+    sender = "5550123"
+    body = "private one-time code 123456"
+    pdu = _numeric_deliver_pdu(sender=sender, body=body)
+
+    async with bus.stream(IncomingSMSEvent) as incoming:
+        with caplog.at_level(logging.WARNING, logger="callstack.sms"):
+            result = await service.ingest_pdu(pdu)
+            event = await incoming.next(timeout=0.01)
+
+    assert result is None
+    assert event is None
+    assert "Failed to persist direct PDU delivery" in caplog.text
+    assert "RuntimeError" in caplog.text
+    assert sender not in caplog.text
+    assert "123456" not in caplog.text
+    assert "simulated durable store failure" not in caplog.text
+
+
+async def test_ingest_pdu_single_part_concurrent_replay_persists_and_emits_once(executor, bus):
+    """Concurrent exact single-PDU replays have one durable/public acceptance."""
+    store = BlockingSMSStore()
+    service = SMSService(executor, bus, store)
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+    pdu = _numeric_deliver_pdu(body="Race")
+    first = asyncio.create_task(service.ingest_pdu(pdu))
+    await asyncio.wait_for(store.save_started.wait(), timeout=1.0)
+    second = asyncio.create_task(service.ingest_pdu(pdu))
+    await asyncio.sleep(0)
+    store.release_save.set()
+    results = await asyncio.gather(first, second)
+    await asyncio.sleep(0.01)
+
+    assert sum(result is not None for result in results) == 1
+    assert store.save_calls == 1
+    assert await store.count() == 1
+    assert [event.body for event in received] == ["Race"]
+
+
+async def test_ingest_pdu_deduplicates_exact_replay_without_dropping_distinct_delivery(
+    sms_service, bus, store
+):
+    """A delivery timestamp distinguishes otherwise identical SMS-DELIVER PDUs."""
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+    first_pdu = _numeric_deliver_pdu(sender="5550123", body="Same")
+    second_pdu = first_pdu[:20] + "52215241030040" + first_pdu[34:]
+
+    assert await sms_service.ingest_pdu(first_pdu) is not None
+    assert await sms_service.ingest_pdu(first_pdu) is None
+    assert await sms_service.ingest_pdu(second_pdu) is not None
+    await asyncio.sleep(0.01)
+
+    assert await store.count() == 2
+    assert [event.body for event in received] == ["Same", "Same"]
+
+
+async def test_ingest_pdu_multipart_replay_retries_after_persistence_failure(executor, bus):
+    """A failed completed assembly is not tombstoned and can be fully replayed."""
+    store = FailOnceSMSStore()
+    service = SMSService(executor, bus, store)
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+    part_one = _numeric_deliver_pdu_with_udh(bytes.fromhex("0500037A0201"), "Hello")
+    part_two = _numeric_deliver_pdu_with_udh(bytes.fromhex("0500037A0202"), "World")
+
+    assert await service.ingest_pdu(part_one) is None
+    assert await service.ingest_pdu(part_two) is None
+    await asyncio.sleep(0.01)
+    assert received == []
+
+    assert await service.ingest_pdu(part_one) is None
+    result = await service.ingest_pdu(part_two)
+    await asyncio.sleep(0.01)
+
+    assert result is not None
+    assert result.body == "HelloWorld"
+    assert await store.count() == 1
+    assert [event.body for event in received] == ["HelloWorld"]
+
+
+async def test_ingest_pdu_final_segment_retries_failed_completed_multipart(executor, bus):
+    """The exact final segment retries one failed completed logical delivery."""
+    store = FailOnceSMSStore()
+    service = SMSService(executor, bus, store)
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+    part_one = _numeric_deliver_pdu_with_udh(bytes.fromhex("0500037A0201"), "Hello")
+    part_two = _numeric_deliver_pdu_with_udh(bytes.fromhex("0500037A0202"), "World")
+
+    assert await service.ingest_pdu(part_one) is None
+    assert await service.ingest_pdu(part_two) is None
+    assert "5550123" not in repr(service._failed_multipart_deliveries)
+    assert "HelloWorld" not in repr(service._failed_multipart_deliveries)
+    assert await service.ingest_pdu(part_two) is not None
+    await asyncio.sleep(0.01)
+
+    assert await store.count() == 1
+    assert [event.body for event in received] == ["HelloWorld"]
+
+
+@pytest.mark.parametrize("user_data,udl", [(b"\x00", 1), (bytes.fromhex("D800"), 2)])
+async def test_ingest_pdu_rejects_malformed_ucs2_without_side_effects(
+    sms_service, bus, store, user_data, udl
+):
+    """Malformed UCS2 cannot become replacement text at the raw ingress boundary."""
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+
+    assert await sms_service.ingest_pdu(_numeric_ucs2_deliver_pdu(user_data, udl=udl)) is None
+    await asyncio.sleep(0.01)
+
+    assert await store.count() == 0
+    assert received == []
+
+
+@pytest.mark.parametrize("pdu", ["not-hex", "00" + ("AA" * 188)])
+async def test_ingest_pdu_rejects_invalid_or_oversized_input_before_decoder(
+    sms_service, monkeypatch, pdu
+):
+    """Raw ingress bounds/validates input before handing it to the slicing decoder."""
+    def decoder_must_not_run(_pdu):
+        raise AssertionError("decoder must not run")
+
+    monkeypatch.setattr(
+        "callstack.sms.service.PDUDecoder.decode_deliver_pdu", decoder_must_not_run
+    )
+
+    assert await sms_service.ingest_pdu(pdu) is None
+
+
+async def test_ingest_pdu_alphanumeric_sender_is_not_logged(sms_service, caplog):
+    """Parser-accepted alphanumeric originators never cross the logging boundary."""
+    sender = "ACME/OTP"
+    body = "login token"
+    raw_pdu = _alphanumeric_deliver_pdu(sender=sender, body=body)
+    caplog.set_level(logging.INFO, logger="callstack.sms")
+
+    result = await sms_service.ingest_pdu(raw_pdu)
+
+    assert result is not None
+    assert result.sender == sender
+    assert result.body == body
+    assert sender not in caplog.text
+    assert body not in caplog.text
+    assert raw_pdu not in caplog.text
+
+
+async def test_ingest_pdu_malformed_fails_closed(sms_service, bus, store, caplog):
+    """A malformed PDU is rejected without persistence, emission, or PII leaks."""
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+    malformed_pdu = "00"
+
+    with caplog.at_level(logging.WARNING, logger="callstack.sms"):
+        result = await sms_service.ingest_pdu(malformed_pdu)
+        await asyncio.sleep(0.01)
+
+    assert result is None
+    assert await store.count() == 0
+    assert received == []
+    assert malformed_pdu not in caplog.text
+
+
+async def test_ingest_pdu_rejects_non_string_input_without_side_effects(sms_service, bus, store):
+    """Invalid PDU types must fail closed rather than surfacing parser errors."""
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+
+    result = await sms_service.ingest_pdu(None)
+    await asyncio.sleep(0.01)
+
+    assert result is None
+    assert await store.count() == 0
+    assert received == []
+
+
+async def test_ingest_pdu_rejects_non_deliver_tpdu_without_side_effects(sms_service, bus, store):
+    """Non-DELIVER TPDUs are not inbound messages and must fail closed."""
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+    submit_pdu = "00" + "01" + _numeric_deliver_pdu()[4:]
+
+    result = await sms_service.ingest_pdu(submit_pdu)
+    await asyncio.sleep(0.01)
+
+    assert result is None
+    assert await store.count() == 0
+    assert received == []
+
+
+async def test_ingest_pdu_rejects_reserved_dcs_without_side_effects(sms_service, bus, store):
+    """Reserved alphabet DCS values must fail closed rather than decode as GSM-7."""
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+    deliver_pdu = _numeric_deliver_pdu()
+    reserved_dcs_pdu = deliver_pdu[:18] + "0C" + deliver_pdu[20:]
+
+    result = await sms_service.ingest_pdu(reserved_dcs_pdu)
+    await asyncio.sleep(0.01)
+
+    assert result is None
+    assert await store.count() == 0
+    assert received == []
+
+
+async def test_ingest_pdu_accepts_gsm7_message_class_dcs(sms_service, bus, store):
+    """Classed GSM-7 PDUs are valid and must not be mistaken for compressed data."""
+    deliver_pdu = _numeric_deliver_pdu(body="Hi")
+    classed_gsm7_pdu = deliver_pdu[:18] + "F1" + deliver_pdu[20:]
+
+    result = await sms_service.ingest_pdu(classed_gsm7_pdu)
+
+    assert result is not None
+    assert result.body == "Hi"
+    assert await store.count() == 1
+
+
+async def test_ingest_pdu_rejects_udhi_for_unsupported_non_gsm7_encoding(sms_service, bus, store):
+    """UDHI requires a supported GSM-7 path; it must not be silently ignored."""
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+    deliver_pdu = _numeric_deliver_pdu()
+    unsupported_pdu = deliver_pdu[:2] + "44" + deliver_pdu[4:18] + "08" + deliver_pdu[20:]
+
+    result = await sms_service.ingest_pdu(unsupported_pdu)
+    await asyncio.sleep(0.01)
+
+    assert result is None
+    assert await store.count() == 0
+    assert received == []
+
+
+async def test_ingest_pdu_rejects_invalid_timestamp_without_side_effects(sms_service, bus, store):
+    """A malformed SCTS must not be replaced with a current timestamp."""
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+    deliver_pdu = _numeric_deliver_pdu()
+    invalid_timestamp_pdu = deliver_pdu[:20] + "FFFFFFFFFFFFFF" + deliver_pdu[34:]
+
+    result = await sms_service.ingest_pdu(invalid_timestamp_pdu)
+    await asyncio.sleep(0.01)
+
+    assert result is None
+    assert await store.count() == 0
+    assert received == []
+
+
+async def test_ingest_pdu_rejects_invalid_timestamp_timezone_bcd(sms_service, bus, store):
+    """Invalid SCTS timezone digits must not become a fabricated timestamp."""
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+    deliver_pdu = _numeric_deliver_pdu()
+    invalid_timezone_pdu = deliver_pdu[:32] + "AF" + deliver_pdu[34:]
+
+    result = await sms_service.ingest_pdu(invalid_timezone_pdu)
+    await asyncio.sleep(0.01)
+
+    assert result is None
+    assert await store.count() == 0
+    assert received == []
+
+
+async def test_ingest_pdu_rejects_compressed_udhi_parts_without_side_effects(sms_service, bus, store):
+    """Compressed UDH payloads are unsupported and must not look like plaintext."""
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+    udh_seq1 = bytes.fromhex("0500037A0201")
+    udh_seq2 = bytes.fromhex("0500037A0202")
+    compressed_part_one = _numeric_deliver_pdu_with_udh(udh_seq1, "Hello")
+    compressed_part_two = _numeric_deliver_pdu_with_udh(udh_seq2, "World")
+    compressed_part_one = compressed_part_one[:18] + "20" + compressed_part_one[20:]
+    compressed_part_two = compressed_part_two[:18] + "20" + compressed_part_two[20:]
+
+    assert await sms_service.ingest_pdu(compressed_part_one) is None
+    assert await sms_service.ingest_pdu(compressed_part_two) is None
+    await asyncio.sleep(0.01)
+
+    assert await store.count() == 0
+    assert received == []
+
+
+async def test_ingest_pdu_concatenated_parts_reassemble_out_of_order(sms_service, bus, store):
+    """Out-of-order concatenated GSM-7 parts are buffered and released once complete."""
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+    udh = bytes.fromhex("0500037A0202")  # 8-bit concat ref=0x7A, total=2, seq=2
+    part_two = _numeric_deliver_pdu_with_udh(udh, "World")
+
+    first_result = await sms_service.ingest_pdu(part_two)
+    await asyncio.sleep(0.01)
+
+    assert first_result is None
+    assert await store.count() == 0
+    assert received == []
+
+    udh_seq1 = bytes.fromhex("0500037A0201")  # same ref/total, seq=1
+    part_one = _numeric_deliver_pdu_with_udh(udh_seq1, "Hello")
+
+    second_result = await sms_service.ingest_pdu(part_one)
+    await asyncio.sleep(0.01)
+
+    assert second_result is not None
+    assert second_result.sender == "5550123"
+    assert second_result.body == "HelloWorld"
+    assert await store.count() == 1
+    assert len(received) == 1
+    assert received[0].body == "HelloWorld"
+
+
+async def test_ingest_pdu_replay_after_completion_does_not_duplicate_delivery(sms_service, bus, store):
+    """A carrier replay of all parts must not create a second logical incoming SMS."""
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+    part_one = _numeric_deliver_pdu_with_udh(bytes.fromhex("0500037A0201"), "Hello")
+    part_two = _numeric_deliver_pdu_with_udh(bytes.fromhex("0500037A0202"), "World")
+
+    assert await sms_service.ingest_pdu(part_one) is None
+    assert (await sms_service.ingest_pdu(part_two)).body == "HelloWorld"
+    assert await sms_service.ingest_pdu(part_one) is None
+    assert await sms_service.ingest_pdu(part_two) is None
+    await asyncio.sleep(0.01)
+
+    assert await store.count() == 1
+    assert [event.body for event in received] == ["HelloWorld"]
+
+
+def test_pdu_completion_tombstone_expires_after_duplicate_replay(sms_service):
+    """A duplicate cannot keep an expired tombstone hidden behind a newer entry."""
+    first_key = b"1" * 16
+    second_key = b"2" * 16
+    sms_service._pdu_completion_max_age = 1.0
+
+    sms_service._record_pdu_completion(first_key, 0.0)
+    sms_service._record_pdu_completion(second_key, 0.5)
+
+    assert sms_service._has_pdu_completion(first_key, 0.5)
+    assert b"first" not in repr(sms_service._recent_pdu_completions).encode()
+    assert b"body-one" not in repr(sms_service._recent_pdu_completions).encode()
+    assert not sms_service._has_pdu_completion(first_key, 1.1)
+
+
+async def test_ingest_pdu_reassembles_parts_with_distinct_segment_timestamps(sms_service, bus, store):
+    """Concatenated segments retain their shared UDH identity across distinct SCTS values."""
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+    part_one = _numeric_deliver_pdu_with_udh(bytes.fromhex("0500037A0201"), "First")
+    part_two = _numeric_deliver_pdu_with_udh(bytes.fromhex("0500037A0202"), "Second")
+    part_two = part_two[:20] + "52215241030040" + part_two[34:]
+
+    assert await sms_service.ingest_pdu(part_one) is None
+    result = await sms_service.ingest_pdu(part_two)
+    await asyncio.sleep(0.01)
+
+    assert result is not None
+    assert result.body == "FirstSecond"
+    assert await store.count() == 1
+    assert [event.body for event in received] == ["FirstSecond"]
 
 
 # -- Message Management --
