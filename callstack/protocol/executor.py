@@ -84,7 +84,7 @@ def _response_line_for_log(command: str, raw_line: str) -> str:
         return f"{family}:<redacted>"
     if command.startswith(("AT+CMGR", "AT+CMGL")) and not _is_final_result_line(raw_line):
         return "<redacted SMS read response>"
-    if control_line.startswith(("+CMT:", "+CMTI:")):
+    if control_line.startswith(("+CMT:", "+CMTI:", "+CDSI:")):
         return f"{control_line.split(':', 1)[0]}:<redacted>"
     return raw_line
 
