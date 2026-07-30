@@ -559,7 +559,7 @@ class PDUDecoder:
             ts_hex = pdu_hex[pos:pos + 14]
             pos += 14
             timestamp = PDUDecoder.decode_timestamp(ts_hex)
-            if is_alphanumeric_sender and timestamp is None:
+            if timestamp is None:
                 return None
 
             # User data length
