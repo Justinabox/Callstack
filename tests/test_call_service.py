@@ -691,6 +691,60 @@ class TestCallService:
         assert session.direction == "inbound"
         assert service.state == CallState.ACTIVE
 
+    @pytest.mark.parametrize(
+        "target_state,setup_transitions",
+        [
+            (CallState.IDLE, []),
+            (CallState.DIALING, [CallState.DIALING]),
+            (CallState.ACTIVE, [CallState.DIALING, CallState.ACTIVE]),
+            (CallState.ENDED, [CallState.DIALING, CallState.ENDED]),
+        ],
+    )
+    async def test_answer_rejects_outside_ringing_before_ata_write(
+        self, bus, target_state, setup_transitions
+    ):
+        """answer() must fail before any ATA write unless the FSM is RINGING."""
+
+        class RecordingExecutor:
+            def __init__(self):
+                self.calls: list[str] = []
+
+            async def execute(self, command, expect=("OK",), timeout=5.0):
+                self.calls.append(command)
+                return ATResponse(success=True, lines=["OK"])
+
+        class FakeAudio:
+            running = False
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+
+        executor = RecordingExecutor()
+        service = CallService(
+            cast(ATCommandExecutor, executor), cast(AudioPipeline, FakeAudio()), bus
+        )
+        for state in setup_transitions:
+            await service._fsm.transition(state)
+        assert service.state == target_state
+
+        service._pending_caller = "+155****0001"
+        pending_caller_before = service._pending_caller
+        existing_session = CallSession(number="+5559999", direction="inbound", service=service)
+        service._active_call = existing_session
+        service._audio_bridge_registered = True
+
+        with pytest.raises(AnswerError):
+            await service.answer()
+
+        assert executor.calls == []
+        assert service.state == target_state
+        assert service._pending_caller == pending_caller_before
+        assert service.active_call is existing_session
+        assert service._audio_bridge_registered is True
+
     async def test_answer_treats_active_urc_during_ata_as_success(self, bus):
         """VOICE CALL: BEGIN during ATA should not double-transition ACTIVE."""
 

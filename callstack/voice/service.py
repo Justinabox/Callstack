@@ -104,6 +104,8 @@ class CallService:
 
     async def answer(self) -> "CallSession":
         """Answer an incoming call. Returns a CallSession handle."""
+        if self._fsm.state != CallState.RINGING:
+            raise AnswerError(["Cannot answer call outside of RINGING state"])
         logger.info("Answering call from %s", redact_phone_number(self._pending_caller))
         disconnect_generation = self._disconnect_generation
 
