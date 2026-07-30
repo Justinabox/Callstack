@@ -17,7 +17,7 @@ from callstack.errors import SMSPersistenceError, SMSSendError
 from callstack.protocol.executor import ATCommandExecutor, ATResponse
 from callstack.protocol.urc import URCDispatcher
 from callstack.transport.mock import MockTransport
-from callstack.sms.pdu import MultipartInfo, PDUEncoder
+from callstack.sms.pdu import PDUEncoder
 from callstack.sms.service import SMSService
 from callstack.sms.store import SMSStore
 from callstack.sms.types import SMS
@@ -1058,6 +1058,28 @@ async def test_ingest_pdu_single_part_concurrent_replay_persists_and_emits_once(
     assert [event.body for event in received] == ["Race"]
 
 
+async def test_ingest_pdu_deduplicates_exact_replay_without_dropping_distinct_delivery(
+    sms_service, bus, store
+):
+    """A delivery timestamp distinguishes otherwise identical SMS-DELIVER PDUs."""
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+    first_pdu = _numeric_deliver_pdu(sender="5550123", body="Same")
+    second_pdu = first_pdu[:20] + "52215241030040" + first_pdu[34:]
+
+    assert await sms_service.ingest_pdu(first_pdu) is not None
+    assert await sms_service.ingest_pdu(first_pdu) is None
+    assert await sms_service.ingest_pdu(second_pdu) is not None
+    await asyncio.sleep(0.01)
+
+    assert await store.count() == 2
+    assert [event.body for event in received] == ["Same", "Same"]
+
+
 async def test_ingest_pdu_multipart_replay_retries_after_persistence_failure(executor, bus):
     """A failed completed assembly is not tombstoned and can be fully replayed."""
     store = FailOnceSMSStore()
@@ -1082,6 +1104,30 @@ async def test_ingest_pdu_multipart_replay_retries_after_persistence_failure(exe
 
     assert result is not None
     assert result.body == "HelloWorld"
+    assert await store.count() == 1
+    assert [event.body for event in received] == ["HelloWorld"]
+
+
+async def test_ingest_pdu_final_segment_retries_failed_completed_multipart(executor, bus):
+    """The exact final segment retries one failed completed logical delivery."""
+    store = FailOnceSMSStore()
+    service = SMSService(executor, bus, store)
+    received = []
+
+    async def track(event):
+        received.append(event)
+
+    bus.subscribe(IncomingSMSEvent, track)
+    part_one = _numeric_deliver_pdu_with_udh(bytes.fromhex("0500037A0201"), "Hello")
+    part_two = _numeric_deliver_pdu_with_udh(bytes.fromhex("0500037A0202"), "World")
+
+    assert await service.ingest_pdu(part_one) is None
+    assert await service.ingest_pdu(part_two) is None
+    assert "5550123" not in repr(service._failed_multipart_deliveries)
+    assert "HelloWorld" not in repr(service._failed_multipart_deliveries)
+    assert await service.ingest_pdu(part_two) is not None
+    await asyncio.sleep(0.01)
+
     assert await store.count() == 1
     assert [event.body for event in received] == ["HelloWorld"]
 
@@ -1358,17 +1404,17 @@ async def test_ingest_pdu_replay_after_completion_does_not_duplicate_delivery(sm
 
 def test_pdu_completion_tombstone_expires_after_duplicate_replay(sms_service):
     """A duplicate cannot keep an expired tombstone hidden behind a newer entry."""
-    first_info = MultipartInfo(1, 2, 2)
-    second_info = MultipartInfo(2, 2, 2)
+    first_key = b"1" * 16
+    second_key = b"2" * 16
     sms_service._pdu_completion_max_age = 1.0
 
-    sms_service._record_pdu_completion("first", "body-one", first_info, 0.0)
-    sms_service._record_pdu_completion("second", "body-two", second_info, 0.5)
+    sms_service._record_pdu_completion(first_key, 0.0)
+    sms_service._record_pdu_completion(second_key, 0.5)
 
-    assert sms_service._has_pdu_completion("first", "body-one", first_info, 0.5)
-    assert "first" not in repr(sms_service._recent_pdu_completions)
-    assert "body-one" not in repr(sms_service._recent_pdu_completions)
-    assert not sms_service._has_pdu_completion("first", "body-one", first_info, 1.1)
+    assert sms_service._has_pdu_completion(first_key, 0.5)
+    assert b"first" not in repr(sms_service._recent_pdu_completions).encode()
+    assert b"body-one" not in repr(sms_service._recent_pdu_completions).encode()
+    assert not sms_service._has_pdu_completion(first_key, 1.1)
 
 
 async def test_ingest_pdu_reassembles_parts_with_distinct_segment_timestamps(sms_service, bus, store):

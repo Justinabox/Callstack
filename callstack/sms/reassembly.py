@@ -58,12 +58,24 @@ class _PendingGroup:
     total_parts: int
     first_seen: float
     parts: dict[int, str] = field(default_factory=dict)
+    segment_identities: dict[int, bytes] = field(default_factory=dict)
 
     def __repr__(self) -> str:
         return (
             f"_PendingGroup(total_parts={self.total_parts!r}, "
             f"first_seen={self.first_seen!r}, received={len(self.parts)})"
         )
+
+
+@dataclass(frozen=True)
+class CompletedMultipart:
+    """Reassembled payload and opaque per-segment identities."""
+
+    body: str
+    segment_identities: tuple[bytes, ...]
+
+    def __repr__(self) -> str:
+        return f"CompletedMultipart(part_count={len(self.segment_identities)})"
 
 
 class MultipartAccumulator:
@@ -104,10 +116,29 @@ class MultipartAccumulator:
         the expired count is discarded. Call ``expire(now)`` directly if you
         need to observe how many groups were expired.
         """
+        completed = self.add_part_with_identity(sender, info, body, b"", now)
+        return None if completed is None else completed.body
+
+    def add_part_with_identity(
+        self,
+        sender: str,
+        info: MultipartInfo,
+        body: str,
+        segment_identity: bytes,
+        now: float,
+    ) -> Optional[CompletedMultipart]:
+        """Add a part and return the completed body with opaque identities.
+
+        The first identity observed for a sequence wins with its matching body,
+        preserving duplicate-part behavior while giving callers a deterministic
+        identity sequence after out-of-order completion.
+        """
         if not isinstance(sender, str):
             raise ValueError("sender must be a string")
         if not isinstance(body, str):
             raise ValueError("body must be a string")
+        if not isinstance(segment_identity, bytes):
+            raise ValueError("segment_identity must be bytes")
         _validate_multipart_info(info)
         validated_now = _validate_real_number(now, "now")
 
@@ -123,13 +154,19 @@ class MultipartAccumulator:
 
         if info.sequence not in group.parts:
             group.parts[info.sequence] = body
+            group.segment_identities[info.sequence] = segment_identity
 
         if len(group.parts) < group.total_parts:
             return None
 
-        joined = "".join(group.parts[seq] for seq in range(1, group.total_parts + 1))
+        completed = CompletedMultipart(
+            body="".join(group.parts[seq] for seq in range(1, group.total_parts + 1)),
+            segment_identities=tuple(
+                group.segment_identities[seq] for seq in range(1, group.total_parts + 1)
+            ),
+        )
         del self._pending[key]
-        return joined
+        return completed
 
     def expire(self, now: float) -> int:
         """Remove incomplete groups older than max_age; return count removed."""

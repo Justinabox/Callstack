@@ -6,6 +6,7 @@ import logging
 import re
 from collections import OrderedDict
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import blake2s
 from typing import Awaitable, Callable, Optional
@@ -73,6 +74,20 @@ _GSM_TEXT_EXTENDED = {
 }
 
 
+@dataclass
+class _FailedMultipartDelivery:
+    """Bounded retry payload; its repr deliberately excludes all SMS PII."""
+
+    sender: str
+    body: str
+    timestamp: datetime
+    completion_key: bytes
+    failed_at: float
+
+    def __repr__(self) -> str:
+        return "_FailedMultipartDelivery()"
+
+
 class _FilteredStream:
     """Wraps an EventStream to filter incoming SMS events by sender."""
 
@@ -130,6 +145,9 @@ class SMSService:
         self._pdu_completion_max_age = multipart_max_age
         self._pdu_completion_max_groups = multipart_max_groups
         self._recent_pdu_completions: OrderedDict[bytes, float] = OrderedDict()
+        self._failed_multipart_deliveries: OrderedDict[
+            bytes, _FailedMultipartDelivery
+        ] = OrderedDict()
         self._accepted_uncleared_cmti_slots: dict[tuple[str, int], tuple[str, str, str]] = {}
         self._accepted_uncleared_delivery_report_slots: dict[
             tuple[str, int], tuple[int, str, str]
@@ -296,21 +314,23 @@ class SMSService:
             logger.info("Incoming SMS from %s (direct)", redact_phone_number(sender))
 
     @staticmethod
-    def _pdu_completion_key(
-        sender: str, body: str, multipart: Optional[MultipartInfo]
-    ) -> bytes:
-        """Return a fixed-size replay key without retaining SMS content or sender."""
+    def _raw_pdu_identity(pdu_hex: str) -> bytes:
+        """Hash normalized wire identity without retaining a raw PDU."""
+        return blake2s(pdu_hex.upper().encode("ascii"), digest_size=16).digest()
+
+    @staticmethod
+    def _single_pdu_completion_key(raw_pdu_identity: bytes) -> bytes:
+        """Key a single delivery by its complete normalized raw PDU identity."""
+        return blake2s(b"single\0" + raw_pdu_identity, digest_size=16).digest()
+
+    @staticmethod
+    def _multipart_completion_key(segment_identities: tuple[bytes, ...]) -> bytes:
+        """Return a deterministic digest of identities ordered by segment sequence."""
         digest = blake2s(digest_size=16)
-        digest.update(sender.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(body.encode("utf-8"))
-        if multipart is None:
-            digest.update(b"\0single")
-        else:
-            digest.update(
-                bytes((multipart.total_parts, int(multipart.is_16bit)))
-                + multipart.reference.to_bytes(2, "big")
-            )
+        digest.update(b"multipart\0")
+        for sequence, segment_identity in enumerate(segment_identities, start=1):
+            digest.update(sequence.to_bytes(2, "big"))
+            digest.update(segment_identity)
         return digest.digest()
 
     def _expire_pdu_completions(self, now: float) -> None:
@@ -321,18 +341,56 @@ class SMSService:
         ]:
             del self._recent_pdu_completions[key]
 
-    def _has_pdu_completion(
-        self, sender: str, body: str, multipart: Optional[MultipartInfo], now: float
-    ) -> bool:
+    def _has_pdu_completion(self, completion_key: bytes, now: float) -> bool:
         self._expire_pdu_completions(now)
-        return self._pdu_completion_key(sender, body, multipart) in self._recent_pdu_completions
+        return completion_key in self._recent_pdu_completions
 
-    def _record_pdu_completion(
-        self, sender: str, body: str, multipart: Optional[MultipartInfo], now: float
-    ) -> None:
-        self._recent_pdu_completions[self._pdu_completion_key(sender, body, multipart)] = now
+    def _record_pdu_completion(self, completion_key: bytes, now: float) -> None:
+        self._recent_pdu_completions[completion_key] = now
         while len(self._recent_pdu_completions) > self._pdu_completion_max_groups:
             self._recent_pdu_completions.popitem(last=False)
+
+    def _expire_failed_multipart_deliveries(self, now: float) -> None:
+        cutoff = now - self._pdu_completion_max_age
+        for raw_pdu_identity in [
+            raw_pdu_identity
+            for raw_pdu_identity, delivery in self._failed_multipart_deliveries.items()
+            if delivery.failed_at <= cutoff
+        ]:
+            del self._failed_multipart_deliveries[raw_pdu_identity]
+
+    def _record_failed_multipart_delivery(
+        self,
+        raw_pdu_identity: bytes,
+        sender: str,
+        body: str,
+        timestamp: datetime,
+        completion_key: bytes,
+        now: float,
+    ) -> None:
+        self._failed_multipart_deliveries[raw_pdu_identity] = _FailedMultipartDelivery(
+            sender=sender,
+            body=body,
+            timestamp=timestamp,
+            completion_key=completion_key,
+            failed_at=now,
+        )
+        while len(self._failed_multipart_deliveries) > self._pdu_completion_max_groups:
+            self._failed_multipart_deliveries.popitem(last=False)
+
+    async def _persist_pdu_delivery(
+        self, sender: str, body: str, timestamp: datetime, completion_key: bytes
+    ) -> Optional[SMS]:
+        sms = SMS(sender=sender, body=body, status="unread", timestamp=timestamp)
+        try:
+            await self._store.save(sms)
+        except Exception as exc:
+            logger.warning("Failed to persist direct PDU delivery (%s)", type(exc).__name__)
+            return None
+        self._record_pdu_completion(completion_key, asyncio.get_running_loop().time())
+        await self._bus.emit(IncomingSMSEvent(sender=sender, body=body))
+        logger.info("Incoming PDU SMS")
+        return sms
 
     async def ingest_pdu(self, pdu_hex: str) -> Optional[SMS]:
         """Ingest a raw SMS-DELIVER PDU string, persisting a completed SMS.
@@ -353,6 +411,7 @@ class SMSService:
             logger.warning("Rejected malformed or unsupported inbound PDU")
             return None
 
+        raw_pdu_identity = self._raw_pdu_identity(pdu_hex)
         decoded = PDUDecoder.decode_deliver_pdu(pdu_hex)
         if decoded is None:
             logger.warning("Rejected malformed or unsupported inbound PDU")
@@ -365,46 +424,56 @@ class SMSService:
         async with self._multipart_lock:
             sender = decoded["sender"]
             multipart = decoded.get("multipart")
+            now = asyncio.get_running_loop().time()
             if multipart is not None:
-                now = asyncio.get_running_loop().time()
+                self._expire_failed_multipart_deliveries(now)
+                failed_delivery = self._failed_multipart_deliveries.get(raw_pdu_identity)
+                if failed_delivery is not None:
+                    if self._has_pdu_completion(failed_delivery.completion_key, now):
+                        del self._failed_multipart_deliveries[raw_pdu_identity]
+                        return None
+                    sms = await self._persist_pdu_delivery(
+                        failed_delivery.sender,
+                        failed_delivery.body,
+                        failed_delivery.timestamp,
+                        failed_delivery.completion_key,
+                    )
+                    if sms is not None:
+                        del self._failed_multipart_deliveries[raw_pdu_identity]
+                    return sms
                 try:
-                    body = self._multipart_accumulator.add_part(
+                    completed = self._multipart_accumulator.add_part_with_identity(
                         sender,
                         multipart,
                         decoded["body"],
+                        raw_pdu_identity,
                         now,
                     )
                 except ValueError:
                     logger.warning("Rejected inbound PDU with invalid multipart metadata")
                     return None
-                if body is None:
+                if completed is None:
                     return None
+                body = completed.body
+                completion_key = self._multipart_completion_key(completed.segment_identities)
             else:
                 body = decoded["body"]
-                now = asyncio.get_running_loop().time()
+                completion_key = self._single_pdu_completion_key(raw_pdu_identity)
 
-            if self._has_pdu_completion(sender, body, multipart, now):
+            if self._has_pdu_completion(completion_key, now):
                 return None
-
-            sms = SMS(
-                sender=sender,
-                body=body,
-                status="unread",
-                timestamp=decoded["timestamp"],
+            sms = await self._persist_pdu_delivery(
+                sender, body, decoded["timestamp"], completion_key
             )
-            try:
-                await self._store.save(sms)
-            except Exception as exc:
-                logger.warning("Failed to persist direct PDU delivery (%s)", type(exc).__name__)
-                return None
-            self._record_pdu_completion(
-                sender,
-                body,
-                multipart,
-                asyncio.get_running_loop().time(),
-            )
-            await self._bus.emit(IncomingSMSEvent(sender=sender, body=body))
-            logger.info("Incoming PDU SMS")
+            if sms is None and multipart is not None:
+                self._record_failed_multipart_delivery(
+                    raw_pdu_identity,
+                    sender,
+                    body,
+                    decoded["timestamp"],
+                    completion_key,
+                    now,
+                )
             return sms
 
     @staticmethod
