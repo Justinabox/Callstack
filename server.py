@@ -484,7 +484,10 @@ async def run_server(
         # -- Call handling: auto-answer, play greeting, hang up --
         @modem.on_call
         async def handle_call(session: CallSession) -> None:
-            logger.info("Incoming call from %s — playing greeting", session.number)
+            logger.info(
+                "Incoming call from %s — playing greeting",
+                redact_phone_number(session.number),
+            )
             await session.play(AUDIO_GREET)
             await session.hangup()
             logger.info("Call ended")
