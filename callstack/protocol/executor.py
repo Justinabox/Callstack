@@ -64,6 +64,8 @@ def _command_for_log(command: str) -> str:
     """Return a privacy-safe command representation for logs/errors."""
     if _is_sensitive_command_line(command):
         return "AT+CPIN=<redacted>"
+    if command.upper().startswith("ATD") and command.endswith(";"):
+        return "ATD<redacted>;"
     return command
 
 

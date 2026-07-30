@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import math
 import wave
 from typing import cast
 import pytest
@@ -435,6 +436,48 @@ class TestCallService:
         assert service.state == CallState.DIALING
         assert "ATD5551234;" in at_transport.last_written
 
+    async def test_dial_zero_timeout_fails_before_atd_write(self, service, at_transport):
+        with pytest.raises(ValueError, match="Invalid dial timeout"):
+            await service.dial("5551234", timeout=0)
+
+        assert at_transport.last_written == ""
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
+
+    @pytest.mark.parametrize(
+        "timeout",
+        [0, -1, True, math.nan, math.inf, -math.inf, "not-a-timeout"],
+    )
+    async def test_dial_invalid_timeout_fails_before_executor_call(self, bus, timeout):
+        class RecordingExecutor:
+            def __init__(self):
+                self.calls = []
+
+            async def execute(self, command, **kwargs):
+                self.calls.append(command)
+                raise AssertionError("timeout validation should run before modem writes")
+
+        class FakeAudio:
+            running = False
+
+            async def start(self):
+                self.running = True
+
+            async def stop(self):
+                self.running = False
+
+        executor = RecordingExecutor()
+        service = CallService(
+            cast(ATCommandExecutor, executor), cast(AudioPipeline, FakeAudio()), bus
+        )
+
+        with pytest.raises(ValueError, match="Invalid dial timeout"):
+            await service.dial("5551234", timeout=timeout)
+
+        assert executor.calls == []
+        assert service.state == CallState.IDLE
+        assert service.active_call is None
+
     @pytest.mark.parametrize(
         "number",
         ["12+34", "++123", "+123#", "*", "#", "*123", "#123#", "*1##", "**123#"],
@@ -483,6 +526,30 @@ class TestCallService:
 
         assert number not in caplog.text
         assert "Dialing" in caplog.text
+
+    async def test_dial_executor_debug_log_redacts_outbound_number(
+        self, service, at_transport, caplog
+    ):
+        """Successful dials must not expose their ATD destination at executor DEBUG."""
+        number = "5550100"
+        command = f"ATD{number};"
+
+        async def respond():
+            await asyncio.sleep(0.01)
+            at_transport.feed("OK")
+
+        asyncio.create_task(respond())
+
+        # Keep coverage for the protocol logger namespace while enabling the
+        # executor's currently configured logger namespace.
+        with caplog.at_level(logging.DEBUG, logger="callstack.protocol.executor"):
+            with caplog.at_level(logging.DEBUG, logger="callstack.executor"):
+                session = await service.dial(number)
+
+        assert session.number == number
+        assert session.direction == "outbound"
+        assert command not in caplog.text
+        assert number not in caplog.text
 
     async def test_inbound_call_info_logs_redact_caller_number(self, service, bus, at_transport, caplog):
         """Inbound caller logs must not expose the raw caller number."""
