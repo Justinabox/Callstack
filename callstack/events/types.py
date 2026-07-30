@@ -42,6 +42,9 @@ class IncomingSMSEvent(Event):
     sender: str = ""
     body: str = ""
     raw: str = ""
+    # Direct +CMT delivery may still be emitted after a local-store failure so
+    # subscribers can handle it; callers can retain a bounded fallback record.
+    persisted: bool = True
 
 
 @dataclass(frozen=True)
